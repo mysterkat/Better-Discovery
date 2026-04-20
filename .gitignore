@@ -1,0 +1,32 @@
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.log
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/binaries/python/*
+!src-tauri/binaries/python/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.mypy_cache/
+.pytest_cache/
+
+# User data (portable; contents are user-owned)
+userdata/**
+!userdata/.gitkeep
+!userdata/themes/.gitkeep
+!userdata/recent/.gitkeep
+!userdata/cache/.gitkeep
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
