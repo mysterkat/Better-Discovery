@@ -14,8 +14,10 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+venv/
 .mypy_cache/
 .pytest_cache/
+.ruff_cache/
 
 # User data (portable; contents are user-owned)
 userdata/**

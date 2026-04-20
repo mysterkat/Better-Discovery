@@ -1,0 +1,9 @@
+[project]
+name = "better-discovery-backend"
+version = "0.1.0"
+description = "FastAPI sidecar for the BETTER DISCOVERY Tauri app."
+requires-python = ">=3.11,<3.12"
+readme = "../README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
