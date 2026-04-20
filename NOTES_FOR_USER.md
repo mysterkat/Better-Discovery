@@ -33,7 +33,51 @@ The module imports `MetaTrader5` and talks to a running MT5 terminal. Useful
 to know for the Data Import tab: histdata import will only work on a machine
 with MT5 installed and logged in. CSV import works without MT5.
 
-## 4. Python version
+## 4. **BLOCKER: Windows SDK not installed (needed for `tauri dev`)**
+
+Phase 4 code is complete — Rust sources parse, `tauri.conf.json` validates,
+`cargo check` pulls the dep graph — but the final link step fails:
+
+```
+error: linking with `link.exe` failed: exit code: 1
+note: in the Visual Studio installer, ensure the "C++ build tools" workload
+      is selected
+```
+
+Diagnosis:
+- Rust toolchain: `stable-x86_64-pc-windows-msvc` (default).
+- Visual Studio 2022 Community is installed at
+  `C:\Program Files\Microsoft Visual Studio\2022\Community\`.
+- MSVC toolset present: `VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\link.exe`.
+- But no Windows SDK is installed — neither `C:\Program Files (x86)\Windows Kits\10\`
+  nor the matching registry keys exist. Without the SDK, `link.exe` cannot find
+  `kernel32.lib`, `user32.lib`, etc., which every Tauri build needs.
+- A stray `C:\Program Files\Git\usr\bin\link.exe` (Git's symlink tool, not
+  Microsoft's linker) sits earlier on PATH than MSVC — not the root cause, but
+  will need `vcvars64.bat` to be sourced first even after the SDK lands.
+
+**Fix (one-time, user action required):**
+1. Open the Visual Studio Installer.
+2. Modify the VS 2022 Community install.
+3. Under "Workloads" select **Desktop development with C++** — this pulls in
+   the Windows 10/11 SDK + MSVC build tools + CMake as a set.
+4. Install.
+5. Verify: `where.exe cl.exe` in a new shell should resolve to
+   `...\VC\Tools\MSVC\14.x\bin\Hostx64\x64\cl.exe`.
+6. Re-run Phase 4 check: from `src-tauri/` run
+   `cmd /c '"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" && cargo check'`.
+   Should succeed. Then `npm run tauri -- dev` from the repo root.
+
+Until then Phase 4 cannot finish its own acceptance check
+("`pnpm tauri dev` opens a blank window"). Everything else is written,
+committed, and verified as far as possible without a linker:
+- `npm install` succeeded (71 packages, Tauri CLI 2.10.1).
+- `npm run build` succeeds (TS strict + Vite) — the frontend bundle builds.
+- Rust sources parse cleanly; unresolved-import errors when rustc is invoked
+  standalone are expected (tauri/serde are cargo deps).
+- `cargo check` failed only at link-time.
+
+## 5. Python version
 
 The embedded runtime target is Python 3.11 (per brief). Dev smoke runs used
 the user's system Python 3.14 in a local `.venv` with fastapi/uvicorn/pydantic
