@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # and creating userdata/. Do this before any bridge import.
 from . import paths  # noqa: F401
 from .config import CONFIG
-from .routers import health
+from .routers import data, discovery, health, mc, mql, settings as settings_router
 
 app = FastAPI(
     title="BETTER DISCOVERY backend",
@@ -34,6 +34,11 @@ if CONFIG.dev_origin:
     )
 
 app.include_router(health.router, tags=["health"])
+app.include_router(data.router, tags=["data"])
+app.include_router(discovery.router, tags=["discovery"])
+app.include_router(mc.router, tags=["mc"])
+app.include_router(mql.router, tags=["mql"])
+app.include_router(settings_router.router, tags=["settings"])
 
 
 def main() -> None:
