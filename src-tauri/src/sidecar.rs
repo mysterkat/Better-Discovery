@@ -2,9 +2,12 @@
 //!
 //! - Picks a free 127.0.0.1 port via TcpListener(:0), drops it, passes to uvicorn.
 //! - Pipes child stdout/stderr into our stderr with a `[sidecar ...]` prefix.
-//! - Watches output for the "Uvicorn running on" marker; on match emits the
-//!   `backend-ready` Tauri event with the port.
+//! - Watches output for the "Uvicorn running on" or "Application startup complete"
+//!   marker; on match emits the `backend-ready` Tauri event with the port.
 //! - Stores the Child handle in AppState so we can kill it on shutdown.
+//!
+//! Phase 8: uses `app.path().resource_dir()` to support production bundles where
+//! the backend and embedded Python live inside the Tauri resource directory.
 
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
@@ -14,7 +17,7 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::paths::{app_root, resolve_python_exe};
+use crate::paths::{app_root, resolve_backend_dir, resolve_python_exe};
 
 #[derive(Default)]
 pub struct AppState {
@@ -28,12 +31,16 @@ pub struct BackendReady {
 }
 
 pub fn spawn(app: AppHandle) -> Result<(), String> {
+    // Tauri resource directory — Some in production (installer), may error in dev.
+    let resource_dir = app.path().resource_dir().ok();
+
     let root = app_root().ok_or("could not resolve app root")?;
-    let backend_dir = root.join("backend");
-    if !backend_dir.is_dir() {
-        return Err(format!("backend dir missing: {}", backend_dir.display()));
-    }
-    let python = resolve_python_exe(&root);
+
+    let backend_dir =
+        resolve_backend_dir(&root, resource_dir.as_deref())
+            .ok_or_else(|| format!("backend dir not found (root={})", root.display()))?;
+
+    let python = resolve_python_exe(&root, resource_dir.as_deref());
     let port = reserve_port()?;
 
     eprintln!(
@@ -43,10 +50,28 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
         port
     );
 
-    let mut child = Command::new(&python)
-        .current_dir(&backend_dir)
+    // Build environment: make sure embedded Python can find its own site-packages
+    // when the runtime was installed by setup_embedded_python.ps1.
+    let mut cmd = Command::new(&python);
+    cmd.current_dir(&backend_dir)
         .env("BD_BACKEND_PORT", port.to_string())
-        .env("PYTHONUNBUFFERED", "1")
+        .env("PYTHONUNBUFFERED", "1");
+
+    // If the python exe lives inside our embedded runtime, add its
+    // site-packages to PYTHONPATH so uvicorn finds all installed wheels.
+    if let Some(py_dir) = python.parent() {
+        let site_pkgs = py_dir.join("Lib").join("site-packages");
+        if site_pkgs.is_dir() {
+            let existing = std::env::var("PYTHONPATH").unwrap_or_default();
+            let sep = if existing.is_empty() { "" } else { ";" };
+            cmd.env(
+                "PYTHONPATH",
+                format!("{}{sep}{}", site_pkgs.display(), existing),
+            );
+        }
+    }
+
+    let mut child = cmd
         .args([
             "-u",
             "-m",

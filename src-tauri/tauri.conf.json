@@ -40,8 +40,19 @@
     "category": "DeveloperTool",
     "shortDescription": "Monte Carlo + pattern discovery desktop app",
     "longDescription": "Standalone desktop app wrapping the MONTE CARLO toolkit.",
-    "resources": [],
     "copyright": "",
-    "publisher": "BETTER DISCOVERY"
+    "publisher": "BETTER DISCOVERY",
+    "resources": {
+      "../backend": "backend",
+      "binaries/python": "python"
+    },
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false,
+        "installMode": "currentUser",
+        "languages": ["English"]
+      },
+      "wix": {}
+    }
   }
 }
