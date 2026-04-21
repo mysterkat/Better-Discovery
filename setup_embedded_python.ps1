@@ -23,7 +23,11 @@
 #>
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+# NOTE: do NOT use ErrorActionPreference = Stop here.
+# In PS 5.1, native exe stderr lines become NativeCommandError objects
+# when piped, and Stop would abort the script on any diagnostic output.
+# We check $LASTEXITCODE explicitly after each native call instead.
+$ErrorActionPreference = 'Continue'
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -39,19 +43,24 @@ $TempZip     = Join-Path $env:TEMP $PY_ZIP_NAME
 $TempGetPip  = Join-Path $env:TEMP "get-pip.py"
 
 # ---------------------------------------------------------------------------
-# Helper functions (ASCII-only to avoid encoding issues on PS 5.1)
+# Helper functions
 # ---------------------------------------------------------------------------
 function Write-Step([string]$msg) {
     Write-Host ""
     Write-Host "  >> $msg" -ForegroundColor Cyan
 }
-
 function Write-Ok([string]$msg) {
     Write-Host "     [OK] $msg" -ForegroundColor Green
 }
-
 function Write-Warn([string]$msg) {
     Write-Host "     [!!] $msg" -ForegroundColor Yellow
+}
+function Assert-Exit([string]$label) {
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "  [FAILED] $label exited with code $LASTEXITCODE" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -73,7 +82,6 @@ if (Test-Path $existingPython) {
         Write-Host "  Aborted." -ForegroundColor Yellow
         exit 0
     }
-    # Remove existing installation but keep .gitkeep
     Get-ChildItem -Path $PythonDir -Exclude ".gitkeep" |
         Remove-Item -Recurse -Force
 }
@@ -83,7 +91,7 @@ if (Test-Path $existingPython) {
 # ---------------------------------------------------------------------------
 Write-Step "Downloading Python $PY_VERSION embeddable package..."
 if (Test-Path $TempZip) {
-    Write-Warn "Cached zip found at $TempZip -- skipping download."
+    Write-Warn "Cached zip found -- skipping download."
 } else {
     Invoke-WebRequest -Uri $PY_URL -OutFile $TempZip -UseBasicParsing
     Write-Ok "Downloaded $PY_ZIP_NAME"
@@ -103,9 +111,9 @@ Write-Step "Enabling site-packages..."
 $pthFile = Get-ChildItem -Path $PythonDir -Filter "python*._pth" |
            Select-Object -First 1
 if ($null -eq $pthFile) {
-    throw "Could not find python*._pth in $PythonDir"
+    Write-Host "  [FAILED] Could not find python*._pth in $PythonDir" -ForegroundColor Red
+    exit 1
 }
-
 $pthContent = Get-Content $pthFile.FullName -Raw
 if ($pthContent -match '#import site') {
     $pthContent = $pthContent -replace '#import site', 'import site'
@@ -117,17 +125,25 @@ if ($pthContent -match '#import site') {
 
 # ---------------------------------------------------------------------------
 # 4. Install pip
+#    Run python from ITS OWN directory so it resolves python311.zip correctly.
 # ---------------------------------------------------------------------------
 Write-Step "Installing pip..."
 Invoke-WebRequest -Uri $GET_PIP_URL -OutFile $TempGetPip -UseBasicParsing
-& $existingPython $TempGetPip --no-warn-script-location 2>&1 | Out-Null
+
+Push-Location $PythonDir
+& ".\python.exe" $TempGetPip --no-warn-script-location
+Pop-Location
+Assert-Exit "get-pip.py"
 Write-Ok "pip installed"
 
 # ---------------------------------------------------------------------------
 # 5. Upgrade pip / setuptools / wheel
 # ---------------------------------------------------------------------------
 Write-Step "Upgrading pip, setuptools, wheel..."
-& $existingPython -m pip install --upgrade pip setuptools wheel --quiet
+Push-Location $PythonDir
+& ".\python.exe" -m pip install --upgrade pip setuptools wheel
+Pop-Location
+Assert-Exit "pip upgrade"
 Write-Ok "Done"
 
 # ---------------------------------------------------------------------------
@@ -135,7 +151,10 @@ Write-Ok "Done"
 # ---------------------------------------------------------------------------
 Write-Step "Installing backend requirements (FastAPI, uvicorn, pydantic, ...)..."
 $ReqFile = Join-Path $ScriptDir "backend\requirements.txt"
-& $existingPython -m pip install -r $ReqFile --quiet
+Push-Location $PythonDir
+& ".\python.exe" -m pip install -r $ReqFile
+Pop-Location
+Assert-Exit "pip install -r requirements.txt"
 Write-Ok "Backend requirements installed"
 
 # ---------------------------------------------------------------------------
@@ -150,24 +169,29 @@ $McPackages = @(
     "beautifulsoup4>=4.12",
     "lxml>=5.0"
 )
+Push-Location $PythonDir
 foreach ($pkg in $McPackages) {
-    & $existingPython -m pip install $pkg --quiet
+    & ".\python.exe" -m pip install $pkg
+    Assert-Exit "pip install $pkg"
     Write-Ok $pkg
 }
+Pop-Location
 
 # ---------------------------------------------------------------------------
 # 8. Verify key imports
 # ---------------------------------------------------------------------------
 Write-Step "Verifying key imports..."
 $checks = @("fastapi", "uvicorn", "numpy", "pandas", "plotly", "scipy", "sklearn", "bs4")
+Push-Location $PythonDir
 foreach ($mod in $checks) {
-    $result = & $existingPython -c "import $mod; print('ok')" 2>&1
-    if ($result -eq 'ok') {
+    $result = & ".\python.exe" -c "import $mod; print('ok')" 2>&1
+    if ("$result".Trim() -eq 'ok') {
         Write-Ok $mod
     } else {
         Write-Warn "${mod}: $result"
     }
 }
+Pop-Location
 
 # ---------------------------------------------------------------------------
 # 9. Summary
