@@ -117,7 +117,14 @@ if ($null -eq $pthFile) {
 $pthContent = Get-Content $pthFile.FullName -Raw
 if ($pthContent -match '#import site') {
     $pthContent = $pthContent -replace '#import site', 'import site'
-    Set-Content -Path $pthFile.FullName -Value $pthContent -Encoding UTF8
+    # ASCII encoding - avoids the UTF-8 BOM that PS 5.1 adds with -Encoding UTF8.
+    # A BOM (\ufeff) prepended to "python311.zip" makes Python look for a file
+    # literally named "\ufeffpython311.zip" and fail with ModuleNotFoundError.
+    [System.IO.File]::WriteAllText(
+        $pthFile.FullName,
+        $pthContent,
+        [System.Text.UTF8Encoding]::new($false)   # $false = no BOM
+    )
     Write-Ok "Patched $($pthFile.Name)"
 } else {
     Write-Ok "$($pthFile.Name) already has 'import site' enabled"
