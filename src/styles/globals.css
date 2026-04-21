@@ -536,3 +536,107 @@ kbd {
   background: var(--bg3);
   color: var(--text2);
 }
+
+/* ── Phase 7: 2D | 3D toggle ───────────────────────────────────────── */
+.results-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+}
+.results-header h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+}
+.results-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg3);
+}
+.toggle-btn {
+  padding: 5px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: transparent;
+  border: none;
+  color: var(--text2);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.toggle-btn:hover { background: var(--bg); color: var(--text); }
+.toggle-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+.toggle-btn:first-child { border-right: 1px solid var(--border); }
+
+/* ── Chart containers ──────────────────────────────────────────────── */
+.charts-2d-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 20px 20px;
+}
+.charts-2d-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 860px) {
+  .charts-2d-row { grid-template-columns: 1fr; }
+}
+
+.charts-3d-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));
+  gap: 20px;
+  padding: 0 20px 24px;
+}
+@media (max-width: 640px) {
+  .charts-3d-grid { grid-template-columns: 1fr; }
+}
+
+.chart-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.chart-card-label {
+  padding: 10px 16px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text2);
+  border-bottom: 1px solid var(--border);
+}
+.chart-placeholder {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text2);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* ── Section sub-label ─────────────────────────────────────────────── */
+.section-label-sub {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text2);
+}
