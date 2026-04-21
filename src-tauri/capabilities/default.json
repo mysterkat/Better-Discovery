@@ -1,12 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window.",
+  "description": "Default capability for the main window and all result windows.",
   "windows": ["main", "mc-results-*", "discovery-results-*", "mql-results-*"],
   "permissions": [
     "core:default",
     "core:event:default",
     "core:window:default",
-    "core:webview:default"
+    "core:window:allow-create",
+    "core:webview:default",
+    "core:webview:allow-create-webview-window"
   ]
 }
