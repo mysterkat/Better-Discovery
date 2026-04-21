@@ -38,7 +38,9 @@ $PY_URL      = "https://www.python.org/ftp/python/$PY_VERSION/$PY_ZIP_NAME"
 $GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PythonDir   = Join-Path $ScriptDir "src-tauri\binaries\python"
+# Install Python to a persistent LocalAppData location so it survives
+# reinstalls without needing to be bundled inside the NSIS installer.
+$PythonDir   = Join-Path $env:LOCALAPPDATA "BETTER DISCOVERY\python"
 $TempZip     = Join-Path $env:TEMP $PY_ZIP_NAME
 $TempGetPip  = Join-Path $env:TEMP "get-pip.py"
 

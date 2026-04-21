@@ -1,8 +1,8 @@
 """Filesystem + sys.path anchoring for the backend.
 
 Rules:
-- The existing MONTE CARLO/src tree is READ-ONLY. We only prepend it to
-  sys.path so bridge modules can import from it.
+- The MONTE CARLO toolkit is bundled under backend/toolkit/ so the app is
+  fully self-contained. We prepend that directory to sys.path.
 - All app-writable state lives under userdata/ (Desktop dev) or
   %APPDATA%/BETTER DISCOVERY/ (production installer).
 """
@@ -13,11 +13,20 @@ import os
 import sys
 from pathlib import Path
 
-# Existing toolkit (read-only). Path is fixed per the delivery brief.
+_THIS_FILE_EARLY = Path(__file__).resolve()
+
+# Bundled toolkit — backend/toolkit/ relative to this file's backend/app/ location.
+TOOLKIT_DIR = _THIS_FILE_EARLY.parents[1] / "toolkit"
+
+# Fallback: original MONTE CARLO location (dev convenience, optional).
 EXISTING_SRC = Path(r"C:\Users\micha\Desktop\MONTE CARLO\src")
 
-if EXISTING_SRC.is_dir() and str(EXISTING_SRC) not in sys.path:
-    sys.path.insert(0, str(EXISTING_SRC))
+# Prefer the bundled toolkit; fall back to external path if toolkit missing.
+_toolkit_path = TOOLKIT_DIR if TOOLKIT_DIR.is_dir() else (
+    EXISTING_SRC if EXISTING_SRC.is_dir() else None
+)
+if _toolkit_path and str(_toolkit_path) not in sys.path:
+    sys.path.insert(0, str(_toolkit_path))
 
 # ── App root resolution ────────────────────────────────────────────────────────
 # paths.py is at: <root>/backend/app/paths.py   (dev)
@@ -27,8 +36,7 @@ if EXISTING_SRC.is_dir() and str(EXISTING_SRC) not in sys.path:
 # In production: parents[2] == resources/  (Tauri resource dir)
 #                parents[3] == <install dir>
 
-_THIS_FILE = Path(__file__).resolve()
-APP_ROOT = _THIS_FILE.parents[2]
+APP_ROOT = _THIS_FILE_EARLY.parents[2]
 
 # ── User-data directory ────────────────────────────────────────────────────────
 # For production installs under Program Files (which is read-only without
@@ -69,4 +77,4 @@ USER_DATA = _resolve_userdata()
 
 
 def existing_src_available() -> bool:
-    return EXISTING_SRC.is_dir()
+    return _toolkit_path is not None

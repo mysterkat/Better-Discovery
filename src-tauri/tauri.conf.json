@@ -43,8 +43,7 @@
     "copyright": "",
     "publisher": "BETTER DISCOVERY",
     "resources": {
-      "../backend": "backend",
-      "binaries/python": "python"
+      "../backend": "backend"
     },
     "windows": {
       "nsis": {

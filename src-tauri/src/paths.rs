@@ -58,7 +58,19 @@ pub fn resolve_python_exe(root: &Path, resource_dir: Option<&Path>) -> PathBuf {
         }
     }
 
-    // Production: embedded runtime bundled as a Tauri resource.
+    // Production: runtime installed to %LOCALAPPDATA%\BETTER DISCOVERY\python\
+    // by setup_embedded_python.ps1 — not bundled inside the installer.
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let p = PathBuf::from(local)
+            .join("BETTER DISCOVERY")
+            .join("python")
+            .join("python.exe");
+        if p.exists() {
+            return p;
+        }
+    }
+
+    // Fallback: embedded runtime bundled as a Tauri resource (legacy).
     if let Some(rd) = resource_dir {
         let p = rd.join("python").join("python.exe");
         if p.exists() {
