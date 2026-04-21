@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capability for the main window.","local":true,"windows":["main","mc-results-*","discovery-results-*","mql-results-*"],"permissions":["core:default","core:event:default","core:window:default","core:webview:default"]}}

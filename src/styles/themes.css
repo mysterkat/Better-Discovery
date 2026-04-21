@@ -1,0 +1,72 @@
+/* ══════════════════════════════════════════════════════════════════
+   BETTER DISCOVERY  —  Theme tokens (CSS custom properties)
+   Applied via  data-theme="<name>"  on <html>.
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── Dark (default) ──────────────────────────────────────────────── */
+[data-theme="dark"] {
+  --bg:            #0b0f17;
+  --bg2:           #161b22;
+  --bg3:           #21262d;
+  --border:        #30363d;
+  --text:          #e6edf3;
+  --text2:         #8b949e;
+  --accent:        #238636;
+  --accent2:       #1f6feb;
+  --danger:        #da3633;
+  --warn:          #d29922;
+  --sidebar-bg:    #0d1117;
+  --sidebar-border:#21262d;
+  --scrollbar:     #30363d;
+}
+
+/* ── Light ───────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg:            #ffffff;
+  --bg2:           #f6f8fa;
+  --bg3:           #eaeef2;
+  --border:        #d0d7de;
+  --text:          #1f2328;
+  --text2:         #636c76;
+  --accent:        #2da44e;
+  --accent2:       #0969da;
+  --danger:        #cf222e;
+  --warn:          #9a6700;
+  --sidebar-bg:    #f6f8fa;
+  --sidebar-border:#d0d7de;
+  --scrollbar:     #d0d7de;
+}
+
+/* ── Midnight Blue ───────────────────────────────────────────────── */
+[data-theme="midnight-blue"] {
+  --bg:            #0a0e1a;
+  --bg2:           #0f1629;
+  --bg3:           #152040;
+  --border:        #1e3050;
+  --text:          #c8d8f0;
+  --text2:         #6a85b0;
+  --accent:        #3d8bff;
+  --accent2:       #00c9a7;
+  --danger:        #ff5c5c;
+  --warn:          #f0b429;
+  --sidebar-bg:    #08101f;
+  --sidebar-border:#1a2940;
+  --scrollbar:     #1e3050;
+}
+
+/* ── Custom — tokens injected from userdata/settings.json ────────── */
+[data-theme="custom"] {
+  --bg:            var(--custom-bg,            #0b0f17);
+  --bg2:           var(--custom-bg2,           #161b22);
+  --bg3:           var(--custom-bg3,           #21262d);
+  --border:        var(--custom-border,        #30363d);
+  --text:          var(--custom-text,          #e6edf3);
+  --text2:         var(--custom-text2,         #8b949e);
+  --accent:        var(--custom-accent,        #238636);
+  --accent2:       var(--custom-accent2,       #1f6feb);
+  --danger:        var(--custom-danger,        #da3633);
+  --warn:          var(--custom-warn,          #d29922);
+  --sidebar-bg:    var(--custom-sidebar-bg,    #0d1117);
+  --sidebar-border:var(--custom-sidebar-border,#21262d);
+  --scrollbar:     var(--custom-scrollbar,     #30363d);
+}

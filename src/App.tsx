@@ -1,61 +1,77 @@
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
-type BackendStatus = "waiting" | "ready" | "standalone";
+import Sidebar from "./components/Sidebar";
+import SettingsPanel from "./components/SettingsPanel";
+import { TABS, type TabId } from "./router";
+import { useSettings } from "./state/settings";
+import { resetPort } from "./api/client";
 
-// Phase 4: blank shell that surfaces sidecar readiness. UI comes in Phase 5+.
 export default function App() {
-  const [port, setPort] = useState<number | null>(null);
-  const [status, setStatus] = useState<BackendStatus>("waiting");
+  const [activeTab, setActiveTab] = useState<TabId>("data-import");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [backendReady, setBackendReady] = useState(false);
+
+  const loadSettings = useSettings((s) => s.load);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
-    (async () => {
+
+    const init = async () => {
       try {
         unlisten = await listen<{ port: number }>("backend-ready", (e) => {
-          setPort(e.payload.port);
-          setStatus("ready");
+          resetPort(e.payload.port);
+          setBackendReady(true);
+          loadSettings();
         });
-        // If the event already fired before we mounted, pull the current port.
-        const current = await invoke<number | null>("get_backend_port");
-        if (current != null) {
-          setPort(current);
-          setStatus("ready");
+        // Already running before we mounted — pick up the live port.
+        const port = await invoke<number | null>("get_backend_port");
+        if (port != null) {
+          resetPort(port);
+          setBackendReady(true);
+          loadSettings();
         }
       } catch {
-        // Running outside Tauri (plain `vite dev`); no sidecar.
-        setStatus("standalone");
+        // Running outside the Tauri shell (plain `vite dev`).
+        // Connect via fallback port defined in api/client.ts.
+        setBackendReady(true);
+        loadSettings();
       }
-    })();
+    };
+
+    init();
     return () => {
       if (unlisten) unlisten();
     };
-  }, []);
+  }, [loadSettings]);
+
+  const activeTabDef = TABS.find((t) => t.id === activeTab);
 
   return (
-    <main
-      style={{
-        fontFamily: "system-ui, sans-serif",
-        background: "#0b0f17",
-        color: "#e6edf3",
-        minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexDirection: "column",
-        gap: "0.5rem",
-      }}
-    >
-      <h1 style={{ margin: 0, fontSize: "1.25rem", letterSpacing: "0.05em" }}>
-        BETTER DISCOVERY
-      </h1>
-      <p style={{ margin: 0, fontSize: "0.9rem", opacity: 0.7 }}>
-        {status === "waiting" && "waiting for backend..."}
-        {status === "ready" && `backend on port ${port}`}
-        {status === "standalone" &&
-          "running in browser (no Tauri shell); start via `npm run tauri dev`"}
-      </p>
-    </main>
+    <div className="app-shell">
+      <Sidebar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        onSettings={() => setSettingsOpen(true)}
+      />
+
+      <main className="main-content">
+        {!backendReady && (
+          <p className="backend-wait">Connecting to backend…</p>
+        )}
+
+        {backendReady && activeTabDef && (
+          <Suspense fallback={<p className="tab-loading">Loading…</p>}>
+            <activeTabDef.Component />
+          </Suspense>
+        )}
+      </main>
+
+      <SettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+      />
+    </div>
   );
 }

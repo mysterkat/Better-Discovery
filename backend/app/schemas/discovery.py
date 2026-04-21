@@ -1,4 +1,4 @@
-"""Request schemas for the Discovery router."""
+"""Request/response schemas for the Discovery and MQL routers."""
 
 from __future__ import annotations
 
@@ -18,5 +18,15 @@ class DataImportRequest(BaseModel):
 
 
 class MqlExportRequest(BaseModel):
-    pattern_id: str
-    template: str
+    """Request body for POST /mql/export."""
+
+    # Raw text of the .set file produced by pattern_discovery_v6.
+    set_content: str
+
+    # Path to the .mq5 EA template.  null/omitted → use bundled default
+    # (MONTE CARLO/ea/PatternDiscoveryEA.mq5).
+    template_path: str | None = None
+
+    # Override output filename stem (no extension).
+    # null → auto-generated from pattern metadata.
+    output_name: str | None = None
