@@ -32,7 +32,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg2OUVFNEQ2RTc0ODBDQUIKUldTckRFam4xdVNlaHNQTmFDdEE3aHJDcE5YWGtSb1N4Y09OaHdLWFR1VXRKWjBacjFXNzRCSVgK",
       "endpoints": [
-        "https://github.com/mysterkat/Better-Discovery/releases/latest/download/latest.json"
+        "https://github.com/mysterkat/Better-Discovery-releases/releases/latest/download/latest.json"
       ]
     }
   },
