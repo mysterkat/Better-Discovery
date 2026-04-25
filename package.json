@@ -1,6 +1,6 @@
 {
   "name": "better-discovery",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,8 +11,6 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",
-    "@tauri-apps/plugin-updater": "^2",
-    "@tauri-apps/plugin-process": "^2",
     "plotly.js": "^3.5.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
