@@ -12,7 +12,9 @@
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -23,6 +25,7 @@ use crate::paths::{app_root, resolve_backend_dir, resolve_python_exe};
 pub struct AppState {
     pub backend_port: Mutex<Option<u16>>,
     pub child: Mutex<Option<std::process::Child>>,
+    pub shutting_down: AtomicBool,
 }
 
 #[derive(Serialize, Clone)]
@@ -31,14 +34,22 @@ pub struct BackendReady {
 }
 
 pub fn spawn(app: AppHandle) -> Result<(), String> {
-    // Tauri resource directory — Some in production (installer), may error in dev.
+    spawn_child(&app)?;
+
+    let monitor_app = app.clone();
+    std::thread::spawn(move || monitor(monitor_app));
+
+    Ok(())
+}
+
+fn spawn_child(app: &AppHandle) -> Result<(), String> {
+    // Tauri resource directory - Some in production (installer), may error in dev.
     let resource_dir = app.path().resource_dir().ok();
 
     let root = app_root().ok_or("could not resolve app root")?;
 
-    let backend_dir =
-        resolve_backend_dir(&root, resource_dir.as_deref())
-            .ok_or_else(|| format!("backend dir not found (root={})", root.display()))?;
+    let backend_dir = resolve_backend_dir(&root, resource_dir.as_deref())
+        .ok_or_else(|| format!("backend dir not found (root={})", root.display()))?;
 
     let python = resolve_python_exe(&root, resource_dir.as_deref());
     let port = reserve_port()?;
@@ -93,6 +104,7 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
     let stderr = child.stderr.take();
 
     if let Some(state) = app.try_state::<AppState>() {
+        *state.backend_port.lock().unwrap() = None;
         *state.child.lock().unwrap() = Some(child);
     }
 
@@ -109,13 +121,46 @@ pub fn spawn(app: AppHandle) -> Result<(), String> {
 }
 
 fn reserve_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("local_addr: {e}"))?
-        .port();
-    drop(listener);
-    Ok(port)
+    // Avoid the OS-assigned ephemeral range (49152-65535 on Windows). Ports in
+    // that pool can be taken by outbound TCP connections between the moment we
+    // release the listener and the moment uvicorn binds, producing
+    // `[WinError 10013] permission denied` on bind. Pick from the IANA
+    // registered range and verify we can bind, drop, and immediately rebind.
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xC0FFEE_u64)
+        | 1;
+
+    let mut last_err = String::new();
+    for _ in 0..50 {
+        // xorshift step
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let port: u16 = 10_000 + (seed % 39_000) as u16; // 10000..=48999
+
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l1) => {
+                drop(l1);
+                // Confirm we can rebind — if not, the port is in a Windows
+                // exclusion range or was taken by another process.
+                match TcpListener::bind(("127.0.0.1", port)) {
+                    Ok(l2) => {
+                        drop(l2);
+                        return Ok(port);
+                    }
+                    Err(e) => last_err = format!("rebind {port}: {e}"),
+                }
+            }
+            Err(e) => last_err = format!("bind {port}: {e}"),
+        }
+    }
+    Err(format!(
+        "could not find a usable backend port after 50 attempts ({last_err})"
+    ))
 }
 
 fn watch<R: Read + Send + 'static>(stream: R, tag: &'static str, port: u16, app: AppHandle) {
@@ -137,8 +182,57 @@ fn watch<R: Read + Send + 'static>(stream: R, tag: &'static str, port: u16, app:
     }
 }
 
+fn monitor(app: AppHandle) {
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        if state.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let exited = {
+            let mut guard = state.child.lock().unwrap();
+            match guard.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(status)) => {
+                        eprintln!("[sidecar] backend exited with status {status}");
+                        *guard = None;
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(err) => {
+                        eprintln!("[sidecar] backend try_wait failed: {err}");
+                        *guard = None;
+                        true
+                    }
+                },
+                None => true,
+            }
+        };
+
+        if !exited {
+            continue;
+        }
+
+        *state.backend_port.lock().unwrap() = None;
+
+        if state.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+
+        eprintln!("[sidecar] attempting backend restart");
+        if let Err(err) = spawn_child(&app) {
+            eprintln!("[sidecar] restart failed: {err}");
+        }
+    }
+}
+
 /// Kill the sidecar if it's still running. Called on window/app close.
 pub fn shutdown(state: &AppState) {
+    state.shutting_down.store(true, Ordering::SeqCst);
     if let Some(mut child) = state.child.lock().unwrap().take() {
         eprintln!("[sidecar] shutting down (pid {})", child.id());
         let _ = child.kill();
