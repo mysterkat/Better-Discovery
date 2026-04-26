@@ -63,11 +63,35 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Verify signing secrets are present
+        shell: pwsh
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PWD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:KEY)) {
+            throw "TAURI_SIGNING_PRIVATE_KEY secret is missing or empty"
+          }
+          Write-Host "TAURI_SIGNING_PRIVATE_KEY: present, length = $($env:KEY.Length) chars"
+          if ([string]::IsNullOrEmpty($env:PWD)) {
+            Write-Host "TAURI_SIGNING_PRIVATE_KEY_PASSWORD: empty (key must have no password)"
+          } else {
+            Write-Host "TAURI_SIGNING_PRIVATE_KEY_PASSWORD: present, length = $($env:PWD.Length) chars"
+          }
+          # Sanity-check the key looks like a Tauri/minisign blob
+          $decoded = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($env:KEY))
+          if ($decoded -notmatch "rsign encrypted secret key|untrusted comment") {
+            Write-Host "WARNING: key does not look like a Tauri-generated minisign key. First 80 chars decoded:"
+            Write-Host $decoded.Substring(0, [Math]::Min(80, $decoded.Length))
+          } else {
+            Write-Host "Key format: OK (looks like a Tauri/minisign secret key)"
+          }
+
       - name: Build Tauri app (signed)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri -- build
+        run: npm run tauri -- build --verbose
 
       - name: Locate artifacts and build latest.json manifest
         id: artifacts
