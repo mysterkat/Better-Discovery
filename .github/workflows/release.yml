@@ -69,11 +69,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri -- build
 
-      - name: Locate build artifacts
+      - name: Locate artifacts and build latest.json manifest
         id: artifacts
         shell: pwsh
         run: |
-          $version = "${{ steps.version.outputs.version }}"
+          $tag       = "${{ steps.version.outputs.tag }}"
           $bundleDir = "src-tauri/target/release/bundle"
 
           $nsisExe = Get-ChildItem -Path "$bundleDir/nsis" -Filter "*-setup.exe" | Select-Object -First 1
@@ -85,29 +85,8 @@ jobs:
           if (-not $msi)     { throw "MSI installer not found" }
 
           $signature = (Get-Content $nsisSig.FullName -Raw).Trim()
-          echo "nsis_path=$($nsisExe.FullName)" >> $env:GITHUB_OUTPUT
-          echo "nsis_name=$($nsisExe.Name)"     >> $env:GITHUB_OUTPUT
-          echo "msi_path=$($msi.FullName)"      >> $env:GITHUB_OUTPUT
-          echo "msi_name=$($msi.Name)"          >> $env:GITHUB_OUTPUT
-
-          # Multiline output for signature
-          $delimiter = "EOF_$([guid]::NewGuid().ToString('N'))"
-          echo "signature<<$delimiter" >> $env:GITHUB_OUTPUT
-          echo $signature              >> $env:GITHUB_OUTPUT
-          echo $delimiter              >> $env:GITHUB_OUTPUT
-
-      - name: Build latest.json manifest
-        shell: pwsh
-        run: |
-          $version   = "${{ steps.version.outputs.version }}"
-          $tag       = "${{ steps.version.outputs.tag }}"
-          $nsisName  = "${{ steps.artifacts.outputs.nsis_name }}"
-          $signature = @"
-${{ steps.artifacts.outputs.signature }}
-"@
-          $signature = $signature.Trim()
           $pubDate   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-          $encoded   = [uri]::EscapeUriString($nsisName)
+          $encoded   = [uri]::EscapeUriString($nsisExe.Name)
           $url       = "https://github.com/mysterkat/better-discovery-releases/releases/download/$tag/$encoded"
 
           $manifest = [ordered]@{
@@ -125,6 +104,9 @@ ${{ steps.artifacts.outputs.signature }}
           $manifest | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 latest.json
           Write-Host "--- latest.json ---"
           Get-Content latest.json
+
+          echo "nsis_path=$($nsisExe.FullName)" >> $env:GITHUB_OUTPUT
+          echo "msi_path=$($msi.FullName)"      >> $env:GITHUB_OUTPUT
 
       - name: Publish release to public repo
         env:
