@@ -29,6 +29,18 @@ pub fn app_root() -> Option<PathBuf> {
         }
     }
 
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest.parent().map(|p| p.to_path_buf());
+
+    // When running from `src-tauri/target/...` in dev, prefer the live
+    // workspace root over copied resources under `target/debug/backend`.
+    if let (Some(root), Ok(exe)) = (workspace_root.as_ref(), std::env::current_exe()) {
+        let dev_target = root.join("src-tauri").join("target");
+        if exe.starts_with(&dev_target) && root.join("backend").is_dir() {
+            return Some(root.clone());
+        }
+    }
+
     // Walk up from the executable.  In production the install dir will have
     // a `backend/` directory (from Tauri resource bundling).  In dev the
     // project root also has `src-tauri/` alongside `backend/`.
@@ -43,8 +55,7 @@ pub fn app_root() -> Option<PathBuf> {
     }
 
     // CARGO_MANIFEST_DIR is src-tauri/; parent is the project root.
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest.parent().map(|p| p.to_path_buf())
+    workspace_root
 }
 
 /// Resolve the Python executable given:

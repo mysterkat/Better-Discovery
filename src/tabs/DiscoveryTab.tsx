@@ -1,30 +1,52 @@
-import { useState, useEffect } from "react";
-import { getDefaults, startDiscovery } from "../api/discovery";
+import { useState, useEffect, useMemo } from "react";
+import { getParams, startDiscovery, type ParamDef } from "../api/discovery";
 import { useJobs } from "../state/jobs";
 import JobProgress from "../components/JobProgress";
 import { openResultWindow } from "../lib/windows";
 
-// The subset of pattern_discovery_v6 module-level constants that are safe
-// and useful to override from the UI (all others use their baked-in defaults).
-const OVERRIDE_KEYS: { key: string; label: string; description: string }[] = [
-  { key: "RANDOM_SEED",   label: "Random Seed",   description: "Set a fixed seed for reproducible results." },
-  { key: "TRAIN_RATIO",   label: "Train Ratio",   description: "Fraction of data used for training (0.5–0.9)." },
-  { key: "MIN_TRADES",    label: "Min Trades",    description: "Minimum trades in a cluster to keep it." },
-  { key: "OUTPUT_FOLDER", label: "Output Folder", description: "Override default output folder path." },
-];
+// Folder-type keys whose override is controlled by the one-shot toggle.
+const FOLDER_KEYS = new Set(["DATA_FOLDER", "OUTPUT_FOLDER"]);
 
 export default function DiscoveryTab() {
-  const [defaults, setDefaults] = useState<Record<string, unknown>>({});
+  const [params, setParams] = useState<ParamDef[]>([]);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const [overrideOnce, setOverrideOnce] = useState(false);
+  const [folderOverrides, setFolderOverrides] = useState<Record<string, string>>({});
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set(["Data & Files", "General"]));
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
   const job = useJobs((s) => (jobId ? s.jobs[jobId] : undefined));
+  const isRunning = !!jobId && job?.status === "running";
+  const isDone = !!jobId && (job?.status === "done" || job?.status === "failed");
 
   useEffect(() => {
-    getDefaults().then(setDefaults).catch(() => {/* backend not ready yet */});
+    getParams().then(setParams).catch(() => {});
   }, []);
+
+  // Group params by their 'group' field.
+  const groups = useMemo(() => {
+    const map = new Map<string, ParamDef[]>();
+    for (const p of params) {
+      if (!map.has(p.group)) map.set(p.group, []);
+      map.get(p.group)!.push(p);
+    }
+    return map;
+  }, [params]);
+
+  const toggleGroup = (g: string) =>
+    setOpenGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(g)) next.delete(g); else next.add(g);
+      return next;
+    });
+
+  const setValue = (key: string, val: string) =>
+    setOverrides((prev) => ({ ...prev, [key]: val }));
+
+  const setFolderVal = (key: string, val: string) =>
+    setFolderOverrides((prev) => ({ ...prev, [key]: val }));
 
   const handleStart = async () => {
     setStarting(true);
@@ -32,11 +54,25 @@ export default function DiscoveryTab() {
     setJobId(null);
     try {
       const parsed: Record<string, unknown> = {};
-      for (const { key } of OVERRIDE_KEYS) {
-        const raw = overrides[key]?.trim();
+      for (const p of params) {
+        const raw = overrides[p.key]?.trim();
         if (!raw) continue;
-        const n = Number(raw);
-        parsed[key] = isNaN(n) ? raw : n;
+        if (p.type === "bool") {
+          parsed[p.key] = raw === "true" || raw === "1";
+        } else if (p.type === "int") {
+          const n = parseInt(raw, 10);
+          if (!isNaN(n)) parsed[p.key] = n;
+        } else if (p.type === "float") {
+          const n = parseFloat(raw);
+          if (!isNaN(n)) parsed[p.key] = n;
+        } else {
+          parsed[p.key] = raw;
+        }
+      }
+      if (overrideOnce) {
+        for (const [k, v] of Object.entries(folderOverrides)) {
+          if (v.trim()) parsed[k] = v.trim();
+        }
       }
       const ref = await startDiscovery(parsed);
       setJobId(ref.job_id);
@@ -47,7 +83,11 @@ export default function DiscoveryTab() {
     }
   };
 
-  const handleDone = async () => {
+  const handleJobDone = async () => {
+    if (overrideOnce) {
+      setOverrideOnce(false);
+      setFolderOverrides({});
+    }
     if (!jobId) return;
     await openResultWindow(
       `discovery-results-${jobId}`,
@@ -56,83 +96,189 @@ export default function DiscoveryTab() {
     );
   };
 
-  const isRunning = !!jobId && job?.status === "running";
-  const isDone = !!jobId && (job?.status === "done" || job?.status === "failed");
+  const renderField = (p: ParamDef) => {
+    const isFolder = p.type === "folder";
+    if (isFolder) {
+      const folderVal = folderOverrides[p.key] ?? "";
+      const defaultVal = String(p.value ?? "");
+      return (
+        <div key={p.key} className="field">
+          <label className="field-label">
+            {p.label}
+            <span className="field-hint-inline"> — {p.description}</span>
+          </label>
+          <div className="folder-display">{defaultVal || "—"}</div>
+          {overrideOnce && (
+            <input
+              className="field-input"
+              style={{ marginTop: 4 }}
+              value={folderVal}
+              onChange={(e) => setFolderVal(p.key, e.target.value)}
+              placeholder="Override path (this run only)"
+              disabled={isRunning}
+            />
+          )}
+        </div>
+      );
+    }
+
+    if (p.type === "bool") {
+      const val = overrides[p.key];
+      const checked = val !== undefined ? val === "true" : Boolean(p.value);
+      return (
+        <div key={p.key} className="field field-inline">
+          <label className="toggle-label">
+            <span className="toggle-wrap">
+              <input
+                type="checkbox"
+                className="toggle-input"
+                checked={checked}
+                onChange={(e) => setValue(p.key, e.target.checked ? "true" : "false")}
+                disabled={isRunning}
+              />
+              <span className="toggle-track" />
+            </span>
+            <span>
+              <span className="field-label" style={{ display: "inline" }}>{p.label}</span>
+              {p.description && <span className="field-hint"> — {p.description}</span>}
+            </span>
+          </label>
+        </div>
+      );
+    }
+
+    if (p.type === "str" && p.options && p.options.length > 0) {
+      return (
+        <div key={p.key} className="field">
+          <label className="field-label">
+            {p.label}
+            <span className="field-default"> (default: {String(p.value)})</span>
+          </label>
+          <select
+            className="field-input"
+            value={overrides[p.key] ?? String(p.value ?? "")}
+            onChange={(e) => setValue(p.key, e.target.value)}
+            disabled={isRunning}
+          >
+            {p.options.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+          {p.description && <span className="field-hint">{p.description}</span>}
+        </div>
+      );
+    }
+
+    const defVal = p.value != null ? String(p.value) : "";
+    const hint = [
+      p.min != null ? `min ${p.min}` : "",
+      p.max != null ? `max ${p.max}` : "",
+      p.step != null ? `step ${p.step}` : "",
+    ].filter(Boolean).join(", ");
+
+    return (
+      <div key={p.key} className="field">
+        <label className="field-label">
+          {p.label}
+          <span className="field-default"> (default: {defVal})</span>
+        </label>
+        <input
+          className="field-input"
+          type={p.type === "int" ? "number" : "text"}
+          step={p.step ?? (p.type === "float" ? 0.01 : 1)}
+          min={p.min}
+          max={p.max}
+          value={overrides[p.key] ?? ""}
+          placeholder={defVal}
+          onChange={(e) => setValue(p.key, e.target.value)}
+          disabled={isRunning}
+        />
+        {(p.description || hint) && (
+          <span className="field-hint">
+            {p.description}
+            {hint ? ` (${hint})` : ""}
+          </span>
+        )}
+      </div>
+    );
+  };
 
   return (
-    <div className="tab-content">
+    <div className="tab-content" style={{ maxWidth: 860 }}>
       <div className="tab-header">
         <h2>Pattern Discovery</h2>
         <p className="tab-subtitle">
-          Run Pattern Discovery v6 on the loaded dataset to discover profitable
-          trading patterns. Results open in a separate window.
+          Configure and run Pattern Discovery v6. All settings default to the values in
+          <code> pattern_discovery_v6.py</code>; override only what you need.
         </p>
       </div>
 
-      <div className="form-section">
-        <div className="section-label">Parameter overrides</div>
-        <p className="form-hint">
-          Leave blank to use the defaults from{" "}
-          <code>pattern_discovery_v6.py</code>.
-        </p>
-        <div className="override-grid">
-          {OVERRIDE_KEYS.map(({ key, label, description }) => (
-            <div key={key} className="field">
-              <label className="field-label">
-                {label}
-                <span className="field-default">
-                  {defaults[key] != null ? ` (default: ${defaults[key]})` : ""}
-                </span>
-              </label>
-              <input
-                className="field-input"
-                type="text"
-                value={overrides[key] ?? ""}
-                placeholder={String(defaults[key] ?? "")}
-                onChange={(e) =>
-                  setOverrides((prev) => ({ ...prev, [key]: e.target.value }))
-                }
-                disabled={isRunning}
-              />
-              <span className="field-hint">{description}</span>
+      {params.length === 0 ? (
+        <p className="tab-loading">Loading parameters…</p>
+      ) : (
+        <>
+          {/* One-shot folder override toggle */}
+          <div className="form-section">
+            <label className="toggle-label">
+              <span className="toggle-wrap">
+                <input
+                  type="checkbox"
+                  className="toggle-input"
+                  checked={overrideOnce}
+                  onChange={(e) => {
+                    setOverrideOnce(e.target.checked);
+                    if (!e.target.checked) setFolderOverrides({});
+                  }}
+                  disabled={isRunning}
+                />
+                <span className="toggle-track" />
+              </span>
+              Override input/output folders for this run only (auto-resets after run)
+            </label>
+          </div>
+
+          {/* Parameter groups */}
+          {[...groups.entries()].map(([group, gParams]) => (
+            <div key={group} className="param-group">
+              <button
+                className="param-group-header"
+                onClick={() => toggleGroup(group)}
+              >
+                <span className="param-group-arrow">{openGroups.has(group) ? "▾" : "▸"}</span>
+                {group}
+                <span className="param-group-count">{gParams.length} settings</span>
+              </button>
+              {openGroups.has(group) && (
+                <div className="param-group-body">
+                  <div className="override-grid">
+                    {gParams.map((p) => renderField(p))}
+                  </div>
+                </div>
+              )}
             </div>
           ))}
-        </div>
-      </div>
+        </>
+      )}
 
-      <div className="action-row">
+      <div className="action-row" style={{ marginTop: 20 }}>
         <button
           className="btn btn-primary"
           onClick={handleStart}
-          disabled={starting || isRunning}
+          disabled={starting || isRunning || params.length === 0}
         >
           {starting ? "Starting…" : "▶ Run Discovery"}
         </button>
         {isDone && (
-          <button
-            className="btn btn-secondary"
-            onClick={() => { setJobId(null); setError(null); }}
-          >
+          <button className="btn btn-secondary" onClick={() => { setJobId(null); setError(null); }}>
             New Run
           </button>
         )}
         {jobId && job?.status === "done" && (
-          <button
-            className="btn btn-accent"
-            onClick={handleDone}
-          >
-            ↗ Open Results
-          </button>
+          <button className="btn btn-accent" onClick={handleJobDone}>↗ Open Results</button>
         )}
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
 
-      <JobProgress
-        jobId={jobId}
-        onDone={handleDone}
-        onError={(msg) => setError(msg)}
-      />
+      <JobProgress jobId={jobId} onDone={handleJobDone} onError={(msg) => setError(msg)} />
     </div>
   );
 }

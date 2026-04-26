@@ -186,6 +186,48 @@ body {
 
 .settings-body { padding: 20px 18px; flex: 1; overflow-y: auto; }
 
+/* ── Settings section ─────────────────────────────────────────────── */
+.settings-section { margin-top: 24px; }
+.settings-section-title {
+  margin: 0 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ── Update checker ───────────────────────────────────────────────── */
+.update-checker { width: 100%; }
+.update-checker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.update-label {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text2);
+}
+.update-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg3);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s;
+}
+.update-btn:hover { background: var(--bg4, var(--bg3)); border-color: var(--accent); }
+.update-btn--primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.update-btn--primary:hover { opacity: 0.88; }
+
 .settings-section-label {
   margin: 0 0 10px;
   font-size: 11px;
@@ -701,3 +743,329 @@ kbd {
   transition: background 0.12s;
 }
 .update-toast:hover { background: var(--bg3); }
+
+/* ══════════════════════════════════════════════════════════════════
+   NEW UI COMPONENTS — Data Import · Discovery · Monte Carlo
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── Toggle switch ────────────────────────────────────────────────── */
+.field-inline { margin-bottom: 14px; }
+
+.toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+}
+
+.toggle-wrap {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.toggle-input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 9px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  transition: background 0.18s, border-color 0.18s;
+}
+.toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text2);
+  transition: transform 0.18s, background 0.18s;
+}
+.toggle-input:checked + .toggle-track {
+  background: var(--accent2);
+  border-color: var(--accent2);
+}
+.toggle-input:checked + .toggle-track::after {
+  transform: translateX(16px);
+  background: #fff;
+}
+.toggle-input:disabled + .toggle-track { opacity: 0.45; cursor: not-allowed; }
+
+.field-hint-inline {
+  font-size: 11px;
+  color: var(--text2);
+  margin-left: 4px;
+}
+
+/* ── Param accordion groups ───────────────────────────────────────── */
+.param-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.param-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg2);
+  border: none;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s;
+}
+.param-group-header:hover { background: var(--bg3); }
+
+.param-group-arrow {
+  font-size: 11px;
+  color: var(--text2);
+  min-width: 12px;
+  transition: transform 0.15s;
+}
+
+.param-group-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text2);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+
+.param-group-body {
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* ── MT5 connection status badge ──────────────────────────────────── */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.status-badge--ok {
+  background: rgba(35, 134, 54, 0.12);
+  border-color: rgba(35, 134, 54, 0.35);
+  color: #7ee787;
+}
+.status-badge--err {
+  background: rgba(218, 54, 51, 0.12);
+  border-color: rgba(218, 54, 51, 0.35);
+  color: #ff7a78;
+}
+
+/* ── Folder display ───────────────────────────────────────────────── */
+.folder-display {
+  display: block;
+  padding: 7px 10px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: 'Consolas', monospace;
+  font-size: 12px;
+  color: var(--text2);
+  word-break: break-all;
+}
+
+/* ── Timeframe rows (Data Import) ─────────────────────────────────── */
+.tf-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.tf-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  flex-wrap: wrap;
+}
+
+.tf-row-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text2);
+  min-width: 32px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.tf-select {
+  width: auto !important;
+  min-width: 130px;
+  flex-shrink: 0;
+}
+
+.tf-days-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tf-days-input {
+  width: 80px !important;
+}
+
+.tf-days-label {
+  font-size: 12px;
+  color: var(--text2);
+  white-space: nowrap;
+}
+
+.tf-candles {
+  font-size: 12px;
+  color: var(--accent2);
+  margin-left: auto;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+/* ── TF download result list ──────────────────────────────────────── */
+.result-section { margin-top: 20px; }
+
+.tf-result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.tf-result-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 7px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  flex-wrap: wrap;
+}
+.tf-result-ok { border-color: rgba(35, 134, 54, 0.35); }
+.tf-result-err { border-color: rgba(218, 54, 51, 0.35); }
+
+.tf-result-status {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.tf-result-ok .tf-result-status { color: #7ee787; }
+.tf-result-err .tf-result-status { color: #ff7a78; }
+
+.tf-result-label {
+  font-weight: 600;
+  min-width: 50px;
+  color: var(--text);
+}
+
+.tf-result-candles {
+  color: var(--accent2);
+  font-weight: 500;
+}
+
+.tf-result-path {
+  font-family: 'Consolas', monospace;
+  color: var(--text2);
+  word-break: break-all;
+  flex: 1;
+}
+
+.tf-result-error {
+  color: #ff7a78;
+  flex: 1;
+}
+
+/* ── MC data source selector ──────────────────────────────────────── */
+.mc-source-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.mc-source-btn {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2);
+  color: var(--text2);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+  text-align: center;
+}
+.mc-source-btn:hover { border-color: var(--accent2); color: var(--text); }
+.mc-source-btn.active {
+  border-color: var(--accent2);
+  background: color-mix(in srgb, var(--accent2) 12%, var(--bg2));
+  color: var(--text);
+}
+.mc-source-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ── Monte Carlo result tabs ──────────────────────────────────────── */
+.mc-results { margin-top: 24px; }
+
+.phase-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.phase-tab {
+  padding: 8px 16px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  background: none;
+  color: var(--text2);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  position: relative;
+  bottom: -1px;
+}
+.phase-tab:hover { background: var(--bg3); color: var(--text); }
+.phase-tab.active {
+  background: var(--bg);
+  color: var(--text);
+  border-color: var(--border);
+  border-bottom-color: var(--bg);
+}
+
+.phase-tab-panel {
+  padding: 4px 0 16px;
+}

@@ -23,6 +23,23 @@ class MCRunRequest(BaseModel):
     wait_timeout_s: float = 30.0
 
 
+class MCRunAllRequest(BaseModel):
+    """Run all four phases in one job using shared pre-drawn samples."""
+    pnl: Optional[list[float]] = None
+    # data_source selects the loader: "tradingview" = CSV, "mt5_html" = MT5 HTML report
+    data_source: str = "tradingview"
+    pnl_csv_path: Optional[str] = None       # TradingView CSV path
+    file_path_html: Optional[str] = None     # MT5 Strategy Tester HTML path
+    pnl_split: str = "test"
+    global_params: dict[str, Any] = Field(default_factory=dict)
+    phase1_params: dict[str, Any] = Field(default_factory=dict)
+    phase2_params: dict[str, Any] = Field(default_factory=dict)
+    funded_params: dict[str, Any] = Field(default_factory=dict)
+    longterm_params: dict[str, Any] = Field(default_factory=dict)
+    wait: bool = False
+    wait_timeout_s: float = 120.0
+
+
 class MCAdvancedRequest(BaseModel):
     metric: str
     params: dict[str, Any] = Field(default_factory=dict)

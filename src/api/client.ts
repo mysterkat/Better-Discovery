@@ -6,20 +6,35 @@
 import { invoke } from "@tauri-apps/api/core";
 
 const DEV_FALLBACK_PORT = 8765;
+const BACKEND_START_RETRIES = 15;
+const BACKEND_START_RETRY_MS = 200;
 
 let _port: number | null = null;
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 export async function getBaseUrl(): Promise<string> {
   if (_port != null) return `http://127.0.0.1:${_port}`;
+
   try {
-    const port = await invoke<number | null>("get_backend_port");
-    if (port != null) {
-      _port = port;
-      return `http://127.0.0.1:${port}`;
+    for (let i = 0; i < BACKEND_START_RETRIES; i += 1) {
+      const port = await invoke<number | null>("get_backend_port");
+      if (port != null) {
+        _port = port;
+        return `http://127.0.0.1:${port}`;
+      }
+      await sleep(BACKEND_START_RETRY_MS);
     }
-  } catch {
-    // Not running inside Tauri — use the dev fallback.
+    throw new Error("Backend is still starting. Please wait a moment and try again.");
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("still starting")) {
+      throw error;
+    }
+    // Not running inside Tauri - use the dev fallback.
   }
+
   _port = DEV_FALLBACK_PORT;
   return `http://127.0.0.1:${DEV_FALLBACK_PORT}`;
 }
@@ -36,7 +51,7 @@ export class ApiError extends Error {
     method: string,
     path: string,
   ) {
-    super(`${method} ${path} → ${status}: ${detail}`);
+    super(`${method} ${path} -> ${status}: ${detail}`);
     this.name = "ApiError";
   }
 }
@@ -47,11 +62,19 @@ export async function api<T = unknown>(
   body?: unknown,
 ): Promise<T> {
   const base = await getBaseUrl();
-  const res = await fetch(`${base}${path}`, {
-    method,
-    headers: body != null ? { "Content-Type": "application/json" } : undefined,
-    body: body != null ? JSON.stringify(body) : undefined,
-  });
+
+  let res: Response;
+  try {
+    res = await fetch(`${base}${path}`, {
+      method,
+      headers: body != null ? { "Content-Type": "application/json" } : undefined,
+      body: body != null ? JSON.stringify(body) : undefined,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not reach backend at ${base}${path}: ${message}`);
+  }
+
   if (!res.ok) {
     let detail: string;
     try {

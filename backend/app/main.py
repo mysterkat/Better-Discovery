@@ -11,23 +11,24 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Importing paths has the side effect of prepending MONTE CARLO/src to sys.path
-# and creating userdata/. Do this before any bridge import.
+# Importing paths has the side effect of prepending toolkit to sys.path and
+# creating all userdata subdirs. Must happen before any bridge import.
 from . import paths  # noqa: F401
 from .config import CONFIG
 from .routers import data, discovery, health, mc, mql, settings as settings_router
 
 app = FastAPI(
+    on_startup=[lambda: paths.validate_paths()],
     title="BETTER DISCOVERY backend",
     version="0.1.0",
     docs_url="/docs",
     redoc_url=None,
 )
 
-if CONFIG.dev_origin:
+if CONFIG.dev_origins:
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[CONFIG.dev_origin, "tauri://localhost", "https://tauri.localhost"],
+        allow_origins=[*CONFIG.dev_origins, *CONFIG.tauri_origins],
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],

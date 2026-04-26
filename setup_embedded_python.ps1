@@ -190,7 +190,7 @@ Pop-Location
 # 8. Verify key imports
 # ---------------------------------------------------------------------------
 Write-Step "Verifying key imports..."
-$checks = @("fastapi", "uvicorn", "numpy", "pandas", "plotly", "scipy", "sklearn", "bs4")
+$checks = @("fastapi", "uvicorn", "numpy", "pandas", "MetaTrader5", "plotly", "scipy", "sklearn", "bs4")
 Push-Location $PythonDir
 foreach ($mod in $checks) {
     $result = & ".\python.exe" -c "import $mod; print('ok')" 2>&1

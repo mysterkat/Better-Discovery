@@ -22,8 +22,14 @@ router = APIRouter()
 @router.get("/discovery/defaults")
 def discovery_defaults() -> dict:
     vals = disc_bridge.list_defaults()
-    # Stringify any Path-like values so the response stays JSON-safe.
     return {k: (str(v) if not isinstance(v, (int, float, str, bool, list, dict)) else v) for k, v in vals.items()}
+
+
+@router.get("/discovery/params")
+def discovery_params() -> list:
+    """Return values + full UI metadata (type, group, min/max/step) for every
+    overridable constant. The frontend uses this to render the settings form."""
+    return disc_bridge.list_defaults_with_meta()
 
 
 @router.post("/discovery/start", response_model=JobRef)

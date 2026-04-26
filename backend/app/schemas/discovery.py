@@ -17,6 +17,18 @@ class DataImportRequest(BaseModel):
     schema_hint: dict[str, Any] | None = None
 
 
+class TfSpec(BaseModel):
+    prefix: str                 # m | h | d | W | M
+    time_value: int             # e.g. 5 for m5, 1 for h1
+    trading_days: int           # requested history in trading days
+
+
+class MT5FetchRequest(BaseModel):
+    symbol: str = "XAUUSD"
+    save_folder: str = ""       # empty → use default userdata/hist_data/
+    tf_specs: list[TfSpec]
+
+
 class MqlExportRequest(BaseModel):
     """Request body for POST /mql/export."""
 

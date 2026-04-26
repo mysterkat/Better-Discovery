@@ -418,7 +418,7 @@ def _build_regime_daily(trades_df, scale=1.0):
 def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
                    max_total_dd_pct, min_days, max_sim_days, rng, n_sims,
                    trans_matrix=None, regime_pnl_pools=None, start_regime=None,
-                   phase_label=""):
+                   phase_label="", predrawn_pnl=None):
     """
     Simulates one evaluation phase.
 
@@ -474,6 +474,9 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
                     day_pnl = float(rng.choice(pool))
                 else:
                     day_pnl = float(rng.choice(daily_pnl))
+            elif predrawn_pnl is not None:
+                _d = min(_day, predrawn_pnl.shape[1] - 1)
+                day_pnl = float(predrawn_pnl[_i % len(predrawn_pnl), _d])
             else:
                 day_pnl = float(rng.choice(daily_pnl))
 
@@ -2178,7 +2181,7 @@ def _eval_phase_stats(results, n_total):
 def run_mc_phase1(daily_pnl: np.ndarray, *, balance=100_000, profit_pct=0.10,
                   daily_dd_pct=0.05, total_dd_pct=0.10, min_days=4,
                   n_sims=10_000, max_days=60, seed=None,
-                  regime_transition=None) -> dict:
+                  regime_transition=None, predrawn_pnl=None) -> dict:
     """Run Phase 1 (FTMO Challenge) MC simulation; return rich stats dict."""
     daily_pnl = np.asarray(daily_pnl, dtype=float)
     rng = _make_rng(seed)
@@ -2187,6 +2190,7 @@ def run_mc_phase1(daily_pnl: np.ndarray, *, balance=100_000, profit_pct=0.10,
         min_days, max_days, rng, n_sims,
         trans_matrix=regime_transition,
         phase_label="P1",
+        predrawn_pnl=predrawn_pnl,
     )
     stats = _eval_phase_stats(results, n_sims)
     stats["phase"] = "phase1"
@@ -2195,7 +2199,7 @@ def run_mc_phase1(daily_pnl: np.ndarray, *, balance=100_000, profit_pct=0.10,
 
 def run_mc_phase2(daily_pnl, *, balance=100_000, profit_pct=0.05,
                   daily_dd_pct=0.05, total_dd_pct=0.10, min_days=4,
-                  n_sims=10_000, max_days=60, seed=None) -> dict:
+                  n_sims=10_000, max_days=60, seed=None, predrawn_pnl=None) -> dict:
     """Run Phase 2 (FTMO Verification) MC simulation; return rich stats dict."""
     daily_pnl = np.asarray(daily_pnl, dtype=float)
     rng = _make_rng(seed)
@@ -2203,6 +2207,7 @@ def run_mc_phase2(daily_pnl, *, balance=100_000, profit_pct=0.05,
         daily_pnl, balance, profit_pct, daily_dd_pct, total_dd_pct,
         min_days, max_days, rng, n_sims,
         phase_label="P2",
+        predrawn_pnl=predrawn_pnl,
     )
     stats = _eval_phase_stats(results, n_sims)
     stats["phase"] = "phase2"
@@ -2211,7 +2216,7 @@ def run_mc_phase2(daily_pnl, *, balance=100_000, profit_pct=0.05,
 
 def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
                      total_dd_pct=0.10, payout_cadence_days=30,
-                     months=12, n_sims=10_000, rng=None) -> dict:
+                     months=12, n_sims=10_000, rng=None, predrawn_pnl=None) -> dict:
     """Internal funded simulation loop; shared by run_mc_funded and helpers."""
     daily_pnl      = np.asarray(daily_pnl, dtype=float)
     if rng is None:
@@ -2221,7 +2226,7 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
     total_floor    = balance * (1.0 - total_dd_pct)
 
     results = []
-    for _ in range(n_sims):
+    for _i in range(n_sims):
         equity            = balance
         current_floor     = total_floor
         days_active       = 0
@@ -2234,7 +2239,11 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
         first_payout_day  = None
 
         for _day in range(max_days):
-            day_pnl            = float(rng.choice(daily_pnl))
+            if predrawn_pnl is not None:
+                _d = min(_day, predrawn_pnl.shape[1] - 1)
+                day_pnl = float(predrawn_pnl[_i % len(predrawn_pnl), _d])
+            else:
+                day_pnl = float(rng.choice(daily_pnl))
             day_open           = equity
             days_active       += 1
             days_since_payout += 1
@@ -2292,33 +2301,38 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
 
 def run_mc_funded(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
                   total_dd_pct=0.10, payout_cadence_days=30,
-                  months=12, n_sims=10_000, seed=None) -> dict:
+                  months=12, n_sims=10_000, seed=None, predrawn_pnl=None) -> dict:
     """Run funded-account MC simulation; return breach/payout/earnings stats dict."""
     rng = _make_rng(seed)
     return _run_funded_loop(
         daily_pnl, balance=balance, daily_dd_pct=daily_dd_pct,
         total_dd_pct=total_dd_pct, payout_cadence_days=payout_cadence_days,
-        months=months, n_sims=n_sims, rng=rng,
+        months=months, n_sims=n_sims, rng=rng, predrawn_pnl=predrawn_pnl,
     )
 
 
 def run_mc_longterm(daily_pnl, *, balance=100_000, years=5,
-                    n_sims=10_000, seed=None) -> dict:
+                    n_sims=10_000, seed=None, predrawn_pnl=None,
+                    benchmark_ticker="", ruin_pct=0.20) -> dict:
     """Run long-term equity MC over years*252 days; return equity/Sharpe/max_dd stats."""
     daily_pnl = np.asarray(daily_pnl, dtype=float)
     n_days    = years * 252
     rng       = _make_rng(seed)
-    ruin_floor = balance * 0.10    # ruin = 90% drawdown
+    ruin_floor = balance * (1.0 - ruin_pct)
     final_eqs = []
     max_dds   = []
     sharpes   = []
-    for _ in range(n_sims):
+    for _i in range(n_sims):
         equity   = balance
         peak     = equity
         path     = [equity]
         rets     = []
-        for _ in range(n_days):
-            pnl    = float(rng.choice(daily_pnl))
+        for _day in range(n_days):
+            if predrawn_pnl is not None:
+                _d = min(_day, predrawn_pnl.shape[1] - 1)
+                pnl = float(predrawn_pnl[_i % len(predrawn_pnl), _d])
+            else:
+                pnl    = float(rng.choice(daily_pnl))
             ret    = pnl / equity if equity > 0 else 0.0
             equity = max(equity + pnl, 0.0)
             rets.append(ret)
@@ -2339,15 +2353,44 @@ def run_mc_longterm(daily_pnl, *, balance=100_000, years=5,
         max_dds.append(max_dd)
         sharpes.append(sharpe)
     fe = np.array(final_eqs)
-    return {
-        "pass_rate"       : float((fe > ruin_floor).mean()),
-        "median_equity"   : float(np.median(fe)),
-        "p10_equity"      : float(np.percentile(fe, 10)),
-        "p90_equity"      : float(np.percentile(fe, 90)),
-        "median_max_dd"   : float(np.median(max_dds)),
-        "median_sharpe"   : float(np.median(sharpes)),
+    result: dict = {
+        "pass_rate"        : float((fe > ruin_floor).mean()),
+        "median_equity"    : float(np.median(fe)),
+        "p10_equity"       : float(np.percentile(fe, 10)),
+        "p90_equity"       : float(np.percentile(fe, 90)),
+        "median_max_dd"    : float(np.median(max_dds)),
+        "median_sharpe"    : float(np.median(sharpes)),
         "annualized_return": float((np.median(fe) / balance) ** (1.0 / years) - 1),
+        "benchmark"        : None,
     }
+    if benchmark_ticker:
+        try:
+            import yfinance as yf  # type: ignore[import-not-found]
+            ticker_data = yf.download(
+                benchmark_ticker,
+                period=f"{years}y",
+                interval="1d",
+                progress=False,
+                auto_adjust=True,
+            )
+            if not ticker_data.empty:
+                closes = ticker_data["Close"].dropna().values.flatten().astype(float)
+                bm_start = float(closes[0])
+                bm_end   = float(closes[-1])
+                bm_rets  = np.diff(closes) / closes[:-1]
+                bm_ann_ret = float((bm_end / bm_start) ** (1.0 / years) - 1)
+                bm_sharpe  = float(bm_rets.mean() / bm_rets.std() * np.sqrt(252)) if bm_rets.std() > 0 else 0.0
+                result["benchmark"] = {
+                    "ticker"           : benchmark_ticker,
+                    "start_price"      : bm_start,
+                    "end_price"        : bm_end,
+                    "annualized_return": bm_ann_ret,
+                    "sharpe"           : bm_sharpe,
+                    "final_equity"     : balance * (bm_end / bm_start),
+                }
+        except Exception as _bm_exc:
+            result["benchmark"] = {"error": str(_bm_exc)}
+    return result
 
 
 # =============================================================================
