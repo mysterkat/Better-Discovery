@@ -32,3 +32,13 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Claude Code worktrees
+.claude/
+
+# Stray tilde folder (Tauri signer wrote keys here when path was unexpanded)
+~/
+
+# Tauri signing keys — never commit
+*.key
+*.key.pub
