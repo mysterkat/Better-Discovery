@@ -640,3 +640,64 @@ kbd {
   font-weight: 400;
   color: var(--text2);
 }
+
+/* ── Update section in settings ────────────────────────────────────── */
+.settings-section {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+.settings-section h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-meta {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--text2);
+}
+.settings-button {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg3);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.12s;
+}
+.settings-button:hover { background: var(--bg2); }
+.settings-notes {
+  margin: 8px 0;
+  padding: 8px;
+  background: var(--bg3);
+  border-radius: 6px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.settings-error {
+  color: #e57373;
+  font-size: 12px;
+}
+
+/* ── Update available toast (top of window) ────────────────────────── */
+.update-toast {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 1000;
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  transition: background 0.12s;
+}
+.update-toast:hover { background: var(--bg3); }

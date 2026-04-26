@@ -7,13 +7,23 @@ import SettingsPanel from "./components/SettingsPanel";
 import { TABS, type TabId } from "./router";
 import { useSettings } from "./state/settings";
 import { resetPort } from "./api/client";
+import { silentCheckOnLaunch } from "./lib/updater";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("data-import");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
+  const [updateAvailableVersion, setUpdateAvailableVersion] = useState<
+    string | null
+  >(null);
 
   const loadSettings = useSettings((s) => s.load);
+
+  useEffect(() => {
+    silentCheckOnLaunch().then((update) => {
+      if (update) setUpdateAvailableVersion(update.version);
+    });
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -55,6 +65,16 @@ export default function App() {
         onTabChange={setActiveTab}
         onSettings={() => setSettingsOpen(true)}
       />
+
+      {updateAvailableVersion && (
+        <button
+          className="update-toast"
+          onClick={() => setSettingsOpen(true)}
+          title="Open settings to install"
+        >
+          Update available: v{updateAvailableVersion} — click to install
+        </button>
+      )}
 
       <main className="main-content">
         {!backendReady && (

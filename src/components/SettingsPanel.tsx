@@ -1,4 +1,5 @@
 import ThemePicker from "./ThemePicker";
+import UpdateSection from "./UpdateSection";
 
 interface SettingsPanelProps {
   open: boolean;
@@ -34,6 +35,7 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         </div>
         <div className="settings-body">
           <ThemePicker />
+          <UpdateSection />
         </div>
       </aside>
     </>
