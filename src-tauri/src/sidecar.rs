@@ -82,21 +82,33 @@ fn spawn_child(app: &AppHandle) -> Result<(), String> {
         }
     }
 
+    cmd.args([
+        "-u",
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port.to_string(),
+        "--log-level",
+        "info",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+    // Hide the Python sidecar's console window on Windows. Without this the
+    // child process spawns its own visible cmd window (the parent app already
+    // sets windows_subsystem = "windows" in main.rs, so it has no console of
+    // its own). Captured stdout/stderr still flow through the watch threads.
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
     let mut child = cmd
-        .args([
-            "-u",
-            "-m",
-            "uvicorn",
-            "app.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &port.to_string(),
-            "--log-level",
-            "info",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("spawn uvicorn: {e}"))?;
 
