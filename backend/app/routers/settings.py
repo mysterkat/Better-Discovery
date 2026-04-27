@@ -2,6 +2,8 @@
 
 GET  /settings              -> read userdata/settings.json
 PUT  /settings              -> write userdata/settings.json
+GET  /param-defaults        -> read userdata/param_defaults.json
+PUT  /param-defaults        -> write userdata/param_defaults.json
 GET  /themes                -> list theme JSON files in userdata/themes/
 POST /themes                -> write a theme JSON
 GET  /jobs                  -> snapshot all jobs
@@ -25,6 +27,7 @@ from ..paths import USER_DATA
 router = APIRouter()
 
 _SETTINGS_FILE = USER_DATA / "settings.json"
+_PARAM_DEFAULTS_FILE = USER_DATA / "param_defaults.json"
 _THEMES_DIR = USER_DATA / "themes"
 _THEMES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -44,6 +47,21 @@ def get_settings() -> dict[str, Any]:
 @router.put("/settings")
 def put_settings(body: dict[str, Any]) -> dict[str, Any]:
     _SETTINGS_FILE.write_text(json.dumps(body, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"ok": True}
+
+
+@router.get("/param-defaults")
+def get_param_defaults() -> dict[str, Any]:
+    """Return persisted user-defined default values for Discovery and MC Sim params."""
+    if not _PARAM_DEFAULTS_FILE.exists():
+        return {}
+    return json.loads(_PARAM_DEFAULTS_FILE.read_text(encoding="utf-8"))
+
+
+@router.put("/param-defaults")
+def put_param_defaults(body: dict[str, Any]) -> dict[str, Any]:
+    """Persist user-defined default values for Discovery and MC Sim params."""
+    _PARAM_DEFAULTS_FILE.write_text(json.dumps(body, indent=2, ensure_ascii=False), encoding="utf-8")
     return {"ok": True}
 
 

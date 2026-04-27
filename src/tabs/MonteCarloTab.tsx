@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { getMcParams, runAllPhases, type McRunAllRequest } from "../api/mc";
 import { useJobs } from "../state/jobs";
+import { useParamDefaults } from "../state/paramDefaults";
 import JobProgress from "../components/JobProgress";
 import type { ParamDef } from "../api/discovery";
 
@@ -34,7 +35,19 @@ export default function MonteCarloTab() {
   const isDone = !!jobId && (job?.status === "done" || job?.status === "failed");
 
   useEffect(() => {
-    getMcParams().then(setParams).catch(() => {});
+    getMcParams().then((loaded) => {
+      setParams(loaded);
+      // Pre-fill overrides from persistent defaults. Read via getState() so
+      // we pick up the current store value even if it loads after mount.
+      const snap = useParamDefaults.getState().defaults;
+      const initial: Record<string, string> = {};
+      for (const p of loaded) {
+        if (p.key in snap && snap[p.key] != null) {
+          initial[p.key] = String(snap[p.key]);
+        }
+      }
+      setOverrides(initial);
+    }).catch(() => {});
   }, []);
 
   const groups = useMemo(() => {

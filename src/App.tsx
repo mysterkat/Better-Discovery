@@ -6,6 +6,7 @@ import Sidebar from "./components/Sidebar";
 import SettingsPanel from "./components/SettingsPanel";
 import { TABS, type TabId } from "./router";
 import { useSettings } from "./state/settings";
+import { useParamDefaults } from "./state/paramDefaults";
 import { resetPort } from "./api/client";
 import { silentCheckOnLaunch } from "./lib/updater";
 
@@ -18,6 +19,7 @@ export default function App() {
   >(null);
 
   const loadSettings = useSettings((s) => s.load);
+  const loadParamDefaults = useParamDefaults((s) => s.load);
 
   useEffect(() => {
     silentCheckOnLaunch().then((update) => {
@@ -28,25 +30,30 @@ export default function App() {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
 
+    const bootStores = () => {
+      loadSettings();
+      loadParamDefaults();
+    };
+
     const init = async () => {
       try {
         unlisten = await listen<{ port: number }>("backend-ready", (e) => {
           resetPort(e.payload.port);
           setBackendReady(true);
-          loadSettings();
+          bootStores();
         });
         // Already running before we mounted — pick up the live port.
         const port = await invoke<number | null>("get_backend_port");
         if (port != null) {
           resetPort(port);
           setBackendReady(true);
-          loadSettings();
+          bootStores();
         }
       } catch {
         // Running outside the Tauri shell (plain `vite dev`).
         // Connect via fallback port defined in api/client.ts.
         setBackendReady(true);
-        loadSettings();
+        bootStores();
       }
     };
 
@@ -54,7 +61,7 @@ export default function App() {
     return () => {
       if (unlisten) unlisten();
     };
-  }, [loadSettings]);
+  }, [loadSettings, loadParamDefaults]);
 
   const activeTabDef = TABS.find((t) => t.id === activeTab);
 

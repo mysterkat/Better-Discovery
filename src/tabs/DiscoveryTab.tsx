@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { getParams, startDiscovery, type ParamDef } from "../api/discovery";
 import { useJobs } from "../state/jobs";
+import { useParamDefaults } from "../state/paramDefaults";
 import JobProgress from "../components/JobProgress";
 import { openResultWindow } from "../lib/windows";
 
@@ -22,7 +23,22 @@ export default function DiscoveryTab() {
   const isDone = !!jobId && (job?.status === "done" || job?.status === "failed");
 
   useEffect(() => {
-    getParams().then(setParams).catch(() => {});
+    getParams().then((loaded) => {
+      setParams(loaded);
+      // Pre-fill overrides from the persistent defaults store. We read via
+      // getState() (not via a ref) so we pick up whatever has loaded by the
+      // time /discovery/params resolves, even if the store finished loading
+      // after this component mounted.
+      const snap = useParamDefaults.getState().defaults;
+      const initial: Record<string, string> = {};
+      for (const p of loaded) {
+        if (FOLDER_KEYS.has(p.key)) continue;
+        if (p.key in snap && snap[p.key] != null) {
+          initial[p.key] = String(snap[p.key]);
+        }
+      }
+      setOverrides(initial);
+    }).catch(() => {});
   }, []);
 
   // Group params by their 'group' field.
