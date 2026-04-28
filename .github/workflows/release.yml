@@ -51,11 +51,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: src-tauri/binaries/python
-          # v2: bumped after a broken numpy install was observed in v0.2.2 bundles
-          key: embedded-python-v2-${{ hashFiles('setup_embedded_python.ps1', 'backend/requirements.txt') }}
+          # v3: previous v2 cache was poisoned (saved empty folder after a failed run)
+          key: embedded-python-v3-${{ hashFiles('setup_embedded_python.ps1', 'backend/requirements.txt') }}
+
+      - name: Detect partial / empty cache restore
+        id: cache-check
+        shell: pwsh
+        run: |
+          $exists = Test-Path "src-tauri\binaries\python\python.exe"
+          echo "python_exists=$($exists.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          Write-Host "python.exe present after cache restore: $exists"
 
       - name: Set up embedded Python runtime
-        if: steps.cache-python.outputs.cache-hit != 'true'
+        if: steps.cache-python.outputs.cache-hit != 'true' || steps.cache-check.outputs.python_exists != 'true'
         shell: pwsh
         run: |
           Set-ExecutionPolicy -Scope Process Bypass -Force
