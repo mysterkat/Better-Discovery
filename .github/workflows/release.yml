@@ -54,23 +54,29 @@ jobs:
           # v2: bumped after a broken numpy install was observed in v0.2.2 bundles
           key: embedded-python-v2-${{ hashFiles('setup_embedded_python.ps1', 'backend/requirements.txt') }}
 
-      - name: Verify embedded Python install integrity (post-cache-restore)
-        shell: pwsh
-        run: |
-          $numpyTesting = "src-tauri/binaries/python/Lib/site-packages/numpy/testing/__init__.py"
-          if (-not (Test-Path $numpyTesting)) {
-            Write-Host "numpy.testing missing from cached embedded Python — forcing reinstall"
-            & "src-tauri/binaries/python/python.exe" -m pip install --force-reinstall --no-deps numpy==1.26.4
-          }
-          if (-not (Test-Path $numpyTesting)) { throw "numpy.testing still missing after reinstall — install is broken" }
-          Write-Host "Embedded Python integrity: OK"
-
       - name: Set up embedded Python runtime
         if: steps.cache-python.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           Set-ExecutionPolicy -Scope Process Bypass -Force
           .\setup_embedded_python.ps1
+
+      - name: Verify embedded Python install integrity
+        shell: pwsh
+        run: |
+          $pythonExe    = Resolve-Path "src-tauri\binaries\python\python.exe"
+          $numpyTesting = "src-tauri\binaries\python\Lib\site-packages\numpy\testing\__init__.py"
+          if (-not (Test-Path $numpyTesting)) {
+            Write-Host "numpy.testing missing — forcing reinstall via $pythonExe"
+            & $pythonExe -m pip install --force-reinstall --no-deps numpy==1.26.4
+            if ($LASTEXITCODE -ne 0) { throw "pip reinstall numpy failed (exit $LASTEXITCODE)" }
+          }
+          if (-not (Test-Path $numpyTesting)) {
+            throw "numpy.testing still missing after reinstall — embedded Python install is broken"
+          }
+          # Smoke-test: actually import numpy.testing in the embedded interpreter
+          & $pythonExe -c "import numpy.testing; print('numpy.testing OK:', numpy.testing.__file__)"
+          if ($LASTEXITCODE -ne 0) { throw "numpy.testing exists on disk but cannot be imported" }
 
       - name: Install npm dependencies
         run: npm ci
