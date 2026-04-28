@@ -46,45 +46,11 @@ jobs:
         with:
           workspaces: "src-tauri -> target"
 
-      - name: Cache embedded Python
-        id: cache-python
-        uses: actions/cache@v4
-        with:
-          path: src-tauri/binaries/python
-          # v3: previous v2 cache was poisoned (saved empty folder after a failed run)
-          key: embedded-python-v3-${{ hashFiles('setup_embedded_python.ps1', 'backend/requirements.txt') }}
-
-      - name: Detect partial / empty cache restore
-        id: cache-check
-        shell: pwsh
-        run: |
-          $exists = Test-Path "src-tauri\binaries\python\python.exe"
-          echo "python_exists=$($exists.ToString().ToLower())" >> $env:GITHUB_OUTPUT
-          Write-Host "python.exe present after cache restore: $exists"
-
-      - name: Set up embedded Python runtime
-        if: steps.cache-python.outputs.cache-hit != 'true' || steps.cache-check.outputs.python_exists != 'true'
-        shell: pwsh
-        run: |
-          Set-ExecutionPolicy -Scope Process Bypass -Force
-          .\setup_embedded_python.ps1
-
-      - name: Verify embedded Python install integrity
-        shell: pwsh
-        run: |
-          $pythonExe    = Resolve-Path "src-tauri\binaries\python\python.exe"
-          $numpyTesting = "src-tauri\binaries\python\Lib\site-packages\numpy\testing\__init__.py"
-          if (-not (Test-Path $numpyTesting)) {
-            Write-Host "numpy.testing missing — forcing reinstall via $pythonExe"
-            & $pythonExe -m pip install --force-reinstall --no-deps numpy==1.26.4
-            if ($LASTEXITCODE -ne 0) { throw "pip reinstall numpy failed (exit $LASTEXITCODE)" }
-          }
-          if (-not (Test-Path $numpyTesting)) {
-            throw "numpy.testing still missing after reinstall — embedded Python install is broken"
-          }
-          # Smoke-test: actually import numpy.testing in the embedded interpreter
-          & $pythonExe -c "import numpy.testing; print('numpy.testing OK:', numpy.testing.__file__)"
-          if ($LASTEXITCODE -ne 0) { throw "numpy.testing exists on disk but cannot be imported" }
+      # NOTE: setup_embedded_python.ps1 installs Python to %LOCALAPPDATA%\BETTER DISCOVERY\python
+      # (NOT to src-tauri\binaries\python despite stale docstring). Currently Python is NOT
+      # bundled into the installer — end users get it from a separate setup. This is an
+      # architectural gap to address in a follow-up PR (bundle Python via tauri.conf.json
+      # resources). For now CI just builds the .exe; Python bundling is out of scope here.
 
       - name: Install npm dependencies
         run: npm ci
