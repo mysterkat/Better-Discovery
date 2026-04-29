@@ -27,6 +27,10 @@ class MT5FetchRequest(BaseModel):
     symbol: str = "XAUUSD"
     save_folder: str = ""       # empty → use default userdata/hist_data/
     tf_specs: list[TfSpec]
+    # When true, the canonical hist_data folder is wiped of recognized
+    # `{symbol}_{tf}.csv` files before the new fetch runs. Frontend should
+    # set this only after the user confirms a destructive overwrite.
+    clear_existing: bool = False
 
 
 class MqlExportRequest(BaseModel):

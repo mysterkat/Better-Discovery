@@ -2,10 +2,12 @@ import { useState, useEffect, useCallback } from "react";
 import {
   checkMt5,
   fetchMt5Data,
+  getCurrentImport,
   getDefaultFolder,
   calcCandles,
   type TfSpec,
   type Mt5CheckResult,
+  type CurrentImport,
 } from "../api/data";
 import { useJobs } from "../state/jobs";
 import JobProgress from "../components/JobProgress";
@@ -54,13 +56,29 @@ export default function DataImportTab() {
   const [jobResult, setJobResult] = useState<unknown>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [currentImport, setCurrentImport] = useState<CurrentImport | null>(null);
+  const [confirmReplace, setConfirmReplace] = useState(false);
 
   const job = useJobs((s) => (jobId ? s.jobs[jobId] : undefined));
-  const isRunning = !!jobId && job?.status === "running";
+  const setActiveJob = useJobs((s) => s.setActive);
+  const isRunning = !!jobId && (job?.status === "running" || job?.status === "pending");
+
+  const refreshCurrentImport = useCallback(() => {
+    getCurrentImport().then(setCurrentImport).catch(() => {});
+  }, []);
 
   useEffect(() => {
     getDefaultFolder().then(setDefaultFolder).catch(() => {});
-  }, []);
+    refreshCurrentImport();
+    // Recover any in-flight MT5 fetch from a previous mount of this tab.
+    const stored = useJobs.getState().activeByKind["mt5_fetch"];
+    if (stored) {
+      const existing = useJobs.getState().jobs[stored];
+      if (!existing || (existing.status !== "done" && existing.status !== "failed" && existing.status !== "cancelled")) {
+        setJobId(stored);
+      }
+    }
+  }, [refreshCurrentImport]);
 
   // Sync row array length when nTf changes.
   useEffect(() => {
@@ -134,11 +152,7 @@ export default function DataImportTab() {
     recalcCandles(idx, rows[idx]);
   };
 
-  const handleRun = async () => {
-    if (!mt5Status?.ok) {
-      setError("Connect to MT5 first.");
-      return;
-    }
+  const performFetch = async (clearExisting: boolean) => {
     const folder = overrideOnce && overrideFolder.trim()
       ? overrideFolder.trim()
       : defaultFolder;
@@ -152,13 +166,44 @@ export default function DataImportTab() {
     setJobId(null);
     setJobResult(null);
     try {
-      const ref = await fetchMt5Data({ symbol: symbol.trim() || "XAUUSD", save_folder: folder, tf_specs });
+      const ref = await fetchMt5Data({
+        symbol: symbol.trim() || "XAUUSD",
+        save_folder: folder,
+        tf_specs,
+        clear_existing: clearExisting,
+      });
       setJobId(ref.job_id);
+      setActiveJob("mt5_fetch", ref.job_id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setStarting(false);
     }
+  };
+
+  const handleRun = async () => {
+    if (!mt5Status?.ok) {
+      setError("Connect to MT5 first.");
+      return;
+    }
+    // Only the canonical hist_data folder is auto-cleared. If the user is
+    // pointing at a custom folder via "override once", skip the confirmation
+    // and don't touch their custom folder.
+    const usingDefaultFolder = !(overrideOnce && overrideFolder.trim());
+    if (usingDefaultFolder && currentImport?.exists) {
+      setConfirmReplace(true);
+      return;
+    }
+    void performFetch(false);
+  };
+
+  const handleConfirmReplace = () => {
+    setConfirmReplace(false);
+    void performFetch(true);
+  };
+
+  const handleCancelReplace = () => {
+    setConfirmReplace(false);
   };
 
   const handleJobDone = (result: unknown) => {
@@ -167,6 +212,9 @@ export default function DataImportTab() {
       setOverrideOnce(false);
       setOverrideFolder("");
     }
+    // Refresh the "current import" snapshot so subsequent fetches see the
+    // new files for the confirmation logic and the discovery auto-detect.
+    refreshCurrentImport();
   };
 
   const outputFolder = overrideOnce && overrideFolder.trim() ? overrideFolder.trim() : defaultFolder;
@@ -315,6 +363,21 @@ export default function DataImportTab() {
         )}
       </div>
 
+      {/* Current import status */}
+      {currentImport && currentImport.exists && (
+        <div className="form-section">
+          <div className="section-label">Currently Imported</div>
+          <div className="current-import-banner">
+            <strong>{currentImport.symbol ?? "—"}</strong>
+            {" · "}
+            {currentImport.timeframes.map((tf) => tf.label).join(", ")}
+            <span className="field-hint" style={{ marginLeft: 8 }}>
+              ({currentImport.timeframes.length} file{currentImport.timeframes.length === 1 ? "" : "s"})
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Run */}
       <div className="action-row">
         <button
@@ -377,6 +440,39 @@ export default function DataImportTab() {
           </div>
         );
       })()}
+
+      {/* Replace-existing confirmation */}
+      {confirmReplace && currentImport && (
+        <div className="confirm-modal-backdrop" onClick={handleCancelReplace}>
+          <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="confirm-modal-title">Replace existing import?</h3>
+            <p className="confirm-modal-body">
+              The hist_data folder currently contains an import of{" "}
+              <strong>{currentImport.symbol ?? "—"}</strong>
+              {" "}({currentImport.timeframes.length} file
+              {currentImport.timeframes.length === 1 ? "" : "s"}).
+              Continuing will <strong>delete it</strong> before fetching{" "}
+              <strong>{symbol.trim() || "XAUUSD"}</strong> ({rows.length} timeframe
+              {rows.length === 1 ? "" : "s"}).
+            </p>
+            <ul className="confirm-modal-list">
+              {currentImport.timeframes.map((tf) => (
+                <li key={tf.filename}>
+                  <code>{tf.filename}</code>
+                </li>
+              ))}
+            </ul>
+            <div className="confirm-modal-actions">
+              <button className="btn btn-secondary" onClick={handleCancelReplace}>
+                Cancel
+              </button>
+              <button className="btn btn-danger" onClick={handleConfirmReplace}>
+                Yes, delete and fetch
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

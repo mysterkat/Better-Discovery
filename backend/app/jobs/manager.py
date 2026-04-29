@@ -27,7 +27,16 @@ class Job:
     error: Optional[str] = None
     meta: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    started_at: Optional[float] = None
     finished_at: Optional[float] = None
+    # Stage-name progress reporting (e.g., "[3/13] Bidirectional Analysis").
+    stage_name: Optional[str] = None
+    stage_index: Optional[int] = None
+    stage_total: Optional[int] = None
+    # ETA in seconds, derived from elapsed / stages-completed × stages-remaining.
+    eta_seconds: Optional[float] = None
+    # Cancel cooperation: set by POST /jobs/{id}/cancel; workers check it.
+    cancel_requested: bool = False
     _done: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def wait(self, timeout: float) -> bool:
@@ -36,11 +45,36 @@ class Job:
 
     def mark_running(self) -> None:
         self.status = "running"
+        self.started_at = time.time()
+
+    def mark_stage(self, name: str, index: int, total: int) -> None:
+        """Update the current stage indicator and recompute ETA.
+
+        ETA is a linear projection: (elapsed / stages_completed) × stages_remaining.
+        Off for non-uniform stages but good enough as a "still alive, ~N min left"
+        signal. We treat stage_index as the *just-completed* stage count so the
+        first call (1/13) means "starting stage 1, 0 stages done yet".
+        """
+        self.stage_name = name
+        self.stage_index = index
+        self.stage_total = total
+        # progress = fraction of stages started — gives a non-zero bar early.
+        if total > 0:
+            self.progress = max(0.0, min(1.0, index / total))
+        # ETA: extrapolate from time spent so far.
+        if self.started_at is not None and index > 1 and total > index:
+            elapsed = time.time() - self.started_at
+            stages_done = max(1, index - 1)  # finished stages
+            per_stage = elapsed / stages_done
+            self.eta_seconds = per_stage * (total - index + 1)
+        else:
+            self.eta_seconds = None
 
     def mark_done(self, result: Any) -> None:
         self.result = result
         self.status = "done"
         self.progress = 1.0
+        self.eta_seconds = 0.0
         self.finished_at = time.time()
         self._done.set()
 
@@ -50,20 +84,45 @@ class Job:
         self.finished_at = time.time()
         self._done.set()
 
+    def mark_cancelled(self, reason: str = "Cancelled by user") -> None:
+        self.error = reason
+        self.status = "cancelled"
+        self.finished_at = time.time()
+        self._done.set()
+
+    def request_cancel(self) -> None:
+        """Mark cancellation requested. Workers cooperate by checking
+        is_cancel_requested() at safe boundaries; subprocess-based jobs may
+        also be terminated externally via meta-stored handles."""
+        self.cancel_requested = True
+
+    def is_cancel_requested(self) -> bool:
+        return self.cancel_requested
+
     def append_log(self, line: str) -> None:
         self.log.append(line)
 
     def snapshot(self) -> dict[str, Any]:
+        # Filter underscore-prefixed keys out of meta — they hold runtime
+        # handles like a live Popen reference for cancellation, which are
+        # not JSON-serializable and must never reach the SSE stream.
+        public_meta = {k: v for k, v in self.meta.items() if not k.startswith("_")}
         return {
             "job_id": self.job_id,
             "kind": self.kind,
             "status": self.status,
             "progress": self.progress,
+            "stage_name": self.stage_name,
+            "stage_index": self.stage_index,
+            "stage_total": self.stage_total,
+            "eta_seconds": self.eta_seconds,
             "log_tail": self.log[-20:],
-            "meta": self.meta,
+            "meta": public_meta,
             "error": self.error,
             "created_at": self.created_at,
+            "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "cancel_requested": self.cancel_requested,
         }
 
 

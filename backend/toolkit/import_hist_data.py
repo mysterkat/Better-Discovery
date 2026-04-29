@@ -147,12 +147,16 @@ def main(
     os.makedirs(save_folder, exist_ok=True)
 
     files: list[dict[str, Any]] = []
-    for spec in tf_specs:
+    n_total = len(tf_specs)
+    for idx, spec in enumerate(tf_specs, start=1):
         try:
             prefix     = str(spec["prefix"])
             time_value = int(spec["time_value"])
             days       = int(spec["trading_days"])
             label      = tf_label(prefix, time_value)
+            # Progress marker the bridge parses to update job.stage_*
+            # Format must match `^\[(\d+)/(\d+)\]\s*(.+)$` — keep it stable.
+            print(f"[{idx}/{n_total}] Fetching {label.upper()}", flush=True)
             attr_name  = _TF_ATTR.get(label)
             if attr_name is None:
                 raise ValueError(f"Unsupported timeframe: {prefix}{time_value}")

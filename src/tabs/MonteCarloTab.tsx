@@ -35,11 +35,20 @@ export default function MonteCarloTab() {
   const persistentDefaults = useParamDefaults((s) => s.defaults);
 
   const job = useJobs((s) => (jobId ? s.jobs[jobId] : undefined));
-  const isRunning = !!jobId && job?.status === "running";
-  const isDone = !!jobId && (job?.status === "done" || job?.status === "failed");
+  const setActiveJob = useJobs((s) => s.setActive);
+  const isRunning = !!jobId && (job?.status === "running" || job?.status === "pending");
+  const isDone = !!jobId && (job?.status === "done" || job?.status === "failed" || job?.status === "cancelled");
 
   useEffect(() => {
     getMcParams().then(setParams).catch(() => {});
+    // Recover any in-flight MC job from a previous mount of this tab.
+    const stored = useJobs.getState().activeByKind["mc_all"];
+    if (stored) {
+      const existing = useJobs.getState().jobs[stored];
+      if (!existing || (existing.status !== "done" && existing.status !== "failed" && existing.status !== "cancelled")) {
+        setJobId(stored);
+      }
+    }
   }, []);
 
   const trueDefault = (p: ParamDef): string => {
@@ -143,6 +152,7 @@ export default function MonteCarloTab() {
       };
       const ref = await runAllPhases(req);
       setJobId(ref.job_id);
+      setActiveJob("mc_all", ref.job_id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

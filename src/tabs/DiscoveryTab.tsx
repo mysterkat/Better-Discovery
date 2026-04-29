@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { getParams, startDiscovery, type ParamDef } from "../api/discovery";
+import { getCurrentImport, type CurrentImport } from "../api/data";
 import { useJobs } from "../state/jobs";
 import { useParamDefaults } from "../state/paramDefaults";
 import JobProgress from "../components/JobProgress";
@@ -20,18 +21,39 @@ export default function DiscoveryTab() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [currentImport, setCurrentImport] = useState<CurrentImport | null>(null);
 
   // Subscribe reactively to persistent defaults so changes made in the
   // settings modal propagate into placeholders + labels live.
   const persistentDefaults = useParamDefaults((s) => s.defaults);
 
   const job = useJobs((s) => (jobId ? s.jobs[jobId] : undefined));
-  const isRunning = !!jobId && job?.status === "running";
-  const isDone = !!jobId && (job?.status === "done" || job?.status === "failed");
+  const setActiveJob = useJobs((s) => s.setActive);
+  const isRunning = !!jobId && (job?.status === "running" || job?.status === "pending");
+  const isDone = !!jobId && (job?.status === "done" || job?.status === "failed" || job?.status === "cancelled");
 
   useEffect(() => {
     getParams().then(setParams).catch(() => {});
+    getCurrentImport().then(setCurrentImport).catch(() => {});
+    // Recover an in-flight discovery job from a previous mount of this tab.
+    const stored = useJobs.getState().activeByKind["discovery"];
+    if (stored) {
+      const existing = useJobs.getState().jobs[stored];
+      if (!existing || (existing.status !== "done" && existing.status !== "failed" && existing.status !== "cancelled")) {
+        setJobId(stored);
+      }
+    }
   }, []);
+
+  // Discovery's auto-detect picks the smallest 3 timeframes if the user
+  // hasn't customized any TFn_FILE override. We surface this in a banner so
+  // it's obvious which files the run will actually use.
+  const tfFilesUserSet = ["TF1_FILE", "TF2_FILE", "TF3_FILE"].some(
+    (k) => (overrides[k]?.trim() || persistentDefaults[k]) != null,
+  );
+  const autoDetectedTfs = currentImport?.exists
+    ? currentImport.timeframes.slice(0, 3).map((tf) => tf.label).join(", ")
+    : "";
 
   // The "true default" for a param: user's persistent default if set,
   // else the code-level default from pattern_discovery_v6.py.
@@ -127,6 +149,7 @@ export default function DiscoveryTab() {
       }
       const ref = await startDiscovery(parsed);
       setJobId(ref.job_id);
+      setActiveJob("discovery", ref.job_id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -291,6 +314,31 @@ export default function DiscoveryTab() {
           <code> pattern_discovery_v6.py</code>; override only what you need.
         </p>
       </div>
+
+      {currentImport && (
+        <div className="form-section">
+          <div className="current-import-banner">
+            {currentImport.exists ? (
+              <>
+                <strong>Data source:</strong>{" "}
+                {currentImport.symbol ?? "—"}
+                {" · "}
+                {tfFilesUserSet
+                  ? <span>using your TF1/TF2/TF3 overrides</span>
+                  : <span>auto-detected — {autoDetectedTfs || "no timeframes found"}</span>}
+                <span className="field-hint" style={{ marginLeft: 8 }}>
+                  ({currentImport.timeframes.length} file{currentImport.timeframes.length === 1 ? "" : "s"} in hist_data)
+                </span>
+              </>
+            ) : (
+              <span style={{ color: "var(--text2)" }}>
+                <strong>No data imported.</strong>{" "}
+                Use the Data Import tab to fetch from MT5 first — discovery will fail without input data.
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {params.length === 0 ? (
         <p className="tab-loading">Loading parameters…</p>

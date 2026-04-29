@@ -61,11 +61,26 @@ def mt5_fetch(req: MT5FetchRequest) -> JobRef:
         kind="mt5_fetch",
         meta={"symbol": req.symbol, "n_tf": len(tf_specs)},
     )
+    clear_existing = req.clear_existing
     run_in_thread(
         job,
-        lambda: mt5_bridge.fetch_historical(req.symbol, req.save_folder, tf_specs),
+        lambda: mt5_bridge.fetch_historical(
+            req.symbol, req.save_folder, tf_specs,
+            clear_existing=clear_existing,
+        ),
     )
     return JobRef(job_id=job.job_id, status=job.status)
+
+
+@router.get("/data/current-import")
+def mt5_current_import() -> dict[str, Any]:
+    """Return what's currently in the canonical hist_data folder.
+
+    Frontend uses this to (a) decide whether to show a "replace existing data"
+    confirmation before a new import and (b) display which timeframes are
+    currently active for Pattern Discovery to consume.
+    """
+    return mt5_bridge.list_current_import()
 
 
 @router.post("/data/import")

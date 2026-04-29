@@ -9,11 +9,53 @@ main(). Only known constant names are allowed.
 
 from __future__ import annotations
 
+import re
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
 from .. import paths  # noqa: F401
 from ..paths import DEFAULT_DISC_OUTPUT, DEFAULT_HIST_DATA
+
+
+_STAGE_RE = re.compile(r"^\[(\d+)/(\d+)\]\s*(.+)$")
+
+
+class _ProgressCapture:
+    """Wrap sys.stdout so we can parse `[i/N] StageName` lines emitted by
+    pattern_discovery_v6.main()'s `_stage()` calls and report them to the
+    job. Also opportunistically checks the cancel flag on each line — if
+    the user has requested cancellation, the next print raises out of
+    main()."""
+
+    def __init__(self, original: Any, job: Any) -> None:
+        self._orig = original
+        self._job = job
+        self._buf = ""
+
+    def write(self, data: str) -> int:
+        n = self._orig.write(data)
+        self._buf += data
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            line = line.strip()
+            if line:
+                m = _STAGE_RE.match(line)
+                if m:
+                    idx, total, name = int(m.group(1)), int(m.group(2)), m.group(3).strip()
+                    self._job.mark_stage(name, idx, total)
+            # Cooperative cancellation — raise so main() unwinds at the
+            # next print boundary (which is at every stage transition).
+            if self._job.is_cancel_requested():
+                from ..jobs.runners import CancelledError
+                raise CancelledError(f"job {self._job.job_id} cancelled at stage")
+        return n
+
+    def flush(self) -> None:
+        self._orig.flush()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._orig, name)
 
 
 @dataclass
@@ -238,6 +280,32 @@ def list_defaults_with_meta() -> list[dict[str, Any]]:
     return result
 
 
+def _auto_fill_tf_files(mod: Any, overrides: dict[str, Any]) -> None:
+    """If the user hasn't customized any of TF1/TF2/TF3_FILE, auto-detect them
+    from the contents of DATA_FOLDER (whatever was just imported via MT5).
+
+    Sorts available CSVs by timeframe duration (smallest first) and fills the
+    three slots from that. Mutates `overrides` in place. If the user touched
+    even one TFn_FILE, all three are left as the user specified.
+    """
+    tf_keys = ("TF1_FILE", "TF2_FILE", "TF3_FILE")
+    if any(k in overrides for k in tf_keys):
+        return  # user customized at least one — respect their full setup
+
+    from . import mt5_import as _mt5
+    inv = _mt5.list_current_import()
+    files: list[str] = [tf["filename"] for tf in inv.get("timeframes", [])]
+    if not files:
+        return  # no import detected — leave module's hardcoded defaults
+
+    # Slot 1/2/3 with smallest timeframes; if fewer than 3 detected, the
+    # remaining slots are blanked so the discovery script's `if TFn_FILE:`
+    # guards skip them gracefully.
+    overrides["TF1_FILE"] = files[0] if len(files) >= 1 else ""
+    overrides["TF2_FILE"] = files[1] if len(files) >= 2 else ""
+    overrides["TF3_FILE"] = files[2] if len(files) >= 3 else ""
+
+
 def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """Monkey-patch globals and call pattern_discovery_v6.main().
 
@@ -258,6 +326,10 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     if "DATA_FOLDER" not in overrides:
         overrides["DATA_FOLDER"] = str(DEFAULT_HIST_DATA)
 
+    # Auto-detect TF files from the current MT5 import unless the user
+    # explicitly customized them.
+    _auto_fill_tf_files(mod, overrides)
+
     # Snapshot originals so we can restore them after the run.
     original: dict[str, Any] = {}
     for name, val in overrides.items():
@@ -265,6 +337,15 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
             raise KeyError(f"pattern_discovery_v6 has no attribute '{name}'")
         original[name] = getattr(mod, name)
         setattr(mod, name, val)
+
+    # Wrap stdout for stage-progress reporting + cancel cooperation.
+    # We do this conditionally: only when running on a job thread (i.e.,
+    # via the FastAPI bridge), not when imported standalone.
+    from ..jobs.runners import get_current_job
+    job = get_current_job()
+    orig_stdout = sys.stdout
+    if job is not None:
+        sys.stdout = _ProgressCapture(orig_stdout, job)  # type: ignore[assignment]
 
     try:
         # The script's `if __name__ == "__main__"` block normally does these two
@@ -276,6 +357,7 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         mod._prepare_shared_data(mod._n_workers())
         mod.main()
     finally:
+        sys.stdout = orig_stdout
         for name, val in original.items():
             setattr(mod, name, val)
 

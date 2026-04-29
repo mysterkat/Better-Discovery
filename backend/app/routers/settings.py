@@ -113,3 +113,29 @@ async def job_events(job_id: str) -> StreamingResponse:
             await asyncio.sleep(0.25)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@router.post("/jobs/{job_id}/cancel")
+def job_cancel(job_id: str) -> dict[str, Any]:
+    """Request cancellation of a running job.
+
+    Cancellation is cooperative: the job's worker code checks
+    `job.is_cancel_requested()` at safe boundaries. Subprocess-based jobs
+    (MT5 import) are also actively terminated by the bridge once it sees
+    the flag. Discovery (in-process multiprocessing) takes effect at the
+    next stage boundary.
+    """
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"unknown job_id {job_id}")
+    if job.status in {"done", "failed", "cancelled"}:
+        return {"ok": True, "already_terminal": True, "status": job.status}
+    job.request_cancel()
+    # If a subprocess was registered for this job, signal it.
+    proc = job.meta.get("_subprocess")
+    if proc is not None and hasattr(proc, "terminate"):
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    return {"ok": True, "status": job.status, "cancel_requested": True}

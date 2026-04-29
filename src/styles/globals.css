@@ -360,6 +360,70 @@ button { font-family: inherit; }
 .btn-secondary:not(:disabled):hover { border-color: var(--accent2); }
 .btn-accent { background: var(--accent); color: #fff; }
 .btn-accent:not(:disabled):hover { opacity: 0.88; }
+.btn-danger { background: #c0392b; color: #fff; border-color: #c0392b; }
+.btn-danger:not(:disabled):hover { background: #a83224; border-color: #a83224; }
+
+/* ── Current import banner ─────────────────────────────────────────── */
+.current-import-banner {
+  padding: 10px 14px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* ── Confirmation modal ────────────────────────────────────────────── */
+.confirm-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: bd-fade-in 0.15s ease;
+}
+.confirm-modal {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: min(480px, 90vw);
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: 22px 24px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.confirm-modal-title {
+  margin: 0 0 10px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.confirm-modal-body {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--text2);
+  line-height: 1.5;
+}
+.confirm-modal-body strong { color: var(--text); }
+.confirm-modal-list {
+  margin: 0 0 16px;
+  padding: 8px 12px 8px 28px;
+  background: var(--bg3);
+  border-radius: 6px;
+  font-size: 12px;
+  list-style: disc;
+}
+.confirm-modal-list code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+.confirm-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
 
 /* ── Alerts ───────────────────────────────────────────────────────── */
 .alert {
@@ -386,14 +450,20 @@ kbd {
 /* ── Job progress ─────────────────────────────────────────────────── */
 .job-progress {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   font-size: 13px;
   margin-top: 14px;
-  padding: 8px 12px;
+  padding: 10px 12px;
   border-radius: 7px;
   background: var(--bg2);
   border: 1px solid var(--border);
+}
+.job-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .job-dot {
   width: 8px;
@@ -405,8 +475,53 @@ kbd {
 .status-running .job-dot { background: var(--accent2); animation: bd-pulse 1s infinite; }
 .status-done    .job-dot { background: var(--accent); }
 .status-failed  .job-dot { background: var(--danger); }
+.status-cancelled .job-dot { background: var(--text2); }
 @keyframes bd-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 .job-error-msg { color: var(--danger); font-size: 12px; }
+.job-stage {
+  font-size: 12px;
+  color: var(--text2);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.job-eta {
+  font-size: 11px;
+  color: var(--text2);
+  font-variant-numeric: tabular-nums;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg3);
+}
+.job-cancel-btn {
+  padding: 3px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg3);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.job-cancel-btn:hover {
+  background: #c0392b;
+  border-color: #c0392b;
+  color: #fff;
+}
+.job-progress-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg3);
+  overflow: hidden;
+}
+.job-progress-fill {
+  height: 100%;
+  background: var(--accent2);
+  transition: width 0.3s ease;
+}
+.status-done .job-progress-fill { background: var(--accent); }
 
 /* ── Phase grid ───────────────────────────────────────────────────── */
 .phase-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
