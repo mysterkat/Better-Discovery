@@ -10,6 +10,9 @@ const FOLDER_KEYS = new Set(["DATA_FOLDER", "OUTPUT_FOLDER"]);
 
 export default function DiscoveryTab() {
   const [params, setParams] = useState<ParamDef[]>([]);
+  // `overrides` only contains user-typed values for THIS session.
+  // A missing/empty entry means "use the true default" (persistent default
+  // from the settings modal, falling back to the code-level default).
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [overrideOnce, setOverrideOnce] = useState(false);
   const [folderOverrides, setFolderOverrides] = useState<Record<string, string>>({});
@@ -18,28 +21,25 @@ export default function DiscoveryTab() {
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
+  // Subscribe reactively to persistent defaults so changes made in the
+  // settings modal propagate into placeholders + labels live.
+  const persistentDefaults = useParamDefaults((s) => s.defaults);
+
   const job = useJobs((s) => (jobId ? s.jobs[jobId] : undefined));
   const isRunning = !!jobId && job?.status === "running";
   const isDone = !!jobId && (job?.status === "done" || job?.status === "failed");
 
   useEffect(() => {
-    getParams().then((loaded) => {
-      setParams(loaded);
-      // Pre-fill overrides from the persistent defaults store. We read via
-      // getState() (not via a ref) so we pick up whatever has loaded by the
-      // time /discovery/params resolves, even if the store finished loading
-      // after this component mounted.
-      const snap = useParamDefaults.getState().defaults;
-      const initial: Record<string, string> = {};
-      for (const p of loaded) {
-        if (FOLDER_KEYS.has(p.key)) continue;
-        if (p.key in snap && snap[p.key] != null) {
-          initial[p.key] = String(snap[p.key]);
-        }
-      }
-      setOverrides(initial);
-    }).catch(() => {});
+    getParams().then(setParams).catch(() => {});
   }, []);
+
+  // The "true default" for a param: user's persistent default if set,
+  // else the code-level default from pattern_discovery_v6.py.
+  const trueDefault = (p: ParamDef): string => {
+    const pd = persistentDefaults[p.key];
+    if (pd != null) return String(pd);
+    return p.value != null ? String(p.value) : "";
+  };
 
   // Group params by their 'group' field.
   const groups = useMemo(() => {
@@ -58,8 +58,31 @@ export default function DiscoveryTab() {
       return next;
     });
 
-  const setValue = (key: string, val: string) =>
-    setOverrides((prev) => ({ ...prev, [key]: val }));
+  const setValue = (key: string, val: string) => {
+    setOverrides((prev) => {
+      const next = { ...prev };
+      if (val === "") delete next[key];
+      else next[key] = val;
+      return next;
+    });
+  };
+
+  const resetField = (key: string) => {
+    setOverrides((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const handleResetToDefaults = () => {
+    setOverrides({});
+  };
+
+  const isEdited = (key: string): boolean => {
+    const v = overrides[key];
+    return v != null && v.trim() !== "";
+  };
 
   const setFolderVal = (key: string, val: string) =>
     setFolderOverrides((prev) => ({ ...prev, [key]: val }));
@@ -71,15 +94,27 @@ export default function DiscoveryTab() {
     try {
       const parsed: Record<string, unknown> = {};
       for (const p of params) {
-        const raw = overrides[p.key]?.trim();
+        if (FOLDER_KEYS.has(p.key)) continue;
+        // Resolution order: user-typed (overrides) > persistent default.
+        // If neither is set, omit — backend uses the code-level default.
+        const userVal = overrides[p.key]?.trim();
+        let raw: string | undefined;
+        if (userVal) {
+          raw = userVal;
+        } else {
+          const pd = persistentDefaults[p.key];
+          if (pd != null) raw = String(pd);
+        }
         if (!raw) continue;
+        // Accept European decimal comma for numeric inputs.
+        const normalized = raw.replace(",", ".");
         if (p.type === "bool") {
           parsed[p.key] = raw === "true" || raw === "1";
         } else if (p.type === "int") {
-          const n = parseInt(raw, 10);
+          const n = parseInt(normalized, 10);
           if (!isNaN(n)) parsed[p.key] = n;
         } else if (p.type === "float") {
-          const n = parseFloat(raw);
+          const n = parseFloat(normalized);
           if (!isNaN(n)) parsed[p.key] = n;
         } else {
           parsed[p.key] = raw;
@@ -138,9 +173,15 @@ export default function DiscoveryTab() {
       );
     }
 
+    const def = trueDefault(p);
+    const edited = isEdited(p.key);
+
     if (p.type === "bool") {
-      const val = overrides[p.key];
-      const checked = val !== undefined ? val === "true" : Boolean(p.value);
+      // For booleans, the true default determines the unchecked-but-no-override state.
+      const userVal = overrides[p.key];
+      const checked = userVal !== undefined
+        ? userVal === "true"
+        : (def === "true" || def === "True" || Boolean(persistentDefaults[p.key] ?? p.value));
       return (
         <div key={p.key} className="field field-inline">
           <label className="toggle-label">
@@ -158,6 +199,15 @@ export default function DiscoveryTab() {
               <span className="field-label" style={{ display: "inline" }}>{p.label}</span>
               {p.description && <span className="field-hint"> — {p.description}</span>}
             </span>
+            {edited && (
+              <button
+                type="button"
+                className="pd-reset-btn"
+                onClick={() => resetField(p.key)}
+                title="Reset to default"
+                style={{ marginLeft: 8 }}
+              >↺</button>
+            )}
           </label>
         </div>
       );
@@ -168,11 +218,20 @@ export default function DiscoveryTab() {
         <div key={p.key} className="field">
           <label className="field-label">
             {p.label}
-            <span className="field-default"> (default: {String(p.value)})</span>
+            <span className="field-default"> (default: {def})</span>
+            {edited && (
+              <button
+                type="button"
+                className="pd-reset-btn"
+                onClick={() => resetField(p.key)}
+                title="Reset to default"
+                style={{ marginLeft: 8 }}
+              >↺</button>
+            )}
           </label>
           <select
             className="field-input"
-            value={overrides[p.key] ?? String(p.value ?? "")}
+            value={overrides[p.key] ?? def}
             onChange={(e) => setValue(p.key, e.target.value)}
             disabled={isRunning}
           >
@@ -183,7 +242,6 @@ export default function DiscoveryTab() {
       );
     }
 
-    const defVal = p.value != null ? String(p.value) : "";
     const hint = [
       p.min != null ? `min ${p.min}` : "",
       p.max != null ? `max ${p.max}` : "",
@@ -194,16 +252,23 @@ export default function DiscoveryTab() {
       <div key={p.key} className="field">
         <label className="field-label">
           {p.label}
-          <span className="field-default"> (default: {defVal})</span>
+          <span className="field-default"> (default: {def})</span>
+          {edited && (
+            <button
+              type="button"
+              className="pd-reset-btn"
+              onClick={() => resetField(p.key)}
+              title="Reset to default"
+              style={{ marginLeft: 8 }}
+            >↺</button>
+          )}
         </label>
         <input
           className="field-input"
-          type={p.type === "int" ? "number" : "text"}
-          step={p.step ?? (p.type === "float" ? 0.01 : 1)}
-          min={p.min}
-          max={p.max}
+          type="text"
+          inputMode={p.type === "int" ? "numeric" : (p.type === "float" ? "decimal" : "text")}
           value={overrides[p.key] ?? ""}
-          placeholder={defVal}
+          placeholder={def}
           onChange={(e) => setValue(p.key, e.target.value)}
           disabled={isRunning}
         />
@@ -281,6 +346,14 @@ export default function DiscoveryTab() {
           disabled={starting || isRunning || params.length === 0}
         >
           {starting ? "Starting…" : "▶ Run Discovery"}
+        </button>
+        <button
+          className="btn btn-secondary"
+          onClick={handleResetToDefaults}
+          disabled={isRunning || params.length === 0}
+          title="Reset all fields to your saved defaults"
+        >
+          ↺ Reset to defaults
         </button>
         {isDone && (
           <button className="btn btn-secondary" onClick={() => { setJobId(null); setError(null); }}>

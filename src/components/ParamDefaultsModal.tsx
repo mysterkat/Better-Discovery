@@ -18,6 +18,10 @@ import { useParamDefaults, type ParamDefaultsStore } from "../state/paramDefault
 // ── Which groups to expose per top-level tab ─────────────────────────────────
 
 const DISCOVERY_GROUPS = [
+  "Data & Files",
+  "General",
+  "Regime & Features",
+  "Trade Simulation",
   "SL / TP",
   "Genetic Pass 1",
   "Genetic Pass 2",
@@ -47,6 +51,18 @@ export default function ParamDefaultsModal({ open, onClose }: Props) {
   const [discParams, setDiscParams] = useState<ParamDef[]>([]);
   const [mcParams, setMcParams] = useState<ParamDef[]>([]);
   const [topTab, setTopTab] = useState<TopTab>("discovery");
+  // Per-field "in-progress" text while the user is typing. Lets intermediate
+  // states like "0.", "-", "0," survive in the input even though the parsed
+  // value would round-trip to a different string.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const setDraft = (key: string, val: string | undefined) => {
+    setDrafts((prev) => {
+      const next = { ...prev };
+      if (val === undefined) delete next[key];
+      else next[key] = val;
+      return next;
+    });
+  };
   const [openGroups, setOpenGroups] = useState<Set<string>>(
     new Set(["SL / TP", "Simulation"]),
   );
@@ -59,6 +75,12 @@ export default function ParamDefaultsModal({ open, onClose }: Props) {
     if (discParams.length === 0) getParams().then(setDiscParams).catch(() => {});
     if (mcParams.length === 0) getMcParams().then(setMcParams).catch(() => {});
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Drop any in-progress drafts when the modal closes so the next open
+  // starts fresh from the persisted store values.
+  useEffect(() => {
+    if (!open) setDrafts({});
+  }, [open]);
 
   // Build group → params maps for each top-level tab.
   const discGroups = useMemo(() => buildGroupMap(discParams, DISCOVERY_GROUPS), [discParams]);
@@ -142,7 +164,7 @@ export default function ParamDefaultsModal({ open, onClose }: Props) {
 
                 {isOpen && (
                   <div className="param-group-body">
-                    {groupParams.map((p) => renderField(p, store))}
+                    {groupParams.map((p) => renderField(p, store, drafts, setDraft))}
                   </div>
                 )}
               </div>
@@ -177,13 +199,19 @@ function buildGroupMap(
   return map;
 }
 
-function renderField(p: ParamDef, store: ParamDefaultsStore) {
+function renderField(
+  p: ParamDef,
+  store: ParamDefaultsStore,
+  drafts: Record<string, string>,
+  setDraft: (key: string, val: string | undefined) => void,
+) {
   const storedVal = store.defaults[p.key];
   const hasCustom = p.key in store.defaults;
   const codeDefault = p.value != null ? String(p.value) : "";
 
   const handleReset = (e: React.MouseEvent) => {
     e.stopPropagation();
+    setDraft(p.key, undefined);
     store.reset(p.key);
   };
 
@@ -247,7 +275,13 @@ function renderField(p: ParamDef, store: ParamDefaultsStore) {
   }
 
   // int / float / str (free text)
-  const currentStr = storedVal != null ? String(storedVal) : "";
+  // Show user's in-progress draft when typing (preserves intermediate states
+  // like "0.", "-", or invalid input) — only fall back to the stored value
+  // when there's no active draft.
+  const draftStr = drafts[p.key];
+  const currentStr = draftStr !== undefined
+    ? draftStr
+    : (storedVal != null ? String(storedVal) : "");
   const hint = [
     p.min != null ? `min ${p.min}` : "",
     p.max != null ? `max ${p.max}` : "",
@@ -268,27 +302,37 @@ function renderField(p: ParamDef, store: ParamDefaultsStore) {
       </div>
       <input
         className={`field-input${hasCustom ? " pd-input-custom" : ""}`}
-        type={p.type === "int" ? "number" : "text"}
-        step={p.step ?? (p.type === "float" ? 0.01 : 1)}
-        min={p.min}
-        max={p.max}
+        type="text"
+        inputMode={p.type === "int" ? "numeric" : (p.type === "float" ? "decimal" : "text")}
         value={currentStr}
         placeholder={codeDefault}
         onChange={(e) => {
           const raw = e.target.value;
+          // Always reflect what the user typed in the field (preserves
+          // intermediate states like "0." or "-"). The stored value updates
+          // only when the parse is unambiguous.
+          setDraft(p.key, raw);
           if (raw === "") {
             store.reset(p.key);
             return;
           }
+          // Accept European decimal comma (e.g., "0,5" → 0.5) for both int and float.
+          const normalized = raw.replace(",", ".");
           if (p.type === "int") {
-            const n = parseInt(raw, 10);
-            if (!isNaN(n)) store.set(p.key, n);
+            const n = parseInt(normalized, 10);
+            // Only commit if the parse round-trips — rejects "0." or "-" mid-edit.
+            if (!isNaN(n) && /^-?\d+$/.test(normalized)) store.set(p.key, n);
           } else if (p.type === "float") {
-            const n = parseFloat(raw);
-            if (!isNaN(n)) store.set(p.key, n);
+            const n = parseFloat(normalized);
+            // Only commit on a "complete" number — not "0." or "-1."
+            if (!isNaN(n) && /^-?\d+(\.\d+)?$/.test(normalized)) store.set(p.key, n);
           } else {
             store.set(p.key, raw);
           }
+        }}
+        onBlur={() => {
+          // Drop the draft on blur so a re-mount or external change syncs cleanly.
+          setDraft(p.key, undefined);
         }}
       />
       <span className="pd-code-hint">

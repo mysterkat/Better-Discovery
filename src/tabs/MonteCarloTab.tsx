@@ -30,25 +30,28 @@ export default function MonteCarloTab() {
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
+  // Subscribe to persistent defaults — these drive placeholders + labels
+  // and act as the fallback at submit time when the user leaves a field empty.
+  const persistentDefaults = useParamDefaults((s) => s.defaults);
+
   const job = useJobs((s) => (jobId ? s.jobs[jobId] : undefined));
   const isRunning = !!jobId && job?.status === "running";
   const isDone = !!jobId && (job?.status === "done" || job?.status === "failed");
 
   useEffect(() => {
-    getMcParams().then((loaded) => {
-      setParams(loaded);
-      // Pre-fill overrides from persistent defaults. Read via getState() so
-      // we pick up the current store value even if it loads after mount.
-      const snap = useParamDefaults.getState().defaults;
-      const initial: Record<string, string> = {};
-      for (const p of loaded) {
-        if (p.key in snap && snap[p.key] != null) {
-          initial[p.key] = String(snap[p.key]);
-        }
-      }
-      setOverrides(initial);
-    }).catch(() => {});
+    getMcParams().then(setParams).catch(() => {});
   }, []);
+
+  const trueDefault = (p: ParamDef): string => {
+    const pd = persistentDefaults[p.key];
+    if (pd != null) return String(pd);
+    return p.value != null ? String(p.value) : "";
+  };
+
+  const isEdited = (key: string): boolean => {
+    const v = overrides[key];
+    return v != null && v.trim() !== "";
+  };
 
   const groups = useMemo(() => {
     const map = new Map<string, ParamDef[]>();
@@ -66,21 +69,48 @@ export default function MonteCarloTab() {
       return next;
     });
 
-  const setValue = (key: string, val: string) =>
-    setOverrides((prev) => ({ ...prev, [key]: val }));
+  const setValue = (key: string, val: string) => {
+    setOverrides((prev) => {
+      const next = { ...prev };
+      if (val === "") delete next[key];
+      else next[key] = val;
+      return next;
+    });
+  };
+
+  const resetField = (key: string) => {
+    setOverrides((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const handleResetToDefaults = () => {
+    setOverrides({});
+  };
 
   const coerce = (p: ParamDef, raw: string): unknown => {
     if (raw === "") return undefined;
     if (p.type === "bool") return raw === "true" || raw === "1";
-    if (p.type === "int") { const n = parseInt(raw, 10); return isNaN(n) ? undefined : n; }
-    if (p.type === "float") { const n = parseFloat(raw); return isNaN(n) ? undefined : n; }
+    // Accept European decimal comma for numeric inputs.
+    const normalized = raw.replace(",", ".");
+    if (p.type === "int") { const n = parseInt(normalized, 10); return isNaN(n) ? undefined : n; }
+    if (p.type === "float") { const n = parseFloat(normalized); return isNaN(n) ? undefined : n; }
     return raw;
   };
 
   const buildGroupParams = (groupName: string): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
     for (const p of (groups.get(groupName) ?? [])) {
-      const raw = overrides[p.key]?.trim() ?? "";
+      // Resolution order: user-typed (overrides) > persistent default.
+      // If neither is set, omit — backend uses the code-level default.
+      const userVal = overrides[p.key]?.trim() ?? "";
+      let raw = userVal;
+      if (!raw) {
+        const pd = persistentDefaults[p.key];
+        if (pd != null) raw = String(pd);
+      }
       const val = coerce(p, raw);
       if (val !== undefined) out[p.key.toLowerCase()] = val;
     }
@@ -126,9 +156,23 @@ export default function MonteCarloTab() {
   };
 
   const renderField = (p: ParamDef) => {
+    const def = trueDefault(p);
+    const edited = isEdited(p.key);
+    const resetBtn = edited ? (
+      <button
+        type="button"
+        className="pd-reset-btn"
+        onClick={() => resetField(p.key)}
+        title="Reset to default"
+        style={{ marginLeft: 8 }}
+      >↺</button>
+    ) : null;
+
     if (p.type === "bool") {
-      const val = overrides[p.key];
-      const checked = val !== undefined ? val === "true" : Boolean(p.value);
+      const userVal = overrides[p.key];
+      const checked = userVal !== undefined
+        ? userVal === "true"
+        : Boolean(persistentDefaults[p.key] ?? p.value);
       return (
         <div key={p.key} className="field field-inline">
           <label className="toggle-label">
@@ -140,6 +184,7 @@ export default function MonteCarloTab() {
             </span>
             <span className="field-label" style={{ display: "inline" }}>{p.label}</span>
             {p.description && <span className="field-hint"> — {p.description}</span>}
+            {resetBtn}
           </label>
         </div>
       );
@@ -147,9 +192,9 @@ export default function MonteCarloTab() {
     if (p.type === "str" && p.options?.length) {
       return (
         <div key={p.key} className="field">
-          <label className="field-label">{p.label}<span className="field-default"> (default: {String(p.value)})</span></label>
+          <label className="field-label">{p.label}<span className="field-default"> (default: {def})</span>{resetBtn}</label>
           <select className="field-input"
-            value={overrides[p.key] ?? String(p.value ?? "")}
+            value={overrides[p.key] ?? def}
             onChange={(e) => setValue(p.key, e.target.value)} disabled={isRunning}>
             {p.options.map((o) => <option key={o} value={o}>{o}</option>)}
           </select>
@@ -158,10 +203,10 @@ export default function MonteCarloTab() {
     }
     return (
       <div key={p.key} className="field">
-        <label className="field-label">{p.label}<span className="field-default"> (default: {String(p.value ?? "")})</span></label>
-        <input className="field-input" type={p.type === "int" ? "number" : "text"}
-          step={p.step ?? (p.type === "float" ? 0.01 : 1)} min={p.min} max={p.max}
-          value={overrides[p.key] ?? ""} placeholder={String(p.value ?? "")}
+        <label className="field-label">{p.label}<span className="field-default"> (default: {def})</span>{resetBtn}</label>
+        <input className="field-input" type="text"
+          inputMode={p.type === "int" ? "numeric" : (p.type === "float" ? "decimal" : "text")}
+          value={overrides[p.key] ?? ""} placeholder={def}
           onChange={(e) => setValue(p.key, e.target.value)} disabled={isRunning} />
         {p.description && <span className="field-hint">{p.description}{p.min != null ? ` (${p.min}–${p.max ?? "∞"})` : ""}</span>}
       </div>
@@ -254,6 +299,14 @@ export default function MonteCarloTab() {
         <button className="btn btn-primary" onClick={handleRun}
           disabled={starting || isRunning || !canRun}>
           {starting ? "Starting…" : "▶ Run All Phases"}
+        </button>
+        <button
+          className="btn btn-secondary"
+          onClick={handleResetToDefaults}
+          disabled={isRunning || params.length === 0}
+          title="Reset all fields to your saved defaults"
+        >
+          ↺ Reset to defaults
         </button>
         {isDone && (
           <button className="btn btn-secondary" onClick={() => { setJobId(null); setAllResults(null); setError(null); }}>

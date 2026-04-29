@@ -267,6 +267,13 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         setattr(mod, name, val)
 
     try:
+        # The script's `if __name__ == "__main__"` block normally does these two
+        # steps before calling main(). When invoked via the FastAPI bridge, the
+        # __main__ block doesn't run, so we mirror it explicitly. Without
+        # _prepare_shared_data the module-level _SHARED_DATA dict stays empty
+        # and main() raises `KeyError: 'df'` on first access.
+        mod.mp.set_start_method("spawn", force=True)
+        mod._prepare_shared_data(mod._n_workers())
         mod.main()
     finally:
         for name, val in original.items():
