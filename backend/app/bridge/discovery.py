@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .. import paths  # noqa: F401
@@ -78,11 +79,31 @@ PARAM_META: dict[str, ParamMeta] = {
     "DATA_FOLDER":          ParamMeta("Data Folder",           "Data & Files", "folder",
                                        "Folder containing TF CSV files"),
     "TF1_FILE":             ParamMeta("TF1 Filename",          "Data & Files", "str",
-                                       "Primary timeframe CSV (e.g. xauusd_m5.csv)"),
+                                       "Slot 1 — CSV (e.g. xauusd_m5.csv). Empty = unused."),
     "TF2_FILE":             ParamMeta("TF2 Filename",          "Data & Files", "str",
-                                       "Second timeframe CSV"),
+                                       "Slot 2 — CSV. Empty = unused."),
     "TF3_FILE":             ParamMeta("TF3 Filename",          "Data & Files", "str",
-                                       "Third timeframe CSV"),
+                                       "Slot 3 — CSV. Empty = unused."),
+    "TF4_FILE":             ParamMeta("TF4 Filename",          "Data & Files", "str",
+                                       "Slot 4 — CSV. Empty = unused."),
+    "TF5_FILE":             ParamMeta("TF5 Filename",          "Data & Files", "str",
+                                       "Slot 5 — CSV. Empty = unused."),
+    "PRIMARY_TF":           ParamMeta("Primary TF (1-5)",      "Data & Files", "int",
+                                       "Which slot drives the bar stream (entries / exits / SL / TP). "
+                                       "Other non-empty slots become signal TFs.",
+                                       min=1, max=5, step=1),
+    "MTF_SCORE_MODE":       ParamMeta("MTF Score Mode",         "Data & Files", "str",
+                                       "How mtf_bull/bear_score is composed across signal TFs.\n"
+                                       "  additive — sum primary + every signal trend (recommended; "
+                                       "matches bundled MQL5 EA)\n"
+                                       "  overwrite — primary + last-aligned signal only (legacy 0..2 "
+                                       "range; for parity with pre-Group-C runs)",
+                                       options=["additive", "overwrite"]),
+    "HTF_DIV_TF":           ParamMeta("htf_div Source TF",      "Data & Files", "int",
+                                       "Which signal slot's RSI feeds the htf_div feature. "
+                                       "0 = auto (slowest available signal TF, recommended). "
+                                       "1-5 = force a specific slot.",
+                                       min=0, max=5, step=1),
     "OUTPUT_FOLDER":        ParamMeta("Output Folder",         "Data & Files", "folder",
                                        "Where discovery results are written"),
     # ── General ─────────────────────────────────────────────────────────────
@@ -252,14 +273,30 @@ def list_defaults_with_meta() -> list[dict[str, Any]]:
     If pattern_discovery_v6 cannot be imported (missing deps, wrong env),
     the metadata is still returned with None values so the UI can render
     the form — the user just won't see live defaults.
+
+    Path constants are special-cased: the module's hardcoded paths point
+    at a developer's `MONTE CARLO` folder which doesn't exist on user
+    machines. The bridge actually injects `DEFAULT_HIST_DATA` / `DEFAULT_DISC_OUTPUT`
+    at run time, so we show those resolved paths in the UI instead — what
+    the user sees as the "default" matches what actually gets used.
     """
     try:
         mod = _get_module()
     except Exception:
         mod = None
+    # Override the displayed default for path-type constants so the UI shows
+    # the actual app-resolved path (matches what the bridge injects in
+    # run_discovery() when the user hasn't customized).
+    runtime_defaults: dict[str, str] = {
+        "OUTPUT_FOLDER": str(DEFAULT_DISC_OUTPUT),
+        "DATA_FOLDER":   str(DEFAULT_HIST_DATA),
+    }
     result: list[dict[str, Any]] = []
     for name, meta in PARAM_META.items():
-        val = (_jsonify_val(getattr(mod, name)) if (mod is not None and hasattr(mod, name)) else None)
+        if name in runtime_defaults:
+            val: Any = runtime_defaults[name]
+        else:
+            val = (_jsonify_val(getattr(mod, name)) if (mod is not None and hasattr(mod, name)) else None)
         entry: dict[str, Any] = {
             "key": name,
             "value": val,
@@ -281,14 +318,14 @@ def list_defaults_with_meta() -> list[dict[str, Any]]:
 
 
 def _auto_fill_tf_files(mod: Any, overrides: dict[str, Any]) -> None:
-    """If the user hasn't customized any of TF1/TF2/TF3_FILE, auto-detect them
-    from the contents of DATA_FOLDER (whatever was just imported via MT5).
+    """If the user hasn't customized any TFn_FILE, auto-detect from the
+    contents of DATA_FOLDER (the latest MT5 import).
 
-    Sorts available CSVs by timeframe duration (smallest first) and fills the
-    three slots from that. Mutates `overrides` in place. If the user touched
-    even one TFn_FILE, all three are left as the user specified.
+    Sorts available CSVs by timeframe duration (smallest first) and fills
+    slots TF1..TF5. If the user touched even one TFn_FILE, all five are left
+    as the user specified.
     """
-    tf_keys = ("TF1_FILE", "TF2_FILE", "TF3_FILE")
+    tf_keys = ("TF1_FILE", "TF2_FILE", "TF3_FILE", "TF4_FILE", "TF5_FILE")
     if any(k in overrides for k in tf_keys):
         return  # user customized at least one — respect their full setup
 
@@ -298,12 +335,8 @@ def _auto_fill_tf_files(mod: Any, overrides: dict[str, Any]) -> None:
     if not files:
         return  # no import detected — leave module's hardcoded defaults
 
-    # Slot 1/2/3 with smallest timeframes; if fewer than 3 detected, the
-    # remaining slots are blanked so the discovery script's `if TFn_FILE:`
-    # guards skip them gracefully.
-    overrides["TF1_FILE"] = files[0] if len(files) >= 1 else ""
-    overrides["TF2_FILE"] = files[1] if len(files) >= 2 else ""
-    overrides["TF3_FILE"] = files[2] if len(files) >= 3 else ""
+    for i, key in enumerate(tf_keys):
+        overrides[key] = files[i] if i < len(files) else ""
 
 
 def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -330,6 +363,18 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     # explicitly customized them.
     _auto_fill_tf_files(mod, overrides)
 
+    # Keep MULTI_SEED_BASE locked to RANDOM_SEED unless the user explicitly
+    # overrode the base. The toolkit assigns `MULTI_SEED_BASE = RANDOM_SEED`
+    # at import time, which freezes the base at whatever the file default was —
+    # so when the user changes RANDOM_SEED via the UI but not MULTI_SEED_BASE,
+    # the seed loop would otherwise still walk from the file's default base.
+    # Resolving "what should the base be" against the *effective* RANDOM_SEED
+    # (override if set, else current module value) gives the user the seed
+    # they actually picked.
+    if "MULTI_SEED_BASE" not in overrides:
+        effective_seed = overrides.get("RANDOM_SEED", getattr(mod, "RANDOM_SEED", 0))
+        overrides["MULTI_SEED_BASE"] = int(effective_seed)
+
     # Snapshot originals so we can restore them after the run.
     original: dict[str, Any] = {}
     for name, val in overrides.items():
@@ -337,6 +382,33 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
             raise KeyError(f"pattern_discovery_v6 has no attribute '{name}'")
         original[name] = getattr(mod, name)
         setattr(mod, name, val)
+
+    # Write `_app_override.json` next to pattern_discovery_v6.py so spawn-mode
+    # pool workers — which re-import the module from disk and never see the
+    # parent's setattr — pick up the same overrides at module-import time via
+    # _load_app_overrides(). Without this, tunables like GENE_N_COLS_MAX,
+    # COOLDOWN_BARS, GENE_DIVERSITY_THRESHOLD, PASS2_QUANTILE_LO/HI applied
+    # only to the parent and the genetic search ran with file defaults.
+    import json as _json
+    _override_json_path = Path(mod.__file__).parent / "_app_override.json"
+    try:
+        # Only include JSON-serializable scalars/lists/dicts (which is what
+        # PARAM_META exposes anyway). Non-serializable items are dropped.
+        _serializable: dict[str, Any] = {}
+        for _k, _v in overrides.items():
+            try:
+                _json.dumps(_v)
+                _serializable[_k] = _v
+            except (TypeError, ValueError):
+                pass
+        _override_json_path.write_text(
+            _json.dumps(_serializable, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        # If the toolkit folder is read-only (rare), continue without the file —
+        # workers will just use file defaults. The parent's setattr still works.
+        _override_json_path = None  # type: ignore[assignment]
 
     # Wrap stdout for stage-progress reporting + cancel cooperation.
     # We do this conditionally: only when running on a job thread (i.e.,
@@ -347,22 +419,152 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     if job is not None:
         sys.stdout = _ProgressCapture(orig_stdout, job)  # type: ignore[assignment]
 
+    aggregated_results: list[Any] = []  # collected across all seeds
+    # Capture the output folder NOW, while the override is in effect.
+    # We MUST NOT read mod.OUTPUT_FOLDER after the `finally` block — by then
+    # the original (hardcoded MONTE CARLO) value has been restored, which
+    # would make the .set-file glob look in the wrong directory.
+    effective_output_folder: str = str(getattr(mod, "OUTPUT_FOLDER", ""))
     try:
-        # The script's `if __name__ == "__main__"` block normally does these two
-        # steps before calling main(). When invoked via the FastAPI bridge, the
-        # __main__ block doesn't run, so we mirror it explicitly. Without
-        # _prepare_shared_data the module-level _SHARED_DATA dict stays empty
-        # and main() raises `KeyError: 'df'` on first access.
+        # The script's `if __name__ == "__main__"` block normally does these
+        # steps before calling main(). When invoked via the FastAPI bridge,
+        # the __main__ block doesn't run, so we mirror it here:
+        #   - set spawn start method
+        #   - prepare shared data ONCE before the seed loop
+        #   - run main() per seed (single-seed path falls through naturally)
+        #   - aggregate per-seed results and call write_combined_report
+        # Skipping the seed loop is what made discovery only run for 1 seed
+        # regardless of MULTI_SEED_COUNT.
         mod.mp.set_start_method("spawn", force=True)
         mod._prepare_shared_data(mod._n_workers())
-        mod.main()
+
+        seed_count = max(1, int(getattr(mod, "MULTI_SEED_COUNT", 1) or 1))
+        seed_base  = int(getattr(mod, "MULTI_SEED_BASE",
+                                   getattr(mod, "RANDOM_SEED", 0)))
+
+        if seed_count <= 1:
+            if job is not None:
+                job.mark_seed(1, 1, int(getattr(mod, "RANDOM_SEED", 0)))
+            r = mod.main()
+            if r:
+                aggregated_results.extend(r)
+        else:
+            print(f"\n{'=' * 65}")
+            print(f"  MULTI-SEED BATCH: {seed_count} seeds starting from {seed_base}")
+            print(f"{'=' * 65}")
+            for si in range(seed_count):
+                seed = seed_base + si
+                mod.RANDOM_SEED = seed
+                mod.np.random.seed(seed)
+                mod.random.seed(seed)
+                if job is not None:
+                    job.mark_seed(si + 1, seed_count, seed)
+                print(f"\n\n{'#' * 65}")
+                print(f"  SEED {si + 1}/{seed_count}  ->  {seed}")
+                print(f"{'#' * 65}")
+                seed_results = mod.main()
+                if seed_results:
+                    for r in seed_results:
+                        r["seed"] = seed
+                    aggregated_results.extend(seed_results)
+            if hasattr(mod, "write_combined_report") and aggregated_results:
+                mod.write_combined_report(aggregated_results, mod.OUTPUT_FOLDER)
+                print(f"\n{'=' * 65}")
+                print(f"  BATCH COMPLETE: {seed_count} seeds finished.")
+                print(f"{'=' * 65}\n")
     finally:
         sys.stdout = orig_stdout
         for name, val in original.items():
             setattr(mod, name, val)
+        # Remove the _app_override.json so a subsequent standalone run of
+        # pattern_discovery_v6.py (or a future BD run with no overrides) is
+        # not silently affected by what THIS run wrote.
+        if _override_json_path is not None:
+            try:
+                _override_json_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # Build per-pattern summaries from the in-memory results. We pair each
+    # qualifying pattern with the .set file the script wrote to disk so the
+    # UI can offer copy/save/export actions.
+    #
+    # IMPORTANT: pattern_discovery_v6.main() writes outputs into a per-seed
+    # subfolder: `OUTPUT_FOLDER/seed_{seed}/`. So the .set files live in
+    # those subfolders, NOT directly in OUTPUT_FOLDER. Use the value we
+    # captured *before* the `finally` block restored mod.OUTPUT_FOLDER to
+    # its hardcoded original — otherwise we'd glob the wrong directory.
+    out_folder = Path(effective_output_folder)
+    patterns_summary: list[dict[str, Any]] = []
+    for idx, r in enumerate(aggregated_results, start=1):
+        seed = r.get("seed", getattr(mod, "RANDOM_SEED", 0))
+        cid = r.get("cluster", -1)
+        direction = r.get("direction", "?")
+        # Match the filename convention in pattern_discovery_v6.py:
+        # `OUTPUT_FOLDER/seed_{seed}/pattern_{NN}_C{cid}_{direction}_seed{seed}.set`
+        # NN is reset per-seed, so we glob within the seed-specific subfolder
+        # for any .set matching this cluster+direction.
+        set_path: str | None = None
+        seed_folder = out_folder / f"seed_{seed}"
+        if seed_folder.is_dir():
+            for candidate in seed_folder.glob(f"pattern_*_C{cid}_{direction}_seed{seed}.set"):
+                set_path = str(candidate)
+                break
+        # Fallback: look in the root output folder too, in case a future
+        # pattern_discovery_v6 stops nesting by seed. Cheap belt-and-braces.
+        if set_path is None and out_folder.is_dir():
+            for candidate in out_folder.glob(f"pattern_*_C{cid}_{direction}_seed{seed}.set"):
+                set_path = str(candidate)
+                break
+        patterns_summary.append({
+            "rank":            idx,
+            "pattern_id":      r.get("pattern_id", f"C{cid}_{direction}_seed{seed}"),
+            "cluster":         cid,
+            "direction":       direction,
+            "seed":            seed,
+            "bidir_mode":      r.get("bidir_mode", "?"),
+            "marginal":        bool(r.get("marginal", False)),
+            "soft_fail":       r.get("soft_fail"),  # {name,value,threshold,mode} or None
+            "composite_score": _jsonify_val(r.get("composite_score", 0)),
+            # Train metrics — included so the UI can show train vs test side-by-side
+            # (the `**tr` spread in pattern_discovery_v6 puts these at top level).
+            "train_wr":        _jsonify_val(r.get("win_rate_", 0)),
+            "train_wilson_wr": _jsonify_val(r.get("wilson_wr", 0)),
+            "train_pf":        _jsonify_val(r.get("profit_factor", 0)),
+            "train_trades":    _jsonify_val(r.get("total_trades", 0)),
+            "train_per_day":   _jsonify_val(r.get("per_day", 0)),
+            # Test (out-of-sample) metrics
+            "test_score":      _jsonify_val(r.get("test_score", 0)),
+            "test_wr":         _jsonify_val(r.get("test_wr", 0)),
+            "test_pf":         _jsonify_val(r.get("test_pf", 0)),
+            "test_trades":     _jsonify_val(r.get("test_trades", 0)),
+            "overall_wr":      _jsonify_val(r.get("overall_wr", 0)),
+            "recent_wr":       _jsonify_val(r.get("recent_wr", 0)),
+            "consistency":     _jsonify_val(r.get("consistency", 0)),
+            "implied_rr":      _jsonify_val(r.get("implied_rr", 0)),
+            "sl_pct":          _jsonify_val(r.get("sl_pct", 0)),
+            "tp_pct":          _jsonify_val(r.get("tp_pct", 0)),
+            "set_file":        set_path,
+        })
+
+    # Aggregate overview stats across all surviving patterns — handy
+    # at-a-glance numbers above the table.
+    def _avg(key: str) -> float | None:
+        vals = [r.get(key) for r in patterns_summary if isinstance(r.get(key), (int, float))]
+        return round(sum(vals) / len(vals), 3) if vals else None
+    overview = {
+        "avg_test_wr":  _avg("test_wr"),
+        "avg_test_pf":  _avg("test_pf"),
+        "avg_train_wr": _avg("train_wr"),
+        "avg_train_pf": _avg("train_pf"),
+        "total_test_trades": sum(int(r.get("test_trades") or 0) for r in patterns_summary),
+    } if patterns_summary else {}
 
     return {
         "ok": True,
-        "output_folder": str(getattr(mod, "OUTPUT_FOLDER", "")),
+        "patterns_found": len(patterns_summary),
+        "patterns": patterns_summary,
+        "overview": overview,
+        "output_folder": effective_output_folder,
         "overrides_applied": list(overrides.keys()),
     }

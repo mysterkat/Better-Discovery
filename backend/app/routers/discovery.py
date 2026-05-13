@@ -8,11 +8,14 @@ GET  /discovery/defaults              -> current overridable constant values
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
 
 from ..bridge import discovery as disc_bridge
 from ..jobs.manager import JOBS
 from ..jobs.runners import run_in_thread
+from ..paths import DEFAULT_DISC_OUTPUT
 from ..schemas.common import JobRef
 from ..schemas.discovery import DiscoveryStartRequest
 
@@ -53,3 +56,26 @@ def discovery_results(job_id: str) -> JobRef:
     if job is None:
         raise HTTPException(404, f"unknown job_id {job_id}")
     return JobRef(job_id=job.job_id, status=job.status, result=job.result, error=job.error)
+
+
+@router.get("/discovery/set-file")
+def discovery_set_file(path: str) -> dict:
+    """Return the contents of a .set file produced by a discovery run.
+
+    The file path must resolve INSIDE the discovery output folder — this
+    prevents the endpoint from being abused to read arbitrary files.
+    """
+    resolved = Path(path).resolve()
+    safe_root = DEFAULT_DISC_OUTPUT.resolve()
+    if not str(resolved).startswith(str(safe_root)):
+        raise HTTPException(403, f"path outside discovery output folder: {path}")
+    if not resolved.is_file() or resolved.suffix != ".set":
+        raise HTTPException(404, f".set file not found: {path}")
+    try:
+        return {
+            "path": str(resolved),
+            "name": resolved.name,
+            "content": resolved.read_text(encoding="utf-8", errors="replace"),
+        }
+    except OSError as e:
+        raise HTTPException(500, f"could not read .set: {e}") from e

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * AnimatedEquity3D
  *
  * Animated 3-D ribbon chart of equity paths.

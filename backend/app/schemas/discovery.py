@@ -39,8 +39,8 @@ class MqlExportRequest(BaseModel):
     # Raw text of the .set file produced by pattern_discovery_v6.
     set_content: str
 
-    # Path to the .mq5 EA template.  null/omitted → use bundled default
-    # (MONTE CARLO/ea/PatternDiscoveryEA.mq5).
+    # Path to the .mq5 EA template.  null/omitted → use the bundled default
+    # (backend/ea/PatternDiscoveryEA.mq5, resolved via set_to_mql.py).
     template_path: str | None = None
 
     # Override output filename stem (no extension).

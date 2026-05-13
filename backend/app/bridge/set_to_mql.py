@@ -1,7 +1,8 @@
 """Set → MQL5 converter bridge.
 
-Ports PatternDiscovery_Converter.html (located in MONTE CARLO/ea/) to Python.
-The template EA is PatternDiscoveryEA.mq5 in the same folder (READ-ONLY).
+The template EA bundled at `backend/ea/PatternDiscoveryEA.mq5` is the source
+of truth (originally ported from PatternDiscovery_Converter.html). It is
+treated as READ-ONLY by this bridge — only its `input` block is replaced.
 
 Public API
 ----------
@@ -22,7 +23,10 @@ from typing import Any
 from ..paths import USER_DATA
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-_DEFAULT_TEMPLATE = Path(r"C:\Users\micha\Desktop\MONTE CARLO\ea\PatternDiscoveryEA.mq5")
+# EA template lives bundled inside the repo at backend/ea/. Resolved relative
+# to this file so it works on any machine without a hard-coded user path.
+#   __file__ = backend/app/bridge/set_to_mql.py  → parents[2] = backend/
+_DEFAULT_TEMPLATE = Path(__file__).resolve().parents[2] / "ea" / "PatternDiscoveryEA.mq5"
 _MQL_OUTPUT_DIR = USER_DATA / "mql"
 
 # ── Column order (must match COLUMN INDEX TABLE in EA header) ─────────────────
@@ -40,7 +44,7 @@ _COL_LABELS: dict[str, str] = {
     "atr_pct":        "ATR/Close [volatility%]",
     "bb_width":       "BB width/midline [squeeze<0.01]",
     "trend":          "EMA trend [-1=dn 0=range 1=up]",
-    "mtf_bull_score": "MTF bull score [0-2]",
+    "mtf_bull_score": "MTF bull score [0..N where N=primary+signal TFs]",
     "body_pct":       "Body/Range [0-1]",
     "rng_atr":        "Range/ATR [1=avg bar]",
     "vol_ratio":      "Volume/MA20 [1=avg vol]",
@@ -66,7 +70,15 @@ _COL_LABELS: dict[str, str] = {
 
 # ── Defaults (mirror DEFAULTS in PatternDiscovery_Converter.html) ─────────────
 _DEFAULTS: dict[str, Any] = {
-    "MagicNumber": 10001, "DirectionMode": 1,
+    "MagicNumber": 10001,
+    # Multi-TF inputs declared in PatternDiscoveryEA.mq5. ENUM_TIMEFRAMES
+    # values must be left as raw identifiers (not quoted, not numeric-formatted).
+    # Defaults match the template; the .set file may override any of them.
+    "SignalTF1": "PERIOD_M15",
+    "SignalTF2": "PERIOD_H1",
+    "SignalTF3": "PERIOD_CURRENT",
+    "SignalTF4": "PERIOD_CURRENT",
+    "DirectionMode": 1,
     "SL_Pct": 0.005220, "TP_Pct": 0.003630, "Lots": 0.10,
     "CooldownBars": 3, "BreakevenAtR": 0.0, "UseTrailing": "false",
     "TrailingStart": 1.0, "TrailingStep": 0.5,
@@ -312,6 +324,20 @@ def _build_input_block(parsed: dict[str, Any]) -> str:
     # ── Identity ──────────────────────────────────────────────────────────────
     ln("//--- Identity")
     ln(f"input long   MagicNumber         = {merged['MagicNumber']};")
+    ln("")
+
+    # ── Signal timeframes (multi-TF) ──────────────────────────────────────────
+    # The EA body references SignalTF1..SignalTF4 directly (g_signalTFs[] is
+    # built from them in OnInit), so these MUST be present in the input block
+    # or the .mq5 fails to compile with "undeclared identifier 'SignalTFn'".
+    ln("//--- Signal timeframes (multi-TF)")
+    ln("//    Each non-PERIOD_CURRENT slot becomes an active signal TF whose")
+    ln("//    trend (EMA20>50>200) contributes to mtf_bull_score. The first")
+    ln("//    active slot also provides the RSI14 used by htf_div.")
+    ln("//    Defaults match the discovery setup; PERIOD_CURRENT disables a slot.")
+    for slot in (1, 2, 3, 4):
+        key = f"SignalTF{slot}"
+        ln(f"input ENUM_TIMEFRAMES {padded(key)}= {merged[key]};")
     ln("")
 
     # ── Direction ─────────────────────────────────────────────────────────────

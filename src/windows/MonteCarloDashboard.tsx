@@ -394,12 +394,16 @@ function FundedPanel({ data, extras }: { data: FundedResult; extras: Record<stri
       value: `${Number(fundedV.expected_lifetime_months).toFixed(1)} mo`,
     });
   }
-  if (globalV?.roi_pass_rate != null) {
-    const fee = Number(globalV.challenge_fee ?? 0);
+  // v0.5.0: replaced "ROI vs Fee" (which was redundant with payout_rate when
+  // refund=on AND had a display bug) with the actual expected return per
+  // attempt. Refund-aware on the backend so we just display the number.
+  const avgRoi = (globalV as Record<string, any> | undefined)?.avg_roi_pct;
+  if (avgRoi != null) {
+    const fee = Number(globalV?.challenge_fee ?? 0);
     cells.push({
-      label: "ROI vs Fee" + (fee > 0 ? ` (fee: $${fee.toFixed(0)})` : ""),
-      value: pct(Number(globalV.roi_pass_rate)),
-      tone: Number(globalV.roi_pass_rate) >= 100 ? "good" : "bad",
+      label: "Avg ROI" + (fee > 0 ? ` (fee: $${fee.toFixed(0)})` : ""),
+      value: pct(Number(avgRoi)),
+      tone: Number(avgRoi) >= 0 ? "good" : "bad",
     });
   }
   // Avg $ per actual payout (skips sims that never paid out). Different from

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { exportMql, getTemplate } from "../api/mql";
+import { openFolder } from "../api/system";
 
 export default function SetToMqlTab() {
   const [setContent, setSetContent] = useState("");
@@ -101,6 +102,15 @@ export default function SetToMqlTab() {
           <strong>✓ Conversion complete</strong>
           <p style={{ margin: "8px 0 4px" }}>Output saved to:</p>
           <code className="output-path-code">{outputPath}</code>
+          <div style={{ marginTop: 10 }}>
+            <button
+              className="btn-mini"
+              onClick={() => openFolder(outputPath).catch(() => {})}
+              title="Reveal in file manager"
+            >
+              📂 Open folder
+            </button>
+          </div>
           <p className="hint" style={{ marginTop: 8 }}>
             Open in MetaTrader 5 MetaEditor and press <kbd>F7</kbd> to compile.
           </p>

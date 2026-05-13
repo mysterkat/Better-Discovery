@@ -1,18 +1,21 @@
-/**
+﻿/**
  * Chart3D
  *
  * Renders all five 3-D Plotly charts in a scrollable grid.
- * Each chart is labelled and lazy-loaded via React.Suspense.
+ *
+ * NOTE on lazy loading: previously each chart was wrapped in lazy(() => import(...))
+ * inside its own <Suspense> boundary. With the shared ./plotly factory the
+ * full plotly bundle is loaded ONCE for the whole window. Lazy-splitting each
+ * tiny per-chart wrapper just added Suspense flicker for no payoff, so the
+ * components are imported eagerly here.
  */
 
-import { Suspense, lazy } from "react";
 import type { McResultData } from "./types";
-
-const EquitySurface3D   = lazy(() => import("./EquitySurface3D"));
-const DrawdownCone3D    = lazy(() => import("./DrawdownCone3D"));
-const PassRateHeatmap3D = lazy(() => import("./PassRateHeatmap3D"));
-const Scatter3D         = lazy(() => import("./Scatter3D"));
-const AnimatedEquity3D  = lazy(() => import("./AnimatedEquity3D"));
+import EquitySurface3D from "./EquitySurface3D";
+import DrawdownCone3D from "./DrawdownCone3D";
+import PassRateHeatmap3D from "./PassRateHeatmap3D";
+import Scatter3D from "./Scatter3D";
+import AnimatedEquity3D from "./AnimatedEquity3D";
 
 interface Props {
   data: McResultData;
@@ -38,9 +41,7 @@ function ChartCard({
   return (
     <div className="chart-card">
       <div className="chart-card-label">{label}</div>
-      <Suspense fallback={<div className="chart-placeholder">Loading chart…</div>}>
-        <Component data={data} />
-      </Suspense>
+      <Component data={data} />
     </div>
   );
 }

@@ -31,7 +31,13 @@ const GRID: AnyObj = { gridcolor: "#2e2e40", zerolinecolor: "#444" };
 
 function EquityFan({ data }: Props) {
   const curves = data.equity_curves as number[][] | undefined;
-  if (!curves || curves.length === 0) return null;
+  if (!curves || curves.length === 0) {
+    return (
+      <div className="chart-placeholder">
+        Equity fan unavailable — no equity curves were sampled for this phase.
+      </div>
+    );
+  }
 
   const nDays = curves[0].length;
   const xDays = Array.from({ length: nDays }, (_, i) => i);

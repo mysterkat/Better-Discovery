@@ -14,8 +14,12 @@ import { renderValue, titleCase } from "../lib/format";
 import { useSettings } from "../state/settings";
 
 // Lazy-load heavy chart bundles so the window opens instantly.
+// Both chart files share a single plotly.js bundle via ./charts/plotly,
+// so the FIRST lazy import pulls plotly; the second is just the small
+// per-chart wrapper. (Used to be ~4 MB twice — now ~4 MB once.)
 const Chart2D = lazy(() => import("../components/charts/Chart2D"));
 const Chart3D = lazy(() => import("../components/charts/Chart3D"));
+import ChartErrorBoundary from "../components/charts/ChartErrorBoundary";
 
 type ViewMode = "2d" | "3d";
 
@@ -133,13 +137,15 @@ export default function MonteCarloResults() {
               ({view === "2d" ? "classic view" : "3-D surface / scatter"})
             </span>
           </div>
-          <Suspense fallback={<div className="results-loading">Loading charts…</div>}>
-            {view === "2d" ? (
-              <Chart2D data={result} />
-            ) : (
-              <Chart3D data={result} />
-            )}
-          </Suspense>
+          <ChartErrorBoundary label={view === "2d" ? "2-D charts" : "3-D charts"}>
+            <Suspense fallback={<div className="results-loading">Loading charts…</div>}>
+              {view === "2d" ? (
+                <Chart2D data={result} />
+              ) : (
+                <Chart3D data={result} />
+              )}
+            </Suspense>
+          </ChartErrorBoundary>
 
           {/* Collapsible raw data sections */}
           {nested.length > 0 && (

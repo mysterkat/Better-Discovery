@@ -74,6 +74,11 @@ export default function JobProgress({
         <span className="job-label">
           {job.cancel_requested && isRunning ? "Cancelling…" : STATUS_LABELS[job.status]}
         </span>
+        {isRunning && job.seed_index != null && job.seed_total != null && job.seed_total > 1 && (
+          <span className="job-seed" title={`Current random seed: ${job.seed_value ?? "?"}`}>
+            Seed {job.seed_index}/{job.seed_total}
+          </span>
+        )}
         {isRunning && stageLabel && (
           <span className="job-stage">{stageLabel}</span>
         )}
