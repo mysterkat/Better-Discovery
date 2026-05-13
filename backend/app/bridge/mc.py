@@ -505,8 +505,19 @@ def run_all_phases(
 
     p1 = _jsonify(_safe_call(mc.run_mc_phase1, daily_pnl=daily_pnl, n_sims=n_sims,
                              predrawn_pnl=pre_p1, **p1_kwargs, **extra, **eval_extra))
-    p2 = _jsonify(_safe_call(mc.run_mc_phase2, daily_pnl=daily_pnl, n_sims=n_sims,
-                             predrawn_pnl=pre_p2, **p2_kwargs, **extra, **eval_extra))
+
+    # Phase 2 only runs on the sims that survived Phase 1 — that's the real
+    # funnel ("of the X who passed P1, how many also pass P2?"). Falls back
+    # to a minimum floor so n_sims=0 doesn't crash the runner.
+    n_p1_passed = int(p1.get("n_passed", 0))
+    p2_n_sims   = max(n_p1_passed, 1)
+    # Slice the Phase-2 predraw to match the reduced sim count (avoids wasted
+    # rows + keeps RNG paths aligned). When predraw is None (Markov mode), this
+    # is a no-op.
+    pre_p2_sliced = pre_p2[:p2_n_sims] if (pre_p2 is not None and len(pre_p2) > p2_n_sims) else pre_p2
+    p2 = _jsonify(_safe_call(mc.run_mc_phase2, daily_pnl=daily_pnl, n_sims=p2_n_sims,
+                             predrawn_pnl=pre_p2_sliced, **p2_kwargs, **extra, **eval_extra))
+
     fd = _jsonify(_safe_call(mc.run_mc_funded, daily_pnl=daily_pnl, n_sims=n_sims,
                              predrawn_pnl=pre_fd, **fd_kwargs, **extra, **fd_extra))
     lt = _jsonify(_safe_call(mc.run_mc_longterm, daily_pnl=daily_pnl, n_sims=lt_n_sims,
@@ -524,6 +535,42 @@ def run_all_phases(
     fd["payout_cadence_days"]  = int(fd_kwargs.get("payout_cadence_days", 30))
     fd["profit_split"]         = float(fd_kwargs.get("profit_split", 0.80))
     fd["balance_reset"]        = bool(fd_kwargs.get("balance_reset", True))
+
+    # ── Earnings-per-payout enrichment (#5 + #6 — v0.4.0.1) ────────────────
+    # avg_earnings_per_payout: sum(total_earnings) / sum(payout_count) across
+    #   sims, ignoring sims that never paid out. Better than avg/avg because
+    #   it weights by activity, not by sim count.
+    # earnings_by_payout_count: list of {payout_count, mean_earnings, count}
+    #   used to overlay a per-bucket average marker on the scatter chart.
+    try:
+        df_records = (fd.get("results_df") or {}).get("records") or []
+        total_paid    = 0.0
+        total_payouts = 0
+        bucket: dict[int, list[float]] = {}
+        for r in df_records:
+            pc = int(r.get("payout_count") or 0)
+            te = float(r.get("total_earnings") or 0.0)
+            if pc > 0:
+                total_paid    += te
+                total_payouts += pc
+            bucket.setdefault(pc, []).append(te)
+        fd["avg_earnings_per_payout"] = (
+            float(total_paid / total_payouts) if total_payouts > 0 else 0.0
+        )
+        fd["earnings_by_payout_count"] = sorted(
+            [
+                {
+                    "payout_count": int(k),
+                    "mean_earnings": float(sum(v) / len(v)) if v else 0.0,
+                    "count": len(v),
+                }
+                for k, v in bucket.items()
+            ],
+            key=lambda d: d["payout_count"],
+        )
+    except Exception:
+        fd["avg_earnings_per_payout"]   = 0.0
+        fd["earnings_by_payout_count"]  = []
 
     p1["balance"]      = float(p1_kwargs.get("balance", 100_000))
     p1["profit_pct"]   = float(p1_kwargs.get("profit_pct", 0.10))
@@ -554,12 +601,29 @@ def run_all_phases(
     }
 
     # ── Tier 3 helpers (each isolated; failure must not poison the whole run) ──
+    # Cap sweep n_sims at 1000 (v0.4.0.1 — was 2000) — ~30% wall-time savings on
+    # the silent post-Phase-2 portion for negligible loss of confidence on the
+    # secondary charts (they're decision aids, not headline stats).
+    SWEEP_N_SIMS = min(n_sims, 1000)
+
+    # Lazy cancel-check + progress logger. The sidecar prints these so the
+    # frontend's JobProgress can see the SWEEP stage label even though the
+    # helpers themselves don't emit MC_SIM lines.
+    def _sweep_step(label: str) -> None:
+        print(f"[SWEEP] {label}", flush=True)
+        try:
+            from app.jobs.runners import check_cancelled
+            check_cancelled()
+        except ImportError:
+            pass
+
     p1_subset = {k: v for k, v in p1_kwargs.items()
                  if k in ("balance", "profit_pct", "daily_dd_pct",
                           "total_dd_pct", "min_days", "max_days")}
-    p1_subset.setdefault("n_sims", min(n_sims, 2000))
+    p1_subset.setdefault("n_sims", SWEEP_N_SIMS)
     p1_subset.setdefault("seed", seed)
 
+    _sweep_step("lot_size_sweep (6 lot multipliers)")
     try:
         sweep_df = mc.lot_size_sweep(
             daily_pnl, base_lot=1.0,
@@ -570,24 +634,27 @@ def run_all_phases(
     except Exception as e:
         result["lot_sweep"] = {"error": str(e)}
 
+    _sweep_step("payout_cadence_optimizer (3 cadences)")
     try:
         cad_df = mc.payout_cadence_optimizer(
             daily_pnl,
             balance=fd_balance,
             cadences=(14, 30, 60),
             months=12,
-            n_sims=min(n_sims, 2000),
+            n_sims=SWEEP_N_SIMS,
             seed=seed,
         )
         result["payout_cadence_sweep"] = _jsonify(cad_df)
     except Exception as e:
         result["payout_cadence_sweep"] = {"error": str(e)}
 
+    _sweep_step("kelly_fraction (analytic)")
     try:
         result["kelly"] = _jsonify(mc.kelly_fraction(daily_pnl))
     except Exception as e:
         result["kelly"] = {"error": str(e)}
 
+    _sweep_step("risk_of_ruin_horizons (6 horizons)")
     try:
         # Toolkit signature uses ``horizons_days`` + ``ruin_dd_pct`` (not the
         # hypothetical ``horizons``/``balance``-only form). Map accordingly.
@@ -596,24 +663,27 @@ def run_all_phases(
             balance=lt_balance,
             horizons_days=(30, 90, 180, 365, 730, 1825),
             ruin_dd_pct=float(lt_kwargs.get("ruin_pct", 0.20)),
-            n_sims=min(2000, lt_n_sims),
+            n_sims=min(SWEEP_N_SIMS, lt_n_sims),
             seed=seed,
         )
         result["ruin_horizons"] = _jsonify(ror_df)
     except Exception as e:
         result["ruin_horizons"] = {"error": str(e)}
 
+    _sweep_step("funded_lifetime (36 months)")
     try:
         # ``funded_lifetime`` toolkit signature: balance, max_months, n_sims, seed.
         result["funded_lifetime"] = _jsonify(mc.funded_lifetime(
             daily_pnl,
             balance=fd_balance,
             max_months=36,
-            n_sims=min(n_sims, 2000),
+            n_sims=SWEEP_N_SIMS,
             seed=seed,
         ))
     except Exception as e:
         result["funded_lifetime"] = {"error": str(e)}
+
+    _sweep_step("verdict block + finalize")
 
     # ── Verdict block ────────────────────────────────────────────────────────
     challenge_fee = float(global_params.get("challenge_fee", 0.0))
@@ -624,9 +694,14 @@ def run_all_phases(
             kelly=result.get("kelly") or {},
             challenge_fee=challenge_fee,
             fee_refund=fee_refund,
+            intraday_dd_factor=intraday_factor,
         )
     except Exception as e:
         result["verdict"] = {"error": str(e)}
+
+    # Echo the intraday factor so the dashboard can hide the disclaimer banner
+    # whenever the user has opted into a tighter safety margin (factor < 1.0).
+    result["intraday_dd_factor"] = intraday_factor
 
     # ── Normalize sweep/helper shapes to match frontend types ──────────────
     # The toolkit helpers return DataFrames (which _jsonify wraps as
@@ -690,6 +765,7 @@ def _build_verdict(
     kelly: dict[str, Any],
     challenge_fee: float,
     fee_refund: bool,
+    intraday_dd_factor: float = 1.0,
 ) -> dict[str, Any]:
     """Compute the per-phase verdict block — raw numbers only, no prose.
 
@@ -785,6 +861,7 @@ def _build_verdict(
             "roi_pass_rate":                 roi_pass_rate,
             "kelly_fraction":                kelly_f,
             "kelly_verdict":                 _kelly_verdict(kelly_f),
+            "intraday_dd_factor":            intraday_dd_factor,
         },
     }
 

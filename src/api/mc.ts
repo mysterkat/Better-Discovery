@@ -167,6 +167,7 @@ export interface VerdictGlobal {
   roi_pass_rate?: number;
   kelly_fraction?: number;
   kelly_verdict?: string;
+  intraday_dd_factor?: number;
 }
 
 export interface AllPhasesResult {

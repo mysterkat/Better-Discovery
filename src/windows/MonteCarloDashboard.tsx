@@ -116,23 +116,31 @@ export default function MonteCarloDashboard() {
         {jobId && <span className="job-id-badge">{jobId.slice(0, 8)}</span>}
       </div>
 
-      {!disclaimerDismissed && (
-        <div className="mc-disclaimer" role="note">
-          <button
-            type="button"
-            className="mc-disclaimer-close"
-            aria-label="Dismiss disclaimer"
-            onClick={dismissDisclaimer}
-          >
-            ×
-          </button>
-          <span className="mc-disclaimer-prefix">⚠ Simulation Limitation:</span>{" "}
-          Daily loss is checked at end-of-day only. Real prop firms check intraday
-          floating drawdown on open positions. Results may underestimate breach risk
-          by 20–40% vs live trading. Use the <strong>Intraday DD Factor</strong>{" "}
-          parameter to add a safety margin.
-        </div>
-      )}
+      {!disclaimerDismissed && (() => {
+        // Hide automatically when the user has tightened the safety margin —
+        // factor < 1.0 means they've already opted into intraday-aware DD.
+        const factor = (result?.verdict?.global?.intraday_dd_factor
+                     ?? (result as Record<string, any> | null | undefined)?.intraday_dd_factor
+                     ?? 1.0) as number;
+        if (factor < 1.0) return null;
+        return (
+          <div className="mc-disclaimer" role="note">
+            <button
+              type="button"
+              className="mc-disclaimer-close"
+              aria-label="Dismiss disclaimer"
+              onClick={dismissDisclaimer}
+            >
+              ×
+            </button>
+            <span className="mc-disclaimer-prefix">⚠ Simulation Limitation:</span>{" "}
+            Daily loss is checked at end-of-day only. Real prop firms check intraday
+            floating drawdown on open positions. Results may underestimate breach risk
+            by 20–40% vs live trading. Use the <strong>Intraday DD Factor</strong>{" "}
+            parameter (currently 1.0 = off) to add a safety margin.
+          </div>
+        );
+      })()}
 
       {error && <div className="alert alert-error">{error}</div>}
       {!job && !error && <p className="results-loading">Fetching results…</p>}
@@ -394,6 +402,16 @@ function FundedPanel({ data, extras }: { data: FundedResult; extras: Record<stri
       tone: Number(globalV.roi_pass_rate) >= 100 ? "good" : "bad",
     });
   }
+  // Avg $ per actual payout (skips sims that never paid out). Different from
+  // avg_total_earnings — this is "average size of a single payout when one happens".
+  const avgPerPayout = (data as Record<string, any>).avg_earnings_per_payout;
+  if (avgPerPayout != null) {
+    cells.push({
+      label: "Avg $/Payout",
+      value: usd(Number(avgPerPayout)),
+      tone: Number(avgPerPayout) > 0 ? "good" : undefined,
+    });
+  }
 
   return (
     <>
@@ -421,7 +439,9 @@ function FundedPanel({ data, extras }: { data: FundedResult; extras: Record<stri
       </div>
 
       <ChartCard span="full">
-        <EarningsVsPayouts records={records} theme={t} />
+        <EarningsVsPayouts records={records}
+                           byCount={(data as Record<string, any>).earnings_by_payout_count}
+                           theme={t} />
       </ChartCard>
 
       <div className="mc-dash-grid mc-dash-grid-3">
@@ -1054,22 +1074,42 @@ function EarningsHistogram({ records, avg, theme: t }: {
   );
 }
 
-function EarningsVsPayouts({ records, theme: t }: {
-  records: Array<{ payout_count: number; total_earnings: number }>; theme: ChartTheme;
+function EarningsVsPayouts({ records, byCount, theme: t }: {
+  records: Array<{ payout_count: number; total_earnings: number }>;
+  byCount?: Array<{ payout_count: number; mean_earnings: number; count: number }>;
+  theme: ChartTheme;
 }) {
   if (!records.length) return <EmptyChart label="No data" theme={t} />;
-  const data: Data[] = [{
-    type: "scatter", mode: "markers",
-    x: records.map((r) => r.payout_count),
-    y: records.map((r) => r.total_earnings),
-    marker: { color: t.accent2, size: 4, opacity: 0.35 },
-    hovertemplate: "Payouts: %{x} — $%{y:.0f}<extra></extra>",
-  } as Data];
+  const traces: Data[] = [
+    {
+      type: "scatter", mode: "markers",
+      x: records.map((r) => r.payout_count),
+      y: records.map((r) => r.total_earnings),
+      marker: { color: t.accent2, size: 4, opacity: 0.35 },
+      hovertemplate: "Payouts: %{x} — $%{y:.0f}<extra></extra>",
+      name: "Per-sim",
+    } as Data,
+  ];
+  // Overlay: mean earnings at each integer payout count (the "trend line").
+  if (byCount && byCount.length) {
+    traces.push({
+      type: "scatter", mode: "lines+markers",
+      x: byCount.map((b) => b.payout_count),
+      y: byCount.map((b) => b.mean_earnings),
+      line: { color: t.pass, width: 2 },
+      marker: { color: t.pass, size: 9, symbol: "diamond",
+                line: { color: t.text, width: 1 } },
+      hovertemplate: "%{x} payouts: avg $%{y:.0f} (n=%{customdata})<extra></extra>",
+      customdata: byCount.map((b) => b.count),
+      name: "Mean per bucket",
+    } as Data);
+  }
   return (
-    <Plot data={data}
+    <Plot data={traces}
       layout={{ ...baseLayout(t, "Funded — Earnings vs Number of Payouts"),
                 xaxis: { ...baseLayout(t).xaxis, title: { text: "Number of Payouts", font: { color: t.text2 } } },
                 yaxis: { ...baseLayout(t).yaxis, title: { text: "Total Earnings ($)", font: { color: t.text2 } } },
+                legend: { orientation: "h", y: -0.2, font: { color: t.text2 } },
                 height: 360 } as Partial<Layout>}
       config={PLOT_CONFIG} style={{ width: "100%" }} useResizeHandler
     />
