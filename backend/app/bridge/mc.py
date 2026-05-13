@@ -3,9 +3,11 @@
 Exposes the four phase runners and all 15 advanced-metric functions. Results
 are passed through _jsonify so pandas/numpy objects become JSON-safe.
 
-Phase 7 addition: for phase1/phase2, a small satellite simulation (N_CURVE_SIMS
-paths) is run after the main stats pass so the frontend can render 3-D equity
-surface and drawdown cone charts without shipping the full 10,000-path array.
+Equity-curve sampling is now done INSIDE the runners (via ``keep_curves``)
+rather than re-running a satellite simulation here, so the curves shown in
+the dashboard are guaranteed to come from the same RNG paths as the headline
+stats. The earlier ``_sample_equity_curves`` / ``_sample_funded_curves``
+helpers were removed in favour of this single-pass design.
 """
 
 from __future__ import annotations
@@ -64,6 +66,23 @@ MC_PARAM_META: dict[str, MCParamMeta] = {
                                        "Equity curves rendered in charts", min=50, max=1000, step=50),
     "RANDOM_SEED":        MCParamMeta("Random Seed",         "Simulation", "int",
                                        "Seed for reproducible runs", min=0),
+    "INTRADAY_DD_FACTOR": MCParamMeta("Intraday DD Factor",  "Simulation", "float",
+                                       "Tightens DD limits to approximate intraday floating "
+                                       "drawdown risk. 1.0 = end-of-day only (sim default), "
+                                       "0.7 = treat 5% daily limit as ~3.5% effective. "
+                                       "Lower = more conservative.",
+                                       min=0.1, max=1.0, step=0.05),
+    "BOOTSTRAP_BLOCK_SIZE": MCParamMeta("Bootstrap Block Size", "Simulation", "int",
+                                       "Sample N-day blocks instead of single days to "
+                                       "preserve autocorrelation. 1 = i.i.d. bootstrap "
+                                       "(default). 5 = preserves week-long streaks.",
+                                       min=1, max=30, step=1),
+    "CHALLENGE_FEE":      MCParamMeta("Challenge Fee",       "Simulation", "float",
+                                       "Cost of the evaluation account in $.",
+                                       min=0, max=5000, step=10),
+    "FEE_REFUNDED_ON_FIRST_PAYOUT": MCParamMeta(
+                                       "Fee Refunded on First Payout", "Simulation", "bool",
+                                       "Most prop firms refund the challenge fee on the first payout."),
     # ── Phase 1 ─────────────────────────────────────────────────────────────
     "P1_BALANCE":         MCParamMeta("Balance",             "Phase 1", "float",
                                        "Starting account size", min=1000.0),
@@ -172,6 +191,61 @@ def list_mc_defaults_with_meta() -> list[dict[str, Any]]:
 _PHASE_RUNNER_NAMES = ("run_mc_phase1", "run_mc_phase2", "run_mc_funded", "run_mc_longterm")
 _PHASE_KEYS         = ("phase1",        "phase2",        "funded",        "longterm")
 
+# ── Param-name maps (UI key → runner kwarg). ──────────────────────────────
+# The MC_PARAM_META registry uses verbose UI keys (P1_BALANCE, FD_PAYOUT_MODE,
+# …). The actual runner functions in mc_funded_test.py take terser kwargs
+# (balance, payout_mode, …). The frontend lowercases meta keys before sending
+# (e.g. "fd_payout_mode"), so we map lowercased ⇒ runner kwarg here.
+# Value of None means "explicitly unsupported by the runner — drop silently".
+_EVAL_KEY_MAP = {
+    "balance":          "balance",
+    "leverage":         None,
+    "profit_target":    "profit_pct",
+    "max_daily_dd":     "daily_dd_pct",
+    "max_total_dd":     "total_dd_pct",
+    "min_days":         "min_days",
+    "max_sim_days":     "max_days",
+}
+_FD_KEY_MAP = {
+    "balance":          "balance",
+    "leverage":         None,
+    "max_daily_dd":     "daily_dd_pct",
+    "max_total_dd":     "total_dd_pct",
+    "profit_split":     "profit_split",
+    "payout_mode":      "payout_mode",
+    "payout_threshold": "payout_threshold",
+    "payout_schedule":  "payout_cadence_days",
+    "min_days_payout":  "min_days_payout",
+    "balance_reset":    "balance_reset",
+    "max_sim_days":     "max_days",
+}
+_LT_KEY_MAP = {
+    "days":             "n_days",
+    "sims":             "n_sims",
+    "ruin_pct":         "ruin_pct",
+    "benchmark_ticker": "benchmark_ticker",
+}
+
+
+def _normalize_params(prefix: str, params: dict[str, Any], key_map: dict[str, str | None]) -> dict[str, Any]:
+    """Normalize a UI param dict for consumption by an mc_funded_test runner.
+
+    Strips the phase prefix (e.g. "fd_") off keys, then maps remaining keys
+    via ``key_map``. Keys that map to ``None`` or aren't in the map are dropped
+    silently — that's intentional so the meta registry can carry "display only"
+    options without crashing the runner.
+    """
+    out: dict[str, Any] = {}
+    for k, v in (params or {}).items():
+        kl = k.lower()
+        if kl.startswith(prefix):
+            kl = kl[len(prefix):]
+        target = key_map.get(kl)
+        if target is None:
+            continue
+        out[target] = v
+    return out
+
 _ADVANCED_METRIC_NAMES = (
     "failure_mode_breakdown", "time_to_pass_distribution", "lot_size_sweep",
     "recovery_probability", "worst_streak_check", "conditional_phase2_pass_rate",
@@ -211,6 +285,121 @@ def load_daily_pnl(data_source: str, file_path: str) -> Any:
     return np.asarray(mc.get_daily_pnl(df, scale=1.0), dtype=float)
 
 
+def compute_regime_from_file(data_source: str, file_path: str) -> dict[str, Any] | None:
+    """Load a trade file and compute the Markov regime transition matrix + per-regime P&L pools.
+
+    Returns ``None`` when the trades have no parseable regime markers (e.g. a
+    plain TradingView CSV without ``R:<n>`` comments). The dashboard renders
+    the regime heatmap only when this returns non-None.
+
+    The pools are used by the runners for regime-conditional bootstrap sampling.
+    """
+    try:
+        mc = _get_mc()
+        if data_source == "mt5_html":
+            df = mc.load_mt5_html(file_path)
+        else:
+            df = mc.load_tradingview_csv(file_path)
+        trans_matrix, stationary_dist, _ = mc.compute_regime_transitions(df)
+        if trans_matrix is None or stationary_dist is None:
+            return None
+        # Build per-regime daily P&L pools so runners can sample conditionally.
+        try:
+            _, regime_pnl_pools = mc._build_regime_daily(df, scale=1.0)
+        except Exception:
+            regime_pnl_pools = None
+        # Fix 1.6 — sanitise rows. ``rng.choice(p=row)`` crashes mid-sim if
+        # any row sums to 0 or contains NaN; replace such rows with a uniform
+        # 5-way prior so the Markov chain stays well-formed.
+        import math
+        sanitized: list[list[float]] = []
+        for row in trans_matrix:
+            try:
+                vals = [float(v) for v in row]
+            except (TypeError, ValueError):
+                vals = [float("nan")] * 5
+            row_sum = sum(v for v in vals if not math.isnan(v))
+            if row_sum <= 0 or any(math.isnan(v) for v in vals) or len(vals) != 5:
+                vals = [0.2, 0.2, 0.2, 0.2, 0.2]
+            sanitized.append(vals)
+        result: dict[str, Any] = {
+            "trans_matrix":    sanitized,
+            "stationary_dist": [float(v) for v in stationary_dist],
+            "labels":          list(mc.REGIME_LABELS),
+        }
+        if regime_pnl_pools:
+            # JSON-safe nested floats; keys coerced to str so _jsonify is happy.
+            result["regime_pnl_pools"] = {
+                str(k): [float(v) for v in pool] for k, pool in regime_pnl_pools.items()
+            }
+        return result
+    except Exception:
+        return None
+
+
+def _build_predrawn(
+    mc: Any,
+    daily_pnl: Any,
+    n_sims: int,
+    max_days: int,
+    rng: Any,
+    block_size: int,
+) -> Any:
+    """Pre-draw an ``(n_sims, max_days)`` bootstrap matrix in float32.
+
+    When ``block_size > 1`` we sample N-day BLOCKS of consecutive trades to
+    preserve autocorrelation (Politis-Romano moving-block bootstrap, simplified).
+    Block 1 is the i.i.d. fallback. Always returns a contiguous float32 array.
+    """
+    import numpy as _np
+    arr = _np.asarray(daily_pnl, dtype=_np.float32)
+    n   = len(arr)
+    block_size = max(1, int(block_size))
+    if block_size == 1 or n <= block_size:
+        return rng.choice(arr, size=(n_sims, max_days), replace=True).astype(_np.float32)
+    n_blocks = max_days // block_size + 1
+    starts   = rng.integers(0, n - block_size + 1, size=(n_sims, n_blocks))
+    out      = _np.empty((n_sims, n_blocks * block_size), dtype=_np.float32)
+    for b in range(block_size):
+        out[:, b::block_size] = arr[starts + b]
+    return out[:, :max_days]
+
+
+def _wilson_ci(passed: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson 95% CI for a binomial proportion. Returns (low, high) as 0..1 floats."""
+    if total <= 0:
+        return (0.0, 0.0)
+    p_hat = passed / total
+    z2    = z * z
+    denom = 1.0 + z2 / total
+    center = p_hat + z2 / (2.0 * total)
+    half   = z * ((p_hat * (1.0 - p_hat) / total + z2 / (4.0 * total * total)) ** 0.5)
+    low    = max(0.0, (center - half) / denom)
+    high   = min(1.0, (center + half) / denom)
+    return (low, high)
+
+
+def _kelly_verdict(k: float) -> str:
+    if k <= 0:
+        return "negative"
+    if k < 0.25:
+        return "underleveraged"
+    if k < 0.75:
+        return "near optimal"
+    if k < 1.5:
+        return "aggressive"
+    return "very aggressive"
+
+
+def _dominant_fail(stats: dict[str, Any]) -> tuple[str, float]:
+    """Pick the largest fail bucket. Returns ("none", 0.0) if no failures."""
+    pcts = stats.get("fail_pcts") or {}
+    if not pcts:
+        return ("none", 0.0)
+    name, pct = max(pcts.items(), key=lambda kv: float(kv[1] or 0.0))
+    return (str(name), float(pct or 0.0))
+
+
 def run_all_phases(
     daily_pnl: Any,
     global_params: dict[str, Any],
@@ -218,44 +407,386 @@ def run_all_phases(
     phase2_params: dict[str, Any],
     funded_params: dict[str, Any],
     longterm_params: dict[str, Any],
+    regime_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run all four phases in one job, sharing a single pre-drawn sample matrix.
+    """Run all four phases in one job.
 
-    Pre-draws n_sims × max_days bootstrap samples once; passes the same array
-    to all four runners so they consume identical random paths — true reuse.
+    With Markov regime data: each runner samples its own paths via the regime
+    chain (no shared predraw — Fix 1.1 — so the runners actually exercise the
+    Markov branch instead of being shadowed by ``predrawn_pnl``).
+
+    Without regime data: per-phase predraw matrices sized to that phase's own
+    ``max_days`` are built in float32 (Fix 2.5), optionally with N-day blocks
+    (Fix 4.5) for autocorrelation preservation. Skipping the giant global
+    matrix in regime mode is intentional — it would never be consumed.
     """
     mc = _get_mc()
     _ensure_runners()
+    import numpy as _np  # local to avoid mandatory module-level dep
+
     n_sims   = int(global_params.get("n_sims", 10_000))
-    max_days = max(
-        int(phase1_params.get("max_days", 365)),
-        int(phase2_params.get("max_days", 365)),
-        int(funded_params.get("months", 12)) * 21 + 10,
-        int(longterm_params.get("years", 5)) * 252 + 10,
-    )
+
+    # Normalize UI keys → runner kwargs. Drops unsupported (e.g. P1_LEVERAGE)
+    # keys silently so the runner sees only what it can consume.
+    p1_kwargs = _normalize_params("p1_", phase1_params, _EVAL_KEY_MAP)
+    p2_kwargs = _normalize_params("p2_", phase2_params, _EVAL_KEY_MAP)
+    fd_kwargs = _normalize_params("fd_", funded_params, _FD_KEY_MAP)
+    lt_kwargs = _normalize_params("lt_", longterm_params, _LT_KEY_MAP)
+
+    # Funded runner uses ``max_days`` rather than ``months`` when supplied.
+    fd_max_days = int(fd_kwargs.get("max_days") or 12 * 21)
+    p1_max_days = int(p1_kwargs.get("max_days", 365))
+    p2_max_days = int(p2_kwargs.get("max_days", 365))
+    lt_n_days   = int(lt_kwargs.get("n_days", 252 * 5))
+
     seed = global_params.get("seed")
     rng  = mc._make_rng(seed)
-    predrawn = rng.choice(daily_pnl, size=(n_sims, max_days), replace=True).astype(float)
 
-    p1 = _jsonify(mc.run_mc_phase1(daily_pnl, n_sims=n_sims, predrawn_pnl=predrawn,
-                                    **{k: v for k, v in phase1_params.items() if k not in ("n_sims",)}))
-    p2 = _jsonify(mc.run_mc_phase2(daily_pnl, n_sims=n_sims, predrawn_pnl=predrawn,
-                                    **{k: v for k, v in phase2_params.items() if k not in ("n_sims",)}))
-    fd = _jsonify(mc.run_mc_funded(daily_pnl, n_sims=n_sims, predrawn_pnl=predrawn,
-                                    **{k: v for k, v in funded_params.items() if k not in ("n_sims",)}))
-    lt = _jsonify(mc.run_mc_longterm(daily_pnl, n_sims=n_sims, predrawn_pnl=predrawn,
-                                      **{k: v for k, v in longterm_params.items() if k not in ("n_sims",)}))
+    # Long-term may override n_sims via LT_SIMS — pop so we don't double-pass.
+    lt_n_sims = int(lt_kwargs.pop("n_sims", n_sims))
 
-    # Attach equity-curve samples for phase1 + phase2.
-    for phase_key, phase_label, params_dict in (("phase1", "phase1", phase1_params),
-                                                 ("phase2", "phase2", phase2_params)):
+    # Global intraday DD safety factor (1.0 = end-of-day only, <1.0 tightens limits).
+    intraday_factor = float(global_params.get("intraday_dd_factor", 1.0))
+    block_size      = int(global_params.get("bootstrap_block_size", 1))
+
+    # ── Regime-conditional sampling (Fix 1.1) ─────────────────────────────────
+    # When regime data is present, the runners' Markov branch only fires if
+    # ``predrawn_pnl is None``. We honour that by NOT building any predraw at
+    # all and NOT passing the kwarg, so the Markov sampler runs as designed.
+    # Trade-off: regime mode no longer benefits from the shared-RNG variance
+    # reduction across phases. That's intentional — Markov's path-dependent
+    # state would be broken by reusing a flat matrix anyway.
+    extra: dict[str, Any] = {"intraday_dd_factor": intraday_factor}
+    use_regime = bool(regime_data and regime_data.get("trans_matrix") is not None)
+    if use_regime:
         try:
-            curves = _sample_equity_curves(phase_label, daily_pnl, params_dict, N_CURVE_SIMS)
-            (p1 if phase_key == "phase1" else p2)["equity_curves"] = curves
+            extra["trans_matrix"] = _np.asarray(regime_data["trans_matrix"], dtype=float)
+            pools = regime_data.get("regime_pnl_pools") or {}
+            extra["regime_pnl_pools"] = {int(k): list(v) for k, v in pools.items()}
         except Exception:
-            pass
+            use_regime = False
+            extra.pop("trans_matrix", None)
+            extra.pop("regime_pnl_pools", None)
 
-    return {"phase1": p1, "phase2": p2, "funded": fd, "longterm": lt}
+    # Per-phase predraws (Fix 2.5). Skipped entirely under regime mode.
+    if use_regime:
+        pre_p1 = pre_p2 = pre_fd = pre_lt = None
+    else:
+        pre_p1 = _build_predrawn(mc, daily_pnl, n_sims, p1_max_days, rng, block_size)
+        pre_p2 = _build_predrawn(mc, daily_pnl, n_sims, p2_max_days, rng, block_size)
+        pre_fd = _build_predrawn(mc, daily_pnl, n_sims, fd_max_days, rng, block_size)
+        pre_lt = _build_predrawn(mc, daily_pnl, lt_n_sims, lt_n_days, rng, block_size)
+
+    # Curve count + extra eval kwargs (consistency / dd_style). The toolkit
+    # tolerates **kwargs flexibility, so it's safe to pass these even if a
+    # given runner version doesn't yet recognise them — but we keep the call
+    # sites explicit so future signature drift fails loudly.
+    eval_extra: dict[str, Any] = {"keep_curves": N_CURVE_SIMS}
+    fd_extra:   dict[str, Any] = {"keep_curves": N_CURVE_SIMS}
+    if (dd_style := global_params.get("dd_style")):
+        eval_extra["dd_style"] = str(dd_style)
+        fd_extra["dd_style"]   = str(dd_style)
+    if (cmax := global_params.get("consistency_max_daily_pct")) is not None:
+        eval_extra["consistency_max_daily_pct"] = float(cmax)
+        fd_extra["consistency_max_daily_pct"]   = float(cmax)
+    if (mdfp := global_params.get("min_days_first_payout")):
+        fd_extra["min_days_first_payout"] = int(mdfp)
+
+    def _safe_call(fn: Callable[..., Any], **kwargs: Any) -> dict[str, Any]:
+        """Call a runner; if it rejects a Tier-3 kwarg, drop it and retry once."""
+        try:
+            return fn(**kwargs)
+        except TypeError:
+            # Strip the new optional kwargs (toolkit may not yet accept them)
+            for opt in ("keep_curves", "dd_style", "consistency_max_daily_pct",
+                        "min_days_first_payout"):
+                kwargs.pop(opt, None)
+            return fn(**kwargs)
+
+    p1 = _jsonify(_safe_call(mc.run_mc_phase1, daily_pnl=daily_pnl, n_sims=n_sims,
+                             predrawn_pnl=pre_p1, **p1_kwargs, **extra, **eval_extra))
+    p2 = _jsonify(_safe_call(mc.run_mc_phase2, daily_pnl=daily_pnl, n_sims=n_sims,
+                             predrawn_pnl=pre_p2, **p2_kwargs, **extra, **eval_extra))
+    fd = _jsonify(_safe_call(mc.run_mc_funded, daily_pnl=daily_pnl, n_sims=n_sims,
+                             predrawn_pnl=pre_fd, **fd_kwargs, **extra, **fd_extra))
+    lt = _jsonify(_safe_call(mc.run_mc_longterm, daily_pnl=daily_pnl, n_sims=lt_n_sims,
+                             predrawn_pnl=pre_lt, **lt_kwargs, **extra))
+
+    # Echo the parameter dicts back so the dashboard can render KPI tables
+    # without round-tripping to /mc/params.
+    fd_balance = float(fd_kwargs.get("balance", 100_000))
+    fd["balance"]              = fd_balance
+    fd["daily_dd_pct"]         = float(fd_kwargs.get("daily_dd_pct", 0.05))
+    fd["total_dd_pct"]         = float(fd_kwargs.get("total_dd_pct", 0.10))
+    fd["max_days"]             = int(fd_kwargs.get("max_days", 252))
+    fd["payout_mode"]          = str(fd_kwargs.get("payout_mode", "schedule"))
+    fd["payout_threshold"]     = float(fd_kwargs.get("payout_threshold", 0.05))
+    fd["payout_cadence_days"]  = int(fd_kwargs.get("payout_cadence_days", 30))
+    fd["profit_split"]         = float(fd_kwargs.get("profit_split", 0.80))
+    fd["balance_reset"]        = bool(fd_kwargs.get("balance_reset", True))
+
+    p1["balance"]      = float(p1_kwargs.get("balance", 100_000))
+    p1["profit_pct"]   = float(p1_kwargs.get("profit_pct", 0.10))
+    p1["daily_dd_pct"] = float(p1_kwargs.get("daily_dd_pct", 0.05))
+    p1["total_dd_pct"] = float(p1_kwargs.get("total_dd_pct", 0.10))
+    p1["min_days"]     = int(p1_kwargs.get("min_days", 4))
+
+    p2["balance"]      = float(p2_kwargs.get("balance", 100_000))
+    p2["profit_pct"]   = float(p2_kwargs.get("profit_pct", 0.05))
+    p2["daily_dd_pct"] = float(p2_kwargs.get("daily_dd_pct", 0.05))
+    p2["total_dd_pct"] = float(p2_kwargs.get("total_dd_pct", 0.10))
+    p2["min_days"]     = int(p2_kwargs.get("min_days", 4))
+    # Funnel: how many P1 sims passed (== n_sims input to P2).
+    p2["n_p1_passed"]  = int(p1.get("n_passed", 0))
+    n_total = int(p1.get("n_passed", 0) + p1.get("n_failed", 0))
+    if n_total:
+        combined = (int(p2.get("n_passed", 0)) / n_total) * 100.0
+        p2["combined_pass_rate"] = combined
+
+    lt_balance = float(lt_kwargs.get("balance", 100_000))
+
+    result: dict[str, Any] = {
+        "phase1":   p1,
+        "phase2":   p2,
+        "funded":   fd,
+        "longterm": lt,
+        "regime":   regime_data,
+    }
+
+    # ── Tier 3 helpers (each isolated; failure must not poison the whole run) ──
+    p1_subset = {k: v for k, v in p1_kwargs.items()
+                 if k in ("balance", "profit_pct", "daily_dd_pct",
+                          "total_dd_pct", "min_days", "max_days")}
+    p1_subset.setdefault("n_sims", min(n_sims, 2000))
+    p1_subset.setdefault("seed", seed)
+
+    try:
+        sweep_df = mc.lot_size_sweep(
+            daily_pnl, base_lot=1.0,
+            lots=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
+            **p1_subset,
+        )
+        result["lot_sweep"] = _jsonify(sweep_df)
+    except Exception as e:
+        result["lot_sweep"] = {"error": str(e)}
+
+    try:
+        cad_df = mc.payout_cadence_optimizer(
+            daily_pnl,
+            balance=fd_balance,
+            cadences=(14, 30, 60),
+            months=12,
+            n_sims=min(n_sims, 2000),
+            seed=seed,
+        )
+        result["payout_cadence_sweep"] = _jsonify(cad_df)
+    except Exception as e:
+        result["payout_cadence_sweep"] = {"error": str(e)}
+
+    try:
+        result["kelly"] = _jsonify(mc.kelly_fraction(daily_pnl))
+    except Exception as e:
+        result["kelly"] = {"error": str(e)}
+
+    try:
+        # Toolkit signature uses ``horizons_days`` + ``ruin_dd_pct`` (not the
+        # hypothetical ``horizons``/``balance``-only form). Map accordingly.
+        ror_df = mc.risk_of_ruin_horizons(
+            daily_pnl,
+            balance=lt_balance,
+            horizons_days=(30, 90, 180, 365, 730, 1825),
+            ruin_dd_pct=float(lt_kwargs.get("ruin_pct", 0.20)),
+            n_sims=min(2000, lt_n_sims),
+            seed=seed,
+        )
+        result["ruin_horizons"] = _jsonify(ror_df)
+    except Exception as e:
+        result["ruin_horizons"] = {"error": str(e)}
+
+    try:
+        # ``funded_lifetime`` toolkit signature: balance, max_months, n_sims, seed.
+        result["funded_lifetime"] = _jsonify(mc.funded_lifetime(
+            daily_pnl,
+            balance=fd_balance,
+            max_months=36,
+            n_sims=min(n_sims, 2000),
+            seed=seed,
+        ))
+    except Exception as e:
+        result["funded_lifetime"] = {"error": str(e)}
+
+    # ── Verdict block ────────────────────────────────────────────────────────
+    challenge_fee = float(global_params.get("challenge_fee", 0.0))
+    fee_refund    = bool(global_params.get("fee_refunded_on_first_payout", True))
+    try:
+        result["verdict"] = _build_verdict(
+            p1, p2, fd, lt,
+            kelly=result.get("kelly") or {},
+            challenge_fee=challenge_fee,
+            fee_refund=fee_refund,
+        )
+    except Exception as e:
+        result["verdict"] = {"error": str(e)}
+
+    # ── Normalize sweep/helper shapes to match frontend types ──────────────
+    # The toolkit helpers return DataFrames (which _jsonify wraps as
+    # {columns, records}) and use Python-side field names. The frontend
+    # expects flat record arrays with shorter, UI-friendly field names.
+    result["lot_sweep"]            = _flatten_records(result.get("lot_sweep"), {})
+    result["payout_cadence_sweep"] = _flatten_records(result.get("payout_cadence_sweep"), {
+        "avg_total_payouts_usd": "total_earnings",
+        "blowup_rate":           "breach_rate",
+    })
+    result["ruin_horizons"]        = _flatten_records(result.get("ruin_horizons"), {
+        "horizon_days":      "days",
+        "ruin_probability":  "p_ruin",
+    })
+    # Kelly is a dict, not a DataFrame — just rename the keys.
+    k = result.get("kelly") or {}
+    if isinstance(k, dict) and "kelly_f" in k:
+        result["kelly"] = {
+            "kelly_fraction":      float(k.get("kelly_f", 0.0)),
+            "half_kelly":          float(k.get("half_kelly", 0.0)),
+            "expected_log_growth": float(k.get("expected_growth_rate", 0.0)),
+        }
+    # Trim funded_lifetime survival_curve (long array, not used by frontend).
+    fl = result.get("funded_lifetime")
+    if isinstance(fl, dict):
+        fl.pop("survival_curve", None)
+
+    return result
+
+
+def _flatten_records(value: Any, rename: dict[str, str]) -> Any:
+    """Convert {columns, records} → list of records with renamed keys.
+
+    Idempotent: if ``value`` is already a list (or None / error dict), returns it
+    as-is. Used to bridge pandas-DataFrame outputs to the frontend's flat-array
+    contract without losing data.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict) and "records" in value and "columns" in value:
+        records = value["records"]
+    elif isinstance(value, list):
+        records = value
+    else:
+        return value  # error dict or unexpected shape — pass through
+
+    if not rename:
+        return records
+    return [
+        {rename.get(k, k): v for k, v in row.items()}
+        for row in records
+    ]
+
+
+def _build_verdict(
+    p1: dict[str, Any],
+    p2: dict[str, Any],
+    fd: dict[str, Any],
+    lt: dict[str, Any],
+    *,
+    kelly: dict[str, Any],
+    challenge_fee: float,
+    fee_refund: bool,
+) -> dict[str, Any]:
+    """Compute the per-phase verdict block — raw numbers only, no prose.
+
+    The frontend renders both numbers and a plain-English summary; we hand
+    over the data, not the words.
+    """
+    p1_passed = int(p1.get("n_passed", 0))
+    p1_total  = p1_passed + int(p1.get("n_failed", 0))
+    p1_low, p1_high = _wilson_ci(p1_passed, p1_total)
+    p1_dom_name, p1_dom_pct = _dominant_fail(p1)
+
+    p2_passed = int(p2.get("n_passed", 0))
+    p2_total  = p2_passed + int(p2.get("n_failed", 0))
+    p2_low, p2_high = _wilson_ci(p2_passed, p2_total)
+    p2_dom_name, p2_dom_pct = _dominant_fail(p2)
+
+    # Funded: payout_rate is in 0..100; expected lifetime months from
+    # avg_days_active / 21; expected monthly USD = avg_total_earnings / months.
+    payout_rate     = float(fd.get("payout_rate", 0.0))
+    avg_earnings    = float(fd.get("avg_total_earnings", 0.0))
+    avg_days_active = float(fd.get("avg_days_active", 0.0))
+    months_active   = max(avg_days_active / 21.0, 1e-9)
+    expected_monthly = avg_earnings / months_active if months_active > 0 else 0.0
+    breach_pcts     = fd.get("breach_pcts") or {}
+    if breach_pcts:
+        dom_breach_name, _dom_breach_pct = max(
+            breach_pcts.items(), key=lambda kv: float(kv[1] or 0.0))
+    else:
+        dom_breach_name = "none"
+
+    # Long-term: build P(ruin within 1y, 5y) from the per-sim final equity
+    # arrays if available, falling back to ruin_floor crossing detection.
+    median_eq = float(lt.get("median_equity", 0.0))
+    median_sh = float(lt.get("median_sharpe", 0.0))
+    # Long-term reports `pass_rate` = P(survival over n_days). Approximate
+    # 1y / 5y ruin from this when available.
+    pass_rate_lt = float(lt.get("pass_rate", 0.0))
+    n_days_lt    = max(int(lt.get("n_days", 252 * 5)), 1)
+    ruin_total   = max(0.0, 1.0 - pass_rate_lt)
+    # Linear-in-time approximation when only a single horizon was simulated.
+    p_ruin_1y = min(1.0, ruin_total * (252.0 / n_days_lt))
+    p_ruin_5y = min(1.0, ruin_total * (1260.0 / n_days_lt))
+
+    # ROI: fraction of funded sims whose total $ earnings cover the fee.
+    # Frontend computes the more nuanced "fee refunded on first payout"
+    # accounting using the raw fields we echo here.
+    avg_fp = float(fd.get("avg_first_payout_day", 0.0)) if "avg_first_payout_day" in fd else 0.0
+    if challenge_fee <= 0:
+        roi_pass_rate = 1.0
+    elif fee_refund:
+        # If the firm refunds on first payout, ROI is roughly the payout rate.
+        roi_pass_rate = payout_rate / 100.0
+    else:
+        # Otherwise need average earnings to clear the fee — coarse proxy:
+        roi_pass_rate = (payout_rate / 100.0) if avg_earnings >= challenge_fee else 0.0
+
+    kelly_f = float((kelly or {}).get("kelly_f", 0.0))
+
+    return {
+        "phase1": {
+            "pass_rate":         float(p1.get("pass_rate", 0.0)),
+            "pass_rate_ci_low":  p1_low * 100.0,
+            "pass_rate_ci_high": p1_high * 100.0,
+            "median_days":       float(p1.get("days_p50", 0.0)),
+            "dominant_fail":     p1_dom_name,
+            "dominant_fail_pct": p1_dom_pct,
+        },
+        "phase2": {
+            "pass_rate":         float(p2.get("pass_rate", 0.0)),
+            "pass_rate_ci_low":  p2_low * 100.0,
+            "pass_rate_ci_high": p2_high * 100.0,
+            "median_days":       float(p2.get("days_p50", 0.0)),
+            "dominant_fail":     p2_dom_name,
+            "dominant_fail_pct": p2_dom_pct,
+        },
+        "funded": {
+            "payout_rate":              payout_rate,
+            "expected_monthly_usd":     expected_monthly,
+            "expected_lifetime_months": months_active,
+            "breach_rate":              float(fd.get("breach_rate", 0.0)),
+            "dominant_breach":          dom_breach_name,
+            "avg_first_payout_day":     avg_fp,
+        },
+        "longterm": {
+            "p_ruin_1y":     p_ruin_1y,
+            "p_ruin_5y":     p_ruin_5y,
+            "median_equity": median_eq,
+            "median_sharpe": median_sh,
+        },
+        "global": {
+            "challenge_fee":                 challenge_fee,
+            "fee_refunded_on_first_payout":  fee_refund,
+            "roi_pass_rate":                 roi_pass_rate,
+            "kelly_fraction":                kelly_f,
+            "kelly_verdict":                 _kelly_verdict(kelly_f),
+        },
+    }
 
 
 def run_phase(phase: str, daily_pnl: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -299,7 +830,104 @@ def _sample_equity_curves(
         phase_label="",
     )
     padded = mc.pad_curves(raw_curves)
-    return (padded / balance * 100).tolist()
+    # Return raw equity values (not normalised) so the dashboard can render
+    # absolute account-equity scales identical to the legacy charts.
+    return padded.tolist()
+
+
+def _sample_funded_curves(
+    daily_pnl: Any,
+    params: dict[str, Any],
+    n_curves: int,
+) -> dict[str, Any]:
+    """Sample N_CURVE_SIMS funded sims and collect equity/floor curves + survival.
+
+    Day-by-day mirror of mc_funded_test._run_funded_loop, but each path also
+    records its equity curve, floor curve, and last-active day so the dashboard
+    can plot the equity fan + survival curve.
+    """
+    mc = _get_mc()
+    np = _np()
+    daily_pnl_arr    = np.asarray(daily_pnl, dtype=float)
+    rng              = mc._make_rng(params.get("seed"))
+    balance          = float(params.get("balance", 100_000))
+    daily_dd_pct     = float(params.get("daily_dd_pct", 0.05))
+    total_dd_pct     = float(params.get("total_dd_pct", 0.10))
+    cadence          = int(params.get("payout_cadence_days", 30))
+    max_days         = int(params.get("max_days") or (12 * 21))
+    payout_mode      = str(params.get("payout_mode", "schedule")).lower()
+    payout_threshold = float(params.get("payout_threshold", 0.05))
+    profit_split     = float(params.get("profit_split", 0.80))
+    balance_reset    = bool(params.get("balance_reset", True))
+    min_days_payout  = int(params.get("min_days_payout", 4))
+    daily_loss_abs   = balance * daily_dd_pct
+    total_floor      = balance * (1.0 - total_dd_pct)
+
+    eq_curves: list[list[float]] = []
+    fl_curves: list[list[float]] = []
+    last_day:  list[int]         = []
+
+    for _ in range(n_curves):
+        equity            = balance
+        current_floor     = total_floor
+        days_since_payout = 0
+        path              = [equity]
+        floor_path        = [current_floor]
+        active_to         = 0
+        for day in range(max_days):
+            day_pnl = float(rng.choice(daily_pnl_arr))
+            day_open = equity
+            days_since_payout += 1
+            equity = max(equity + day_pnl, 0.0)
+
+            # Daily floor reference ratchets each midnight to today's open.
+            today_floor = day_open - daily_loss_abs
+
+            path.append(equity)
+            floor_path.append(today_floor)
+            active_to = day + 1
+
+            if equity < today_floor or equity < current_floor:
+                break
+
+            profit_above = equity - balance
+            sched_hit = (payout_mode in ("schedule", "both")
+                         and days_since_payout >= cadence
+                         and profit_above > 0)
+            thr_hit   = (payout_mode in ("threshold", "both")
+                         and profit_above >= balance * payout_threshold)
+            if days_since_payout >= min_days_payout and (sched_hit or thr_hit):
+                payout = profit_above * profit_split
+                if balance_reset:
+                    equity        = balance
+                    current_floor = total_floor
+                else:
+                    equity       -= payout
+                days_since_payout = 0
+                path[-1]          = equity
+                floor_path[-1]    = current_floor
+
+        # Pad to (max_days + 1).
+        if len(path) < max_days + 1:
+            pad_n = max_days + 1 - len(path)
+            path        = path + [path[-1]] * pad_n
+            floor_path  = floor_path + [floor_path[-1]] * pad_n
+        eq_curves.append([float(v) for v in path])
+        fl_curves.append([float(v) for v in floor_path])
+        last_day.append(active_to)
+
+    # Survival = % of these sampled paths still alive on each day.
+    survival = [1.0]
+    for d in range(1, max_days + 1):
+        alive = sum(1 for ld in last_day if ld >= d)
+        survival.append(alive / max(len(last_day), 1))
+
+    return {
+        "equity_curves": eq_curves,
+        "floor_curves":  fl_curves,
+        "survival":      survival,
+        "max_sim_days":  int(max_days),
+    }
 
 
 def run_advanced(metric: str, params: dict[str, Any]) -> Any:
@@ -313,26 +941,40 @@ def run_advanced(metric: str, params: dict[str, Any]) -> Any:
 
 
 def _jsonify(obj: Any) -> Any:
-    """Recursively convert numpy/pandas objects to JSON-safe types."""
-    if obj is None or isinstance(obj, (bool, int, float, str)):
+    """Recursively convert numpy/pandas objects to JSON-safe types.
+
+    Coerces NaN / ±Inf to ``None`` so the result survives ``json.dumps`` on
+    the FastAPI side. Standard CPython json.dumps emits literal ``NaN``
+    tokens, which then make ``JSON.parse`` on the frontend reject the whole
+    response — a silent failure mode that historically broke MC results
+    whenever a no-pass case bubbled up.
+    """
+    import math
+    if obj is None or isinstance(obj, (bool, int, str)):
         return obj
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
     # Lazy numpy/pandas type checks — only import if we actually have an object to check.
     try:
         import numpy as np
         if isinstance(obj, np.floating):
-            return float(obj)
+            f = float(obj)
+            return None if (math.isnan(f) or math.isinf(f)) else f
         if isinstance(obj, np.integer):
             return int(obj)
         if isinstance(obj, np.ndarray):
-            return obj.tolist()
+            return [_jsonify(v) for v in obj.tolist()]
     except ImportError:
         pass
     try:
         import pandas as pd
         if isinstance(obj, pd.DataFrame):
-            return {"columns": list(obj.columns), "records": obj.to_dict(orient="records")}
+            return {
+                "columns": list(obj.columns),
+                "records": [_jsonify(r) for r in obj.to_dict(orient="records")],
+            }
         if isinstance(obj, pd.Series):
-            return obj.tolist()
+            return [_jsonify(v) for v in obj.tolist()]
     except ImportError:
         pass
     if isinstance(obj, dict):

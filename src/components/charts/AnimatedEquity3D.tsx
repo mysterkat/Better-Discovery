@@ -10,7 +10,7 @@
 type AnyObj = Record<string, any>;
 
 import { useMemo } from "react";
-import Plot from "react-plotly.js";
+import Plot from "./plotly";
 import type { McResultData } from "./types";
 
 interface Props {
