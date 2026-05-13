@@ -809,18 +809,28 @@ def _build_verdict(
     p_ruin_1y = min(1.0, ruin_total * (252.0 / n_days_lt))
     p_ruin_5y = min(1.0, ruin_total * (1260.0 / n_days_lt))
 
-    # ROI: fraction of funded sims whose total $ earnings cover the fee.
-    # Frontend computes the more nuanced "fee refunded on first payout"
-    # accounting using the raw fields we echo here.
     avg_fp = float(fd.get("avg_first_payout_day", 0.0)) if "avg_first_payout_day" in fd else 0.0
+
+    # v0.5.0: replaced the previous "Fee Recoup Rate" (which was redundant with
+    # payout_rate when fee_refund=True and had an off-by-100 display bug) with
+    # an actual expected-return calculation per challenge attempt.
+    #
+    # Refunded-on-first-payout case (FTMO et al.):
+    #   funded sims (prob = payout_rate/100):  net = +avg_earnings  (fee refunded)
+    #   failed sims (prob = 1 - payout_rate/100): net = -challenge_fee
+    #
+    # Non-refunded case:
+    #   funded sims: net = avg_earnings - challenge_fee
+    #   failed sims: net = -challenge_fee
+    payout_p = float(payout_rate) / 100.0
     if challenge_fee <= 0:
-        roi_pass_rate = 1.0
+        avg_roi_pct = 0.0  # no fee → ROI undefined; display as N/A
     elif fee_refund:
-        # If the firm refunds on first payout, ROI is roughly the payout rate.
-        roi_pass_rate = payout_rate / 100.0
+        expected_net = payout_p * avg_earnings - (1.0 - payout_p) * challenge_fee
+        avg_roi_pct  = (expected_net / challenge_fee) * 100.0
     else:
-        # Otherwise need average earnings to clear the fee — coarse proxy:
-        roi_pass_rate = (payout_rate / 100.0) if avg_earnings >= challenge_fee else 0.0
+        expected_net = payout_p * (avg_earnings - challenge_fee) - (1.0 - payout_p) * challenge_fee
+        avg_roi_pct  = (expected_net / challenge_fee) * 100.0
 
     kelly_f = float((kelly or {}).get("kelly_f", 0.0))
 
@@ -858,7 +868,9 @@ def _build_verdict(
         "global": {
             "challenge_fee":                 challenge_fee,
             "fee_refunded_on_first_payout":  fee_refund,
-            "roi_pass_rate":                 roi_pass_rate,
+            # v0.5.0 — replaces ``roi_pass_rate``. Real expected return on
+            # the fee invested per challenge attempt (refund-aware).
+            "avg_roi_pct":                   avg_roi_pct,
             "kelly_fraction":                kelly_f,
             "kelly_verdict":                 _kelly_verdict(kelly_f),
             "intraday_dd_factor":            intraday_dd_factor,

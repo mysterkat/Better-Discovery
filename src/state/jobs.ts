@@ -21,6 +21,9 @@ export interface Job {
   stage_index?: number | null;
   stage_total?: number | null;
   eta_seconds?: number | null;
+  seed_index?: number | null;
+  seed_total?: number | null;
+  seed_value?: number | null;
   started_at?: number | null;
   finished_at?: number | null;
   cancel_requested?: boolean;

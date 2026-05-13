@@ -9,6 +9,33 @@ import { openResultWindow } from "../lib/windows";
 // Folder-type keys whose override is controlled by the one-shot toggle.
 const FOLDER_KEYS = new Set(["DATA_FOLDER", "OUTPUT_FOLDER"]);
 
+// TF filename keys are hidden from the per-run tab — the banner shows what's
+// actually loaded (auto-detected from the latest MT5 import). Power users can
+// still override these in Settings → Edit Default Values, where the override
+// flows back into the tab automatically.
+const HIDDEN_FROM_TAB = new Set([
+  // TF filenames are auto-detected from the imported MT5 history.
+  "TF1_FILE", "TF2_FILE", "TF3_FILE", "TF4_FILE", "TF5_FILE",
+  // MULTI_SEED_BASE is locked to RANDOM_SEED by the bridge — exposing it
+  // in the UI just creates two parallel knobs that disagree. The bridge
+  // injects MULTI_SEED_BASE = RANDOM_SEED on every run.
+  "MULTI_SEED_BASE",
+]);
+
+function formatAgo(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return "";
+  const diffSec = Math.max(0, (Date.now() - then) / 1000);
+  if (diffSec < 60) return "just now";
+  const m = Math.floor(diffSec / 60);
+  if (m < 60) return `${m} minute${m === 1 ? "" : "s"} ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+  const d = Math.floor(h / 24);
+  return `${d} day${d === 1 ? "" : "s"} ago`;
+}
+
 export default function DiscoveryTab() {
   const [params, setParams] = useState<ParamDef[]>([]);
   // `overrides` only contains user-typed values for THIS session.
@@ -48,11 +75,11 @@ export default function DiscoveryTab() {
   // Discovery's auto-detect picks the smallest 3 timeframes if the user
   // hasn't customized any TFn_FILE override. We surface this in a banner so
   // it's obvious which files the run will actually use.
-  const tfFilesUserSet = ["TF1_FILE", "TF2_FILE", "TF3_FILE"].some(
+  const tfFilesUserSet = ["TF1_FILE", "TF2_FILE", "TF3_FILE", "TF4_FILE", "TF5_FILE"].some(
     (k) => (overrides[k]?.trim() || persistentDefaults[k]) != null,
   );
   const autoDetectedTfs = currentImport?.exists
-    ? currentImport.timeframes.slice(0, 3).map((tf) => tf.label).join(", ")
+    ? currentImport.timeframes.slice(0, 5).map((tf) => tf.label).join(", ")
     : "";
 
   // The "true default" for a param: user's persistent default if set,
@@ -63,12 +90,18 @@ export default function DiscoveryTab() {
     return p.value != null ? String(p.value) : "";
   };
 
-  // Group params by their 'group' field.
+  // Group params by their 'group' field, skipping anything we hide from
+  // the per-run tab (e.g. TFn_FILE — covered by the auto-detect banner).
+  // Empty groups are dropped so the accordion doesn't show stub headers.
   const groups = useMemo(() => {
     const map = new Map<string, ParamDef[]>();
     for (const p of params) {
+      if (HIDDEN_FROM_TAB.has(p.key)) continue;
       if (!map.has(p.group)) map.set(p.group, []);
       map.get(p.group)!.push(p);
+    }
+    for (const [k, v] of [...map.entries()]) {
+      if (v.length === 0) map.delete(k);
     }
     return map;
   }, [params]);
@@ -105,6 +138,20 @@ export default function DiscoveryTab() {
     const v = overrides[key];
     return v != null && v.trim() !== "";
   };
+
+  const resetGroup = (groupName: string) => {
+    const groupKeys = new Set((groups.get(groupName) ?? []).map((p) => p.key));
+    setOverrides((prev) => {
+      const next: Record<string, string> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (!groupKeys.has(k)) next[k] = v;
+      }
+      return next;
+    });
+  };
+
+  const groupHasEdits = (groupName: string): boolean =>
+    (groups.get(groupName) ?? []).some((p) => isEdited(p.key));
 
   const setFolderVal = (key: string, val: string) =>
     setFolderOverrides((prev) => ({ ...prev, [key]: val }));
@@ -271,6 +318,16 @@ export default function DiscoveryTab() {
       p.step != null ? `step ${p.step}` : "",
     ].filter(Boolean).join(", ");
 
+    // Special-case the RANDOM_SEED field: pair the input with a 🎲 button
+    // that fills in a fresh random seed in [1, 2^31-1]. Nothing else needs
+    // a custom layout, so this is a narrow tweak to the standard renderer.
+    const isSeed = p.key === "RANDOM_SEED";
+    const randomize = () => {
+      // 1..2^31-1 — wide enough to feel random, fits in a Python int signed range.
+      const s = Math.floor(Math.random() * 2_147_483_646) + 1;
+      setValue(p.key, String(s));
+    };
+
     return (
       <div key={p.key} className="field">
         <label className="field-label">
@@ -286,15 +343,28 @@ export default function DiscoveryTab() {
             >↺</button>
           )}
         </label>
-        <input
-          className="field-input"
-          type="text"
-          inputMode={p.type === "int" ? "numeric" : (p.type === "float" ? "decimal" : "text")}
-          value={overrides[p.key] ?? ""}
-          placeholder={def}
-          onChange={(e) => setValue(p.key, e.target.value)}
-          disabled={isRunning}
-        />
+        <div className={isSeed ? "field-input-row" : undefined}>
+          <input
+            className="field-input"
+            type="text"
+            inputMode={p.type === "int" ? "numeric" : (p.type === "float" ? "decimal" : "text")}
+            value={overrides[p.key] ?? ""}
+            placeholder={def}
+            onChange={(e) => setValue(p.key, e.target.value)}
+            disabled={isRunning}
+          />
+          {isSeed && (
+            <button
+              type="button"
+              className="seed-random-btn"
+              onClick={randomize}
+              disabled={isRunning}
+              title="Generate a random seed"
+            >
+              🎲 Random
+            </button>
+          )}
+        </div>
         {(p.description || hint) && (
           <span className="field-hint">
             {p.description}
@@ -327,7 +397,8 @@ export default function DiscoveryTab() {
                   ? <span>using your TF1/TF2/TF3 overrides</span>
                   : <span>auto-detected — {autoDetectedTfs || "no timeframes found"}</span>}
                 <span className="field-hint" style={{ marginLeft: 8 }}>
-                  ({currentImport.timeframes.length} file{currentImport.timeframes.length === 1 ? "" : "s"} in hist_data)
+                  ({currentImport.timeframes.length} file{currentImport.timeframes.length === 1 ? "" : "s"} in hist_data
+                  {currentImport.modified_at ? ` · imported ${formatAgo(currentImport.modified_at)}` : ""})
                 </span>
               </>
             ) : (
@@ -367,14 +438,25 @@ export default function DiscoveryTab() {
           {/* Parameter groups */}
           {[...groups.entries()].map(([group, gParams]) => (
             <div key={group} className="param-group">
-              <button
-                className="param-group-header"
-                onClick={() => toggleGroup(group)}
-              >
-                <span className="param-group-arrow">{openGroups.has(group) ? "▾" : "▸"}</span>
-                {group}
-                <span className="param-group-count">{gParams.length} settings</span>
-              </button>
+              <div className="param-group-header-row">
+                <button
+                  className="param-group-header"
+                  onClick={() => toggleGroup(group)}
+                >
+                  <span className="param-group-arrow">{openGroups.has(group) ? "▾" : "▸"}</span>
+                  {group}
+                  <span className="param-group-count">{gParams.length} settings</span>
+                </button>
+                {groupHasEdits(group) && (
+                  <button
+                    type="button"
+                    className="param-group-reset-btn"
+                    onClick={() => resetGroup(group)}
+                    title={`Reset all fields in "${group}" to their defaults`}
+                    disabled={isRunning}
+                  >↺</button>
+                )}
+              </div>
               {openGroups.has(group) && (
                 <div className="param-group-body">
                   <div className="override-grid">

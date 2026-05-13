@@ -75,12 +75,17 @@ except ImportError:
 # Set to "tradingview" or "mt5_html"
 DATA_SOURCE = "mt5_html"
 
+# Defaults for standalone/script-mode runs. The Better Discovery app passes
+# the actual report path via overrides at runtime, so these only matter if
+# you invoke `python mc_funded_test.py` directly. Set them before running
+# standalone, or leave the empty string to be reminded at startup.
+
 # -- TradingView source -------------------------------------------------------
-FILE_PATH = r"C:\Users\micha\Downloads\S1-Strat_TVC_GOLD_2026-03-17_22116.csv"
+FILE_PATH = ""  # e.g. r"C:\path\to\TradingView-export.csv"
 
 # -- MetaTrader 5 source ------------------------------------------------------
 # MT5: Strategy Tester > right-click results > Save as Report (.html)
-FILE_PATH_MT5_HTML = r"C:\Users\micha\Desktop\MONTE CARLO\outputs\fin strat output\ReportNEW.html"
+FILE_PATH_MT5_HTML = ""  # e.g. r"C:\path\to\ReportNEW.html"
 
 N_SIMULATIONS     = 10_000
 N_DISPLAY_CURVES  = 200
@@ -2696,72 +2701,128 @@ def run_mc_longterm(daily_pnl, *, balance=100_000, years=5,
         n_days = int(years * 252)
     else:
         n_days = int(n_days)
-    rng       = _make_rng(seed)
+    rng        = _make_rng(seed)
     effective_ruin_pct = ruin_pct * intraday_dd_factor
     ruin_floor = balance * (1.0 - effective_ruin_pct)
     use_markov = (trans_matrix is not None and regime_pnl_pools is not None)
-    final_eqs = []
-    max_dds   = []
-    sharpes   = []
-    sample_idx = set(rng.choice(n_sims, size=min(sample_paths, n_sims), replace=False).tolist())
-    sampled_paths: list[list[float]] = []
-    for _i in range(n_sims):
-        if _i and (_i % 500 == 0):
-            check_cancelled()
-        equity   = balance
-        peak     = equity
-        path     = [equity]
-        rets     = []
-        # Only burn an RNG draw when the Markov path will actually run; the
-        # predrawn-pnl path bypasses Markov, and the legacy unconditional
-        # ``integers`` call broke seed reproducibility for that case.
-        if use_markov and predrawn_pnl is None:
-            current_regime = int(rng.integers(0, 5))
-        for _day in range(n_days):
-            if predrawn_pnl is not None:
-                _d = min(_day, predrawn_pnl.shape[1] - 1)
-                pnl = float(predrawn_pnl[_i % len(predrawn_pnl), _d])
-            elif use_markov:
-                current_regime = int(rng.choice(5, p=trans_matrix[current_regime]))
-                pool = regime_pnl_pools.get(current_regime, [])
-                if len(pool) >= 5:
-                    pnl = float(rng.choice(pool))
+
+    # ── v0.5.0 fast-path: NumPy vectorized when no Markov ───────────────────
+    # When the path-dependent Markov sampler isn't requested, the whole
+    # simulation reduces to: sample (n_sims, n_days) PnL → equity = balance +
+    # cumsum → ruin_day = first idx where equity ≤ ruin_floor → max_dd via
+    # running peak. That replaces ~12.6M Python iterations (10k sims × 1260
+    # days at default) with a handful of NumPy operations. ~20–50× speedup.
+    #
+    # The Markov / predrawn paths still use the original loop because each
+    # path's regime evolves stochastically and can't be vectorized cleanly.
+    if not use_markov and predrawn_pnl is None:
+        # Sample once: (n_sims, n_days) bootstrap matrix
+        pnls   = rng.choice(daily_pnl, size=(n_sims, n_days), replace=True)
+        cum    = np.cumsum(pnls, axis=1)
+        equity = balance + cum                                       # (n_sims, n_days)
+        # Ruin = first day where equity ≤ ruin_floor (per row)
+        ruined_mask = equity <= ruin_floor
+        any_ruin    = ruined_mask.any(axis=1)
+        # First-True column index per row; np.argmax returns 0 when no True,
+        # so we mask that out explicitly to "n_days" (no ruin).
+        first_ruin_day = np.where(any_ruin, np.argmax(ruined_mask, axis=1), n_days)
+        # For ruined rows, freeze equity at ruin_floor from ruin_day onward
+        # so max_dd math reflects the floor and final_equity is the floor.
+        row_idx = np.arange(n_days)
+        if any_ruin.any():
+            mask    = row_idx[None, :] >= first_ruin_day[:, None]    # (n_sims, n_days)
+            equity  = np.where(mask, ruin_floor, equity)
+        # Running peak per row, then drawdown
+        prepended = np.concatenate([np.full((n_sims, 1), balance, dtype=float), equity], axis=1)
+        peak      = np.maximum.accumulate(prepended, axis=1)
+        dd        = (peak - prepended) / np.where(peak > 0, peak, 1.0)
+        max_dd_arr = dd.max(axis=1)
+        # Final equity = last column
+        final_eq_arr = equity[:, -1]
+        # Sharpe: per-day return = pnl / prev_equity; but only for pre-ruin
+        # days (post-ruin returns would deflate volatility — same bug we
+        # already documented in the loop version).
+        prev_eq = prepended[:, :-1]                                  # equity at start of each day
+        # Returns relative to start-of-day equity; mask out post-ruin days
+        valid_day = row_idx[None, :] < first_ruin_day[:, None]       # True for pre-ruin days
+        # Avoid division by zero on rows where prev_eq becomes 0 (shouldn't
+        # happen pre-ruin but guard anyway).
+        safe_prev = np.where(prev_eq > 0, prev_eq, 1.0)
+        rets_arr  = np.where(valid_day, pnls / safe_prev, np.nan)
+        # Per-row mean/std ignoring NaN; require at least 2 valid days
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mean_r = np.nanmean(rets_arr, axis=1)
+            std_r  = np.nanstd(rets_arr,  axis=1)
+            count  = np.sum(valid_day, axis=1)
+            sharpe_arr = np.where(
+                (count > 1) & (std_r > 0),
+                mean_r / std_r * np.sqrt(252),
+                0.0,
+            )
+        # Sampled paths for the chart fan
+        sample_count = min(sample_paths, n_sims)
+        sample_idx_arr = rng.choice(n_sims, size=sample_count, replace=False)
+        # Each path = [balance, equity_day_0, equity_day_1, ..., equity_day_{n-1}]
+        sampled_paths = prepended[sample_idx_arr].tolist()
+
+        final_eqs = final_eq_arr.tolist()
+        max_dds   = max_dd_arr.tolist()
+        sharpes   = [float(s) if np.isfinite(s) else 0.0 for s in sharpe_arr]
+        fe = final_eq_arr
+    else:
+        # ── Original per-sim loop (Markov / predrawn paths only) ────────────
+        final_eqs = []
+        max_dds   = []
+        sharpes   = []
+        sample_idx = set(rng.choice(n_sims, size=min(sample_paths, n_sims), replace=False).tolist())
+        sampled_paths = []
+        for _i in range(n_sims):
+            if _i and (_i % 500 == 0):
+                check_cancelled()
+            equity   = balance
+            peak     = equity
+            path     = [equity]
+            rets     = []
+            if use_markov and predrawn_pnl is None:
+                current_regime = int(rng.integers(0, 5))
+            for _day in range(n_days):
+                if predrawn_pnl is not None:
+                    _d = min(_day, predrawn_pnl.shape[1] - 1)
+                    pnl = float(predrawn_pnl[_i % len(predrawn_pnl), _d])
+                elif use_markov:
+                    current_regime = int(rng.choice(5, p=trans_matrix[current_regime]))
+                    pool = regime_pnl_pools.get(current_regime, [])
+                    if len(pool) >= 5:
+                        pnl = float(rng.choice(pool))
+                    else:
+                        pnl = float(rng.choice(daily_pnl))
                 else:
                     pnl = float(rng.choice(daily_pnl))
-            else:
-                pnl    = float(rng.choice(daily_pnl))
-            ret    = pnl / equity if equity > 0 else 0.0
-            equity = max(equity + pnl, 0.0)
-            rets.append(ret)
-            path.append(equity)
-            if equity > peak:
-                peak = equity
-            if equity <= ruin_floor:
-                path += [equity] * (n_days - len(path) + 1)
-                break
-        peak_v = balance; max_dd = 0.0
-        for v in path:
-            if v > peak_v: peak_v = v
-            dd = (peak_v - v) / peak_v if peak_v > 0 else 0.0
-            if dd > max_dd: max_dd = dd
-        # Sharpe must use only returns from BEFORE ruin — never include the
-        # padded post-ruin flat segment, which would deflate volatility and
-        # perversely improve Sharpe for ruined paths. `rets` is appended
-        # once per traded day (and the loop breaks after appending on the
-        # ruin day), so slicing is implicit; we slice defensively to make
-        # the contract explicit and resilient to future loop edits.
-        n_real = len(rets)
-        dr = np.array(rets[:n_real])
-        sharpe = float(dr.mean() / dr.std() * np.sqrt(252)) if (len(dr) > 1 and dr.std() > 0) else 0.0
-        final_eqs.append(path[-1])
-        max_dds.append(max_dd)
-        sharpes.append(sharpe)
-        if _i in sample_idx:
-            # Pad to (n_days + 1) so all sampled paths are the same length.
-            if len(path) < n_days + 1:
-                path = path + [path[-1]] * (n_days + 1 - len(path))
-            sampled_paths.append([float(v) for v in path])
-    fe = np.array(final_eqs)
+                ret    = pnl / equity if equity > 0 else 0.0
+                equity = max(equity + pnl, 0.0)
+                rets.append(ret)
+                path.append(equity)
+                if equity > peak:
+                    peak = equity
+                if equity <= ruin_floor:
+                    path += [equity] * (n_days - len(path) + 1)
+                    break
+            peak_v = balance; max_dd = 0.0
+            for v in path:
+                if v > peak_v: peak_v = v
+                dd = (peak_v - v) / peak_v if peak_v > 0 else 0.0
+                if dd > max_dd: max_dd = dd
+            n_real = len(rets)
+            dr = np.array(rets[:n_real])
+            sharpe = float(dr.mean() / dr.std() * np.sqrt(252)) if (len(dr) > 1 and dr.std() > 0) else 0.0
+            final_eqs.append(path[-1])
+            max_dds.append(max_dd)
+            sharpes.append(sharpe)
+            if _i in sample_idx:
+                if len(path) < n_days + 1:
+                    path = path + [path[-1]] * (n_days + 1 - len(path))
+                sampled_paths.append([float(v) for v in path])
+        fe = np.array(final_eqs)
     result: dict = {
         "pass_rate"        : float((fe > ruin_floor).mean()),
         "median_equity"    : float(np.median(fe)),

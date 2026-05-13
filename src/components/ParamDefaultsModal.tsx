@@ -188,12 +188,21 @@ export default function ParamDefaultsModal({ open, onClose }: Props) {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// Keys that are managed automatically and shouldn't appear as editable defaults.
+// MULTI_SEED_BASE is locked to RANDOM_SEED by the bridge; TF*_FILE are
+// auto-detected from the imported MT5 history.
+const HIDDEN_FROM_DEFAULTS = new Set([
+  "MULTI_SEED_BASE",
+  "TF1_FILE", "TF2_FILE", "TF3_FILE", "TF4_FILE", "TF5_FILE",
+]);
+
 function buildGroupMap(
   params: ParamDef[],
   allowedGroups: string[],
 ): Map<string, ParamDef[]> {
   const map = new Map<string, ParamDef[]>(allowedGroups.map((g) => [g, []]));
   for (const p of params) {
+    if (HIDDEN_FROM_DEFAULTS.has(p.key)) continue;
     if (map.has(p.group)) map.get(p.group)!.push(p);
   }
   return map;

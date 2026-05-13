@@ -48,7 +48,7 @@ Requirements:
     Python 3.14+
 """
 from __future__ import annotations
-import sys, warnings, random, time, os, textwrap
+import sys, warnings, random, time, os, textwrap, re
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 warnings.filterwarnings("ignore")
@@ -71,11 +71,48 @@ from sklearn.tree import DecisionTreeClassifier, export_text
 #  CONFIG
 # =============================================================================
 
-DATA_FOLDER   = r"C:\Users\micha\Desktop\MONTE CARLO\his_data"
+# Defaults for standalone/script-mode runs. The Better Discovery app
+# always overrides these to point at userdata/hist_data and userdata/discovery
+# inside the app tree, so the module-level values only matter if you invoke
+# `python pattern_discovery_v6.py` directly. They resolve relative to this
+# file's location → portable across machines.
+import os as _os
+_TOOLKIT_DIR  = _os.path.dirname(_os.path.abspath(__file__))
+_REPO_ROOT    = _os.path.dirname(_os.path.dirname(_TOOLKIT_DIR))  # …/BETTER DISCOVERY
+DATA_FOLDER   = _os.path.join(_REPO_ROOT, "userdata", "hist_data")
+# Up to 5 timeframe slots. Empty filename = slot unused.
 TF1_FILE      = "xauusd_m5.csv"
 TF2_FILE      = "xauusd_m15.csv"
 TF3_FILE      = "xauusd_h1.csv"
-OUTPUT_FOLDER = r"C:\Users\micha\Desktop\MONTE CARLO\outputs\discovery"
+TF4_FILE      = ""
+TF5_FILE      = ""
+# PRIMARY_TF (1-5): which slot drives the bar stream, entries, exits, SL/TP.
+# The other non-empty slots become SIGNAL timeframes — their trend/RSI/EMAs
+# are merge-asof-joined onto the primary timeline as feature columns
+# (tfN_trend, tfN_rsi14, tfN_ema20, ...). The MTF score sums the primary
+# trend with every signal trend (range 0..total-non-empty-slots).
+PRIMARY_TF    = 1
+OUTPUT_FOLDER = _os.path.join(_REPO_ROOT, "userdata", "discovery")
+
+# How the multi-TF bull/bear score is composed across the loaded signal TFs.
+#  "additive"  — score = primary_trend + sum(every signal trend),
+#                range [0..K] where K = 1 + number of signal TFs.
+#                More expressive: every signal TF contributes a discriminative
+#                bit. Recommended; matches the bundled MQL5 EA.
+#  "overwrite" — score = primary_trend + (last-aligned signal trend),
+#                range [0..2]. Legacy behavior. Use only if you must replicate
+#                a pre-Group-C run for parity. NOTE: in this mode you should
+#                limit the EA's SignalTF1..4 inputs to a single non-empty slot,
+#                otherwise live trades will fire on different bars than the
+#                .set file's discovery results.
+MTF_SCORE_MODE = "additive"
+
+# Which signal-TF RSI feeds the htf_div feature.
+#  0 = auto: pick the highest available signal slot (slowest TF, most reliable
+#      divergence signal).
+#  1..5 = force a specific slot. Must be a non-empty signal slot (not the
+#      primary). Falls back to auto if the chosen slot is empty.
+HTF_DIV_TF = 0
 
 CORES_RESERVED = 2
 RANDOM_SEED    = 3473452712
@@ -234,6 +271,30 @@ COND_LABELS = {
 }
 
 
+# ── Spawn-worker override propagation ────────────────────────────────────────
+# Multiprocessing workers (mp.Pool) re-import this module under spawn-mode,
+# which means setattr() overrides applied in the parent process never reach
+# them. To work around this, the launcher (BD bridge or __main__) writes
+# `_app_override.json` next to this file BEFORE spawning workers; the loader
+# below runs at module-import time so each worker also picks the overrides up.
+def _load_app_overrides() -> None:
+    try:
+        from pathlib import Path as _P
+        import json as _json
+        _ov = _P(__file__).parent / "_app_override.json"
+        if not _ov.exists():
+            return
+        for _k, _v in _json.loads(_ov.read_text()).items():
+            if _k in globals():
+                globals()[_k] = _v
+    except Exception:
+        # Don't let a malformed JSON kill the import — workers will just
+        # fall back to file defaults, which is no worse than before.
+        pass
+
+_load_app_overrides()
+
+
 def _n_workers(): return max(1,(os.cpu_count() or 4)-CORES_RESERVED)
 def _elapsed(t0):
     s=int(time.time()-t0); return f"{s//60}m {s%60}s"
@@ -381,7 +442,23 @@ def add_v5_features(df):
     df["inside_bar"]=((hi<hi.shift(1))&(lo>lo.shift(1))).astype(float)
     df["outside_bar"]=((hi>hi.shift(1))&(lo<lo.shift(1))).astype(float)
     rsi=df["rsi14"]; ltf_slope=rsi-rsi.shift(5)
-    htf_rsi=df.get("tf2_rsi14",pd.Series(50,index=df.index))
+    # Pick the signal-TF RSI that drives htf_div.
+    #  - If HTF_DIV_TF in 1..5 and that slot's RSI column exists, use it.
+    #  - Otherwise auto-pick the HIGHEST-numbered (= slowest, most reliable)
+    #    available signal slot. Standalone v6 hardcoded tf2; auto picks the
+    #    slowest non-primary slot for stronger divergence signals.
+    #  - Falls back to a flat 50 series if no signal TFs are loaded.
+    _htf_rsi_choice = int(globals().get("HTF_DIV_TF", 0) or 0)
+    _signal_rsi_cols = [
+        f"tf{n}_rsi14" for n in (5, 4, 3, 2)  # slowest first for auto-pick
+        if f"tf{n}_rsi14" in df.columns
+    ]
+    if 1 <= _htf_rsi_choice <= 5 and f"tf{_htf_rsi_choice}_rsi14" in df.columns:
+        htf_rsi = df[f"tf{_htf_rsi_choice}_rsi14"]
+    elif _signal_rsi_cols:
+        htf_rsi = df[_signal_rsi_cols[0]]
+    else:
+        htf_rsi = pd.Series(50, index=df.index)
     htf_slope=(htf_rsi-htf_rsi.shift(3)).fillna(0)
     htf_div=np.zeros(len(df))
     htf_div[(ltf_slope.values>2)&(htf_slope.values<-1)]=1
@@ -422,46 +499,77 @@ def _resample(df,rule):
     if "volume" in df.columns: agg["volume"]="sum"
     return df.resample(rule).agg(agg).dropna(subset=["open"])
 
-def _align_htf(base,htf,prefix):
-    # NOTE: load_raw_data() calls this function TWICE:
-    #   1st call: prefix="tf2" (H1)  → mtf_bull_score = M15_trend + H1_trend
-    #   2nd call: prefix="tf3" (H4)  → mtf_bull_score = M15_trend + H4_trend  ← OVERWRITES
-    # The final mtf_bull_score is therefore M15+H4 only; H1 contribution is
-    # intentionally discarded.  Values are integers {0, 1, 2}.
-    # The MQL5 EA's GetMTFbull() replicates this: (M15_trend==1)+(H4_trend==1).
-    # If you add a third HTF call here you must update GetMTFbull() and the
-    # expected range in the EA template accordingly.
-    cols=[c for c in ["trend","rsi14","ema20","ema50","atr14"] if c in htf.columns]
-    htf_s=htf[cols].reset_index().rename(columns={"time":"htf_time"})
-    merged=pd.merge_asof(
+def _align_htf(base, htf, prefix):
+    """Merge-asof a signal timeframe's columns onto the primary timeline and
+    fold its trend into the MTF score.
+
+    Score model is governed by MTF_SCORE_MODE:
+      "additive"  — sum primary + every signal trend, range [0..K].
+      "overwrite" — score = primary + last signal trend, range [0..2].
+                    Each call reseeds with primary so only the *last* signal
+                    aligned contributes (matches pre-Group-C standalone).
+    """
+    cols = [c for c in ["trend", "rsi14", "ema20", "ema50", "atr14"] if c in htf.columns]
+    htf_s = htf[cols].reset_index().rename(columns={"time": "htf_time"})
+    merged = pd.merge_asof(
         base.reset_index().sort_values("time"),
         htf_s.sort_values("htf_time"),
-        left_on="time",right_on="htf_time",
-        direction="backward",suffixes=("",f"_{prefix}")
+        left_on="time", right_on="htf_time",
+        direction="backward", suffixes=("", f"_{prefix}"),
     ).set_index("time").sort_index()
     for col in cols:
-        src=f"{col}_{prefix}" if f"{col}_{prefix}" in merged.columns else col
-        if src in merged.columns: base[f"{prefix}_{col}"]=merged[src].values
-    t1=base["trend"]; t2=base.get(f"{prefix}_trend",pd.Series(0,index=base.index))
-    base["mtf_bull_score"]=(t1==1).astype(int)+(t2==1).astype(int)
-    base["mtf_bear_score"]=(t1==-1).astype(int)+(t2==-1).astype(int)
+        src = f"{col}_{prefix}" if f"{col}_{prefix}" in merged.columns else col
+        if src in merged.columns:
+            base[f"{prefix}_{col}"] = merged[src].values
+
+    t_sig = base.get(f"{prefix}_trend", pd.Series(0, index=base.index))
+    t_primary = base["trend"]
+
+    mode = str(globals().get("MTF_SCORE_MODE", "additive")).lower()
+    if mode == "overwrite":
+        # Reseed every call with primary, then add this signal's trend.
+        # Final value = primary + last-aligned signal. Range [0..2].
+        base["mtf_bull_score"] = (t_primary == 1).astype(int) + (t_sig == 1).astype(int)
+        base["mtf_bear_score"] = (t_primary == -1).astype(int) + (t_sig == -1).astype(int)
+    else:
+        # additive (default)
+        if "mtf_bull_score" not in base.columns:
+            base["mtf_bull_score"] = (t_primary == 1).astype(int)
+            base["mtf_bear_score"] = (t_primary == -1).astype(int)
+        base["mtf_bull_score"] = base["mtf_bull_score"] + (t_sig == 1).astype(int)
+        base["mtf_bear_score"] = base["mtf_bear_score"] + (t_sig == -1).astype(int)
     return base
 
 def load_raw_data():
-    p1=str(Path(DATA_FOLDER)/TF1_FILE); print(f"  TF1: {p1}")
-    df=_add_indicators(_load_raw(p1))
+    """Load the user-selected primary TF and merge any non-empty signal TFs.
+
+    PRIMARY_TF (1..5) names which slot is the bar stream. Every other
+    non-empty slot is folded in as a signal — its OHLC-derived columns
+    are renamed `tf{N}_*` and asof-joined onto the primary timeline, and
+    its trend contributes to the cumulative `mtf_bull/bear_score`.
+    """
+    tf_files = [TF1_FILE, TF2_FILE, TF3_FILE, TF4_FILE, TF5_FILE]
+    primary_idx = max(1, min(5, int(PRIMARY_TF))) - 1   # 0-based slot index
+    primary_file = tf_files[primary_idx]
+    if not primary_file:
+        raise ValueError(
+            f"PRIMARY_TF={PRIMARY_TF} but TF{primary_idx + 1}_FILE is empty"
+        )
+
+    primary_path = str(Path(DATA_FOLDER) / primary_file)
+    print(f"  TF{primary_idx + 1} (PRIMARY): {primary_path}")
+    df = _add_indicators(_load_raw(primary_path))
     print(f"     {len(df):,} bars  {df.index[0]} -> {df.index[-1]}")
-    if TF2_FILE:
-        print(f"  TF2: {Path(DATA_FOLDER)/TF2_FILE}")
-        df2=_add_indicators(_load_raw(str(Path(DATA_FOLDER)/TF2_FILE)))
-    else:
-        print("  TF2: resampling -> H1"); df2=_add_indicators(_resample(df,"h"))
-    if TF3_FILE:
-        print(f"  TF3: {Path(DATA_FOLDER)/TF3_FILE}")
-        df3=_add_indicators(_load_raw(str(Path(DATA_FOLDER)/TF3_FILE)))
-    else:
-        print("  TF3: resampling -> H4"); df3=_add_indicators(_resample(df,"4h"))
-    df=_align_htf(df,df2,"tf2"); df=_align_htf(df,df3,"tf3")
+
+    for slot_idx, fname in enumerate(tf_files):
+        if slot_idx == primary_idx or not fname:
+            continue
+        prefix = f"tf{slot_idx + 1}"
+        path = Path(DATA_FOLDER) / fname
+        print(f"  TF{slot_idx + 1} (signal): {path}")
+        df_sig = _add_indicators(_load_raw(str(path)))
+        df = _align_htf(df, df_sig, prefix)
+
     # NOTE: add_extended_features and detect_regimes are called AFTER
     # the train/test split in main() to prevent look-ahead contamination
     return df.fillna(0)
@@ -2204,6 +2312,42 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
     lines.append(f"DirectionMode={dir_mode}")
     lines.append(f"; 0=LongOnly 1=ShortOnly 2=Auto(discriminator)")
 
+    # SignalTF1..4 — feed the EA's multi-TF inputs with the timeframes that
+    # were actually used in this discovery run. Map CSV filename → MQL5
+    # ENUM_TIMEFRAMES identifier so the converter (set_to_mql.py) can
+    # substitute these directly into the input block.
+    _TF_RE = re.compile(r"_(m1|m5|m15|m30|h1|h4|d1|w1|mn1)\.csv$", re.IGNORECASE)
+    _TF_MAP = {
+        "m1": "PERIOD_M1", "m5": "PERIOD_M5", "m15": "PERIOD_M15",
+        "m30": "PERIOD_M30", "h1": "PERIOD_H1", "h4": "PERIOD_H4",
+        "d1": "PERIOD_D1", "w1": "PERIOD_W1", "mn1": "PERIOD_MN1",
+    }
+    def _csv_to_period(fn: str) -> str:
+        if not fn:
+            return "PERIOD_CURRENT"
+        m = _TF_RE.search(fn)
+        return _TF_MAP.get(m.group(1).lower(), "PERIOD_CURRENT") if m else "PERIOD_CURRENT"
+
+    _tf_files_for_set = [TF1_FILE, TF2_FILE, TF3_FILE, TF4_FILE, TF5_FILE]
+    _primary_idx_for_set = max(1, min(5, int(PRIMARY_TF))) - 1
+    # Collect the SIGNAL slots only (everything except primary), in slot order,
+    # mapped to ENUM_TIMEFRAMES. Pad/truncate to exactly 4 SignalTF inputs.
+    _signal_periods = [
+        _csv_to_period(fn)
+        for i, fn in enumerate(_tf_files_for_set)
+        if i != _primary_idx_for_set and fn
+    ]
+    while len(_signal_periods) < 4:
+        _signal_periods.append("PERIOD_CURRENT")
+    _signal_periods = _signal_periods[:4]
+    lines += [
+        "",
+        "; Multi-TF signal slots (forwarded to PatternDiscoveryEA's SignalTFn inputs).",
+        "; PERIOD_CURRENT = slot disabled.",
+    ]
+    for i, period in enumerate(_signal_periods, start=1):
+        lines.append(f"SignalTF{i}={period}")
+
     # Discriminator for bidirectional
     if bidir_mode=="BIDIRECTIONAL" and discriminator:
         dc=discriminator
@@ -2734,14 +2878,28 @@ def main():
             ("test_trades",       te.get("total_trades",0),      min_test_trades,      "min"),
             ("time_consistency",  round(consistency,2),          MIN_TIME_CONSISTENCY, "min"),
         ]
-        fail_names=[name for name,val,thresh,mode in checks if _chk(name,val,thresh,mode)]
-        n_fails=len(fail_names)
-        if n_fails==0:
+        # Tally per-filter fails AND remember (name, value, threshold) for the
+        # marginal case so the UI can show *which* filter softened.
+        fail_details = []
+        for name, val, thresh, mode in checks:
+            if _chk(name, val, thresh, mode):
+                fail_details.append({
+                    "name":      name,
+                    "value":     float(val) if isinstance(val, (int, float)) else val,
+                    "threshold": float(thresh) if isinstance(thresh, (int, float)) else thresh,
+                    "mode":      mode,  # "min" or "max"
+                })
+        n_fails = len(fail_details)
+        soft_fail = None  # populated only for marginals
+        if n_fails == 0:
             print(f"    [PASS] All filters passed ✓")
-            is_marginal=False
-        elif USE_SOFT_FILTER and n_fails==1:
-            print(f"    [MARGINAL] 1 filter failed: {fail_names[0]} — kept with ⚠ tag")
-            is_marginal=True
+            is_marginal = False
+        elif USE_SOFT_FILTER and n_fails == 1:
+            soft_fail = fail_details[0]
+            op = "<" if soft_fail["mode"] == "min" else ">"
+            print(f"    [MARGINAL] 1 filter failed: {soft_fail['name']} "
+                  f"({soft_fail['value']} {op} {soft_fail['threshold']}) — kept with ⚠ tag")
+            is_marginal = True
         else:
             print(f"    [DROP] {n_fails} filters failed")
             continue
@@ -2773,6 +2931,7 @@ def main():
             "test_trades":   te.get("total_trades",0),
             "test_score":    te.get("composite_score",0),
             "marginal":      is_marginal,   # v5: True = passed via soft filter
+            "soft_fail":     soft_fail,     # {name,value,threshold,mode} or None
             # MC-chain fields
             "passed":        True,
             "score":         tr.get("composite_score", 0.0),
@@ -2786,9 +2945,16 @@ def main():
     # ── Export ────────────────────────────────────────────────────────────────
     _stage("Export")
     OUT.mkdir(parents=True, exist_ok=True)
-    # Build a human-readable timeframe string for the report header
-    tf2_label = TF2_FILE if TF2_FILE else f"{TF1_FILE} resampled -> H1"
-    tf3_label = TF3_FILE if TF3_FILE else f"{TF1_FILE} resampled -> H4"
+    # Build a human-readable timeframe summary for the report header.
+    # Lists every non-empty slot, marks which is primary.
+    tf_files_all = [TF1_FILE, TF2_FILE, TF3_FILE, TF4_FILE, TF5_FILE]
+    primary_idx = max(1, min(5, int(PRIMARY_TF))) - 1
+    tf_lines = []
+    for i, fn in enumerate(tf_files_all):
+        if not fn:
+            continue
+        role = "primary, run EA on this" if i == primary_idx else "signal"
+        tf_lines.append(f"    TF{i + 1} ({role}): {fn}")
 
     report_lines=[
         "="*65,
@@ -2797,9 +2963,7 @@ def main():
         f"  Train: {df_train.index[0].date()} -> {df_train.index[-1].date()} ({train_days}d)",
         f"  Test:  {df_test.index[0].date()} -> {df_test.index[-1].date()} ({test_days}d)",
         f"  Timeframes used:",
-        f"    TF1 (primary, run EA on this): {TF1_FILE}",
-        f"    TF2 (HTF confirmation):        {tf2_label}",
-        f"    TF3 (HTF confirmation):        {tf3_label}",
+        *tf_lines,
         f"  {len(final_results)} qualifying patterns",
         f"  Spread={SPREAD_PTS}pts | Wilson WR | Bidirectional | Multi-algo",
         "="*65,
@@ -2956,12 +3120,9 @@ def main():
 
 
 if __name__ == "__main__":
-    _ov = Path(__file__).parent / "_app_override.json"
-    if _ov.exists():
-        import json as _json
-        for _k, _v in _json.loads(_ov.read_text()).items():
-            if _k in globals():
-                globals()[_k] = _v
+    # Overrides are loaded by _load_app_overrides() at module-import time
+    # (defined just below the CONFIG block) so that mp.Pool workers re-importing
+    # this module under spawn-mode pick up the same overrides as the parent.
     mp.set_start_method("spawn", force=True)
     _nw = _n_workers()
     # Load, feature-compute, and encode once for all seeds.

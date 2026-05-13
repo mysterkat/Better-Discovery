@@ -35,6 +35,10 @@ class Job:
     stage_total: Optional[int] = None
     # ETA in seconds, derived from elapsed / stages-completed × stages-remaining.
     eta_seconds: Optional[float] = None
+    # Multi-seed batch progress (discovery only). seed_index is 1-based.
+    seed_index: Optional[int] = None
+    seed_total: Optional[int] = None
+    seed_value: Optional[int] = None
     # Cancel cooperation: set by POST /jobs/{id}/cancel; workers check it.
     cancel_requested: bool = False
     _done: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -69,6 +73,13 @@ class Job:
             self.eta_seconds = per_stage * (total - index + 1)
         else:
             self.eta_seconds = None
+
+    def mark_seed(self, index: int, total: int, value: int) -> None:
+        """Update which seed of a multi-seed batch is currently running.
+        Stage progress within the seed continues to flow through mark_stage."""
+        self.seed_index = index
+        self.seed_total = total
+        self.seed_value = value
 
     def mark_done(self, result: Any) -> None:
         self.result = result
@@ -116,6 +127,9 @@ class Job:
             "stage_index": self.stage_index,
             "stage_total": self.stage_total,
             "eta_seconds": self.eta_seconds,
+            "seed_index": self.seed_index,
+            "seed_total": self.seed_total,
+            "seed_value": self.seed_value,
             "log_tail": self.log[-20:],
             "meta": public_meta,
             "error": self.error,

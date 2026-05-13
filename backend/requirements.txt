@@ -16,3 +16,8 @@ scikit-learn>=1.4
 matplotlib>=3.8
 beautifulsoup4>=4.12
 lxml>=5.0
+# v0.5.0: required for the long-term MC benchmark (e.g. ^GSPC). Used by
+# mc_funded_test._fetch_benchmark to overlay a Buy & Hold reference line
+# on the long-term equity fan. Without this dep the feature falls back to
+# a noisy "yfinance not installed" warning at runtime.
+yfinance>=0.2.40

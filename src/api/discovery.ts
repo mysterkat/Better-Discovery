@@ -37,3 +37,61 @@ export async function startDiscovery(
 export async function getDiscoveryResults(jobId: string): Promise<JobRef> {
   return api<JobRef>("GET", `/discovery/results/${jobId}`);
 }
+
+export interface SoftFail {
+  name: string;
+  value: number;
+  threshold: number;
+  mode: "min" | "max";
+}
+
+export interface PatternSummary {
+  rank: number;
+  pattern_id: string;
+  cluster: number;
+  direction: string;
+  seed: number;
+  bidir_mode: string;
+  marginal: boolean;
+  soft_fail: SoftFail | null;
+  composite_score: number;
+  // Train (in-sample) metrics
+  train_wr: number;
+  train_wilson_wr: number;
+  train_pf: number;
+  train_trades: number;
+  train_per_day: number;
+  // Test (out-of-sample) metrics
+  test_score: number;
+  test_wr: number;
+  test_pf: number;
+  test_trades: number;
+  overall_wr: number;
+  recent_wr: number;
+  consistency: number;
+  implied_rr: number;
+  sl_pct: number;
+  tp_pct: number;
+  set_file: string | null;
+}
+
+export interface DiscoveryOverview {
+  avg_test_wr?: number | null;
+  avg_test_pf?: number | null;
+  avg_train_wr?: number | null;
+  avg_train_pf?: number | null;
+  total_test_trades?: number;
+}
+
+export interface SetFileResponse {
+  path: string;
+  name: string;
+  content: string;
+}
+
+export async function getSetFileContent(path: string): Promise<SetFileResponse> {
+  return api<SetFileResponse>(
+    "GET",
+    `/discovery/set-file?path=${encodeURIComponent(path)}`,
+  );
+}

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * PassRateHeatmap3D
  *
  * 3-D bar chart (Scatter3d pillars) showing simulation outcome breakdown:

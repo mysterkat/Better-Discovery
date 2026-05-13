@@ -26,14 +26,12 @@ _THIS_FILE = Path(__file__).resolve()
 # ── Toolkit directory ──────────────────────────────────────────────────────────
 # paths.py lives at: backend/app/paths.py
 # toolkit lives at:  backend/toolkit/
+# The toolkit is shipped with the app — no external fallbacks. This guarantees
+# someone who clones the repo from GitHub can run the app without configuring
+# any developer-machine-specific paths.
 TOOLKIT_DIR: Path = _THIS_FILE.parents[1] / "toolkit"
 
-# Fallback: the original MONTE CARLO source tree (dev convenience only).
-_FALLBACK_SRC = Path(r"C:\Users\micha\Desktop\MONTE CARLO\src")
-
-_toolkit_on_path = TOOLKIT_DIR if TOOLKIT_DIR.is_dir() else (
-    _FALLBACK_SRC if _FALLBACK_SRC.is_dir() else None
-)
+_toolkit_on_path = TOOLKIT_DIR if TOOLKIT_DIR.is_dir() else None
 if _toolkit_on_path and str(_toolkit_on_path) not in sys.path:
     sys.path.insert(0, str(_toolkit_on_path))
 

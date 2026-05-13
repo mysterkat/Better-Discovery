@@ -164,7 +164,9 @@ export interface VerdictBlock {
 export interface VerdictGlobal {
   challenge_fee?: number;
   fee_refunded_on_first_payout?: boolean;
-  roi_pass_rate?: number;
+  /** v0.5.0: replaces ``roi_pass_rate``. Real expected return per challenge
+   *  attempt (refund-aware). Negative = expect to lose money. */
+  avg_roi_pct?: number;
   kelly_fraction?: number;
   kelly_verdict?: string;
   intraday_dd_factor?: number;
