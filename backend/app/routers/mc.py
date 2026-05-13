@@ -68,6 +68,13 @@ def mc_run_all(req: MCRunAllRequest) -> JobRef:
     pnl = _resolve_pnl_all(req)
     if pnl.size == 0:
         raise HTTPException(400, "pnl is empty")
+    # Best-effort regime computation — only succeeds if the trade comments
+    # carry R:<n> markers. None when unavailable; the dashboard renders the
+    # heatmap conditionally.
+    regime_data: dict | None = None
+    file_for_regime = req.file_path_html if req.data_source == "mt5_html" else req.pnl_csv_path
+    if file_for_regime:
+        regime_data = mc_bridge.compute_regime_from_file(req.data_source, file_for_regime)
     job = JOBS.create(kind="mc_all", meta={"n_days": int(pnl.size)})
     run_in_thread(
         job,
@@ -78,6 +85,7 @@ def mc_run_all(req: MCRunAllRequest) -> JobRef:
             dict(req.phase2_params),
             dict(req.funded_params),
             dict(req.longterm_params),
+            regime_data=regime_data,
         ),
     )
     if req.wait and job.wait(req.wait_timeout_s):

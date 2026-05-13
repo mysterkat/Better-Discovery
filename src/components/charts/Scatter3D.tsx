@@ -10,7 +10,7 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyObj = Record<string, any>;
 
-import Plot from "react-plotly.js";
+import Plot from "./plotly";
 import type { McResultData } from "./types";
 
 interface Props {

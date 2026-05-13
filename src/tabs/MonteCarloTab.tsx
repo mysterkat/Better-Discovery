@@ -1,19 +1,21 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { getMcParams, runAllPhases, type McRunAllRequest } from "../api/mc";
 import { useJobs } from "../state/jobs";
 import { useParamDefaults } from "../state/paramDefaults";
+import { useMcRuns } from "../state/mcRuns";
 import JobProgress from "../components/JobProgress";
+import FileDropZone from "../components/FileDropZone";
+import RunHistory from "../components/RunHistory";
+import { openResultWindow } from "../lib/windows";
+import { PROP_FIRM_PRESETS, findPreset } from "../data/propFirmPresets";
 import type { ParamDef } from "../api/discovery";
 
-type DataSource = "tradingview" | "mt5_html";
-type ResultPhase = "phase1" | "phase2" | "funded" | "longterm";
+// Pseudo-keys (not in MC_PARAM_META) that ride along on global_params so the
+// dashboard verdict block can compute fee-aware ROI.
+const CHALLENGE_FEE_KEY = "CHALLENGE_FEE";
+const FEE_REFUND_KEY = "FEE_REFUNDED_ON_FIRST_PAYOUT";
 
-const PHASE_LABELS: Record<ResultPhase, string> = {
-  phase1: "Phase 1 — Challenge",
-  phase2: "Phase 2 — Verification",
-  funded: "Funded Account",
-  longterm: "Long-term",
-};
+type DataSource = "tradingview" | "mt5_html";
 
 export default function MonteCarloTab() {
   const [params, setParams] = useState<ParamDef[]>([]);
@@ -25,10 +27,14 @@ export default function MonteCarloTab() {
     new Set(["Simulation", "Phase 1"]),
   );
   const [jobId, setJobId] = useState<string | null>(null);
-  const [allResults, setAllResults] = useState<Record<string, unknown> | null>(null);
-  const [activeTab, setActiveTab] = useState<ResultPhase>("phase1");
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [presetId, setPresetId] = useState<string>("custom");
+  const [savePromptOpen, setSavePromptOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  const saveRun = useMcRuns((s) => s.save);
 
   // Subscribe to persistent defaults — these drive placeholders + labels
   // and act as the fallback at submit time when the user leaves a field empty.
@@ -38,6 +44,10 @@ export default function MonteCarloTab() {
   const setActiveJob = useJobs((s) => s.setActive);
   const isRunning = !!jobId && (job?.status === "running" || job?.status === "pending");
   const isDone = !!jobId && (job?.status === "done" || job?.status === "failed" || job?.status === "cancelled");
+
+  // Track which jobIds we've already auto-opened a dashboard window for so a
+  // re-render doesn't pop a duplicate window.
+  const openedFor = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     getMcParams().then(setParams).catch(() => {});
@@ -97,6 +107,24 @@ export default function MonteCarloTab() {
 
   const handleResetToDefaults = () => {
     setOverrides({});
+    setPresetId("custom");
+  };
+
+  const applyPreset = (id: string) => {
+    setPresetId(id);
+    if (id === "custom") return;
+    const preset = findPreset(id);
+    if (!preset) return;
+    setOverrides((prev) => {
+      const next = { ...prev };
+      for (const [k, v] of Object.entries(preset.overrides)) {
+        next[k] = String(v);
+      }
+      // Pseudo-fields surfaced to the backend via global_params at submit time.
+      next[CHALLENGE_FEE_KEY] = String(preset.challengeFee);
+      next[FEE_REFUND_KEY] = preset.feeRefundedOnFirstPayout ? "true" : "false";
+      return next;
+    });
   };
 
   const coerce = (p: ParamDef, raw: string): unknown => {
@@ -129,22 +157,48 @@ export default function MonteCarloTab() {
   const filePath = dataSource === "tradingview" ? csvPath : htmlPath;
   const canRun = filePath.trim().length > 0;
 
+  // When the job transitions to "done", auto-open the dashboard window once.
+  useEffect(() => {
+    if (!jobId || job?.status !== "done") return;
+    if (openedFor.current.has(jobId)) return;
+    openedFor.current.add(jobId);
+    openResultWindow(`mc-dashboard-${jobId.slice(0, 8)}`,
+      "Monte Carlo Dashboard",
+      { window: "mc-dashboard", jobId });
+  }, [jobId, job?.status]);
+
   const handleRun = async () => {
     if (!canRun) {
-      setError(`Please enter the ${dataSource === "mt5_html" ? "MT5 HTML report" : "TradingView CSV"} file path.`);
+      setError(`Please drop the ${dataSource === "mt5_html" ? "MT5 HTML report" : "TradingView CSV"} file (or paste its absolute path).`);
       return;
     }
     setStarting(true);
     setError(null);
     setJobId(null);
-    setAllResults(null);
+    setSaved(false);
+    setSavePromptOpen(false);
     try {
+      const globalParams = buildGroupParams("Simulation");
+      // Surface preset metadata (fee + refund policy + preset_id) to the
+      // backend so the dashboard's verdict block can render fee-aware ROI.
+      const fee = overrides[CHALLENGE_FEE_KEY];
+      const refund = overrides[FEE_REFUND_KEY];
+      if (fee != null && fee !== "") {
+        const n = parseFloat(fee.replace(",", "."));
+        if (!isNaN(n)) globalParams["challenge_fee"] = n;
+      }
+      if (refund != null && refund !== "") {
+        globalParams["fee_refunded_on_first_payout"] = refund === "true";
+      }
+      if (presetId !== "custom") {
+        globalParams["preset_id"] = presetId;
+      }
       const req: McRunAllRequest = {
         data_source: dataSource,
         ...(dataSource === "mt5_html"
           ? { file_path_html: htmlPath.trim() }
           : { pnl_csv_path: csvPath.trim() }),
-        global_params: buildGroupParams("Simulation"),
+        global_params: globalParams,
         phase1_params: buildGroupParams("Phase 1"),
         phase2_params: buildGroupParams("Phase 2"),
         funded_params: buildGroupParams("Funded"),
@@ -160,9 +214,28 @@ export default function MonteCarloTab() {
     }
   };
 
-  const handleJobDone = (result: unknown) => {
-    setAllResults(result as Record<string, unknown>);
-    setActiveTab("phase1");
+  const reopenDashboard = () => {
+    if (!jobId) return;
+    openResultWindow(`mc-dashboard-${jobId.slice(0, 8)}`,
+      "Monte Carlo Dashboard",
+      { window: "mc-dashboard", jobId });
+  };
+
+  const openSavePrompt = () => {
+    const preset = presetId !== "custom" ? findPreset(presetId) : null;
+    const stamp = new Date().toLocaleString(undefined, {
+      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+    });
+    setSaveName(preset ? `${preset.name} — ${stamp}` : `MC Run — ${stamp}`);
+    setSavePromptOpen(true);
+  };
+
+  const confirmSaveRun = async () => {
+    if (!jobId) return;
+    const name = saveName.trim() || "Untitled run";
+    await saveRun(jobId, name);
+    setSaved(true);
+    setSavePromptOpen(false);
   };
 
   const renderField = (p: ParamDef) => {
@@ -229,7 +302,7 @@ export default function MonteCarloTab() {
         <h2>Monte Carlo</h2>
         <p className="tab-subtitle">
           Configure all four simulation phases and run them together in one job.
-          Simulations share pre-drawn random paths — runs once, results in four tabs.
+          Results open in a separate dashboard window with full charts.
         </p>
       </div>
 
@@ -252,29 +325,23 @@ export default function MonteCarloTab() {
         </div>
 
         {dataSource === "tradingview" ? (
-          <div className="field" style={{ marginTop: 10 }}>
-            <label className="field-label">TradingView CSV Path</label>
-            <input className="field-input" value={csvPath}
-              onChange={(e) => setCsvPath(e.target.value)}
-              placeholder="C:\…\strategy_results.csv"
-              disabled={isRunning} />
-            <span className="field-hint">
-              Export from TradingView Strategy Tester → List of Trades → download CSV.
-              The file must include a Net P&amp;L column.
-            </span>
-          </div>
+          <FileDropZone
+            label="TradingView CSV"
+            value={csvPath}
+            onChange={setCsvPath}
+            accept=".csv"
+            disabled={isRunning}
+            hint="Export from TradingView Strategy Tester → List of Trades → Download CSV. Must include a Net P&L column."
+          />
         ) : (
-          <div className="field" style={{ marginTop: 10 }}>
-            <label className="field-label">MT5 Strategy Tester HTML Report Path</label>
-            <input className="field-input" value={htmlPath}
-              onChange={(e) => setHtmlPath(e.target.value)}
-              placeholder="C:\…\Report.html"
-              disabled={isRunning} />
-            <span className="field-hint">
-              In MetaTrader 5 Strategy Tester: right-click results → Save as Report (.html).
-              UTF-16 encoded — open in notepad to verify it has a Deals table.
-            </span>
-          </div>
+          <FileDropZone
+            label="MT5 Strategy Tester HTML Report"
+            value={htmlPath}
+            onChange={setHtmlPath}
+            accept=".html"
+            disabled={isRunning}
+            hint="In MT5 Strategy Tester: right-click results → Save as Report (.html). UTF-16 encoded — must contain a Deals table."
+          />
         )}
       </div>
 
@@ -282,6 +349,38 @@ export default function MonteCarloTab() {
       {params.length > 0 && (
         <div className="form-section">
           <div className="section-label">Simulation Settings</div>
+
+          {/* Prop firm preset selector */}
+          <div className="mc-preset-row">
+            <label className="mc-preset-label" htmlFor="mc-preset-select">
+              Prop Firm:
+            </label>
+            <select
+              id="mc-preset-select"
+              className="field-input mc-preset-select"
+              value={presetId}
+              onChange={(e) => applyPreset(e.target.value)}
+              disabled={isRunning}
+              title={
+                presetId !== "custom"
+                  ? findPreset(presetId)?.description ?? ""
+                  : "Use your own values for every field."
+              }
+            >
+              <option value="custom">Custom (no preset)</option>
+              {PROP_FIRM_PRESETS.map((p) => (
+                <option key={p.id} value={p.id} title={p.description}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            {presetId !== "custom" && (
+              <span className="mc-preset-hint">
+                {findPreset(presetId)?.description}
+              </span>
+            )}
+          </div>
+
           {[...groups.entries()].map(([group, gParams]) => (
             <div key={group} className="param-group">
               <button className="param-group-header" onClick={() => toggleGroup(group)}>
@@ -318,127 +417,32 @@ export default function MonteCarloTab() {
         >
           ↺ Reset to defaults
         </button>
-        {isDone && (
-          <button className="btn btn-secondary" onClick={() => { setJobId(null); setAllResults(null); setError(null); }}>
+        {isDone && job?.status === "done" && (
+          <>
+            <button className="btn btn-secondary" onClick={reopenDashboard}>
+              Reopen Dashboard
+            </button>
+            <button className="btn btn-secondary" onClick={() => { setJobId(null); setError(null); }}>
+              New Run
+            </button>
+          </>
+        )}
+        {isDone && job?.status !== "done" && (
+          <button className="btn btn-secondary" onClick={() => { setJobId(null); setError(null); }}>
             New Run
           </button>
         )}
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
-      <JobProgress jobId={jobId} onDone={handleJobDone} onError={(msg) => setError(msg)} />
+      <JobProgress jobId={jobId} onError={(msg) => setError(msg)} />
 
-      {/* Results tabs */}
-      {allResults && (
-        <div className="mc-results" style={{ marginTop: 24 }}>
-          <div className="phase-tabs">
-            {(["phase1", "phase2", "funded", "longterm"] as ResultPhase[]).map((p) => (
-              <button key={p}
-                className={`phase-tab${activeTab === p ? " active" : ""}`}
-                onClick={() => setActiveTab(p)}>
-                {PHASE_LABELS[p]}
-              </button>
-            ))}
-          </div>
-          <div className="phase-tab-panel">
-            <PhaseResults data={allResults[activeTab] as Record<string, unknown>} phase={activeTab} />
-          </div>
+      {job?.status === "done" && (
+        <div className="mc-done-banner">
+          ✔ Run complete — dashboard opened in a new window.
+          {" "}<button className="link-btn" onClick={reopenDashboard}>Reopen</button>
         </div>
       )}
-    </div>
-  );
-}
-
-function StatCard({ label, value }: { label: string; value: string | number }) {
-  const display = typeof value === "number"
-    ? (value > 100 ? value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : value.toFixed(2))
-    : value;
-  return (
-    <div className="stat-card">
-      <span className="stat-label">{label}</span>
-      <span className="stat-value">{display}</span>
-    </div>
-  );
-}
-
-function PhaseResults({ data, phase }: { data: Record<string, unknown> | null | undefined; phase: ResultPhase }) {
-  if (!data) return <p className="tab-loading">No results yet.</p>;
-
-  const pct = (v: unknown) => `${Number(v ?? 0).toFixed(1)}%`;
-  const days = (v: unknown) => `${Number(v ?? 0).toFixed(1)} days`;
-  const dollar = (v: unknown) => `$${Number(v ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-
-  if (phase === "phase1" || phase === "phase2") {
-    return (
-      <div>
-        <div className="stat-row">
-          <StatCard label="Pass Rate" value={pct(data.pass_rate)} />
-          <StatCard label="Passed" value={Number(data.n_passed ?? 0)} />
-          <StatCard label="Failed" value={Number(data.n_failed ?? 0)} />
-        </div>
-        <div className="stat-row" style={{ marginTop: 8 }}>
-          <StatCard label="Avg Days" value={days(data.avg_days)} />
-          <StatCard label="P10 Days" value={days(data.days_p10)} />
-          <StatCard label="P50 Days" value={days(data.days_p50)} />
-          <StatCard label="P90 Days" value={days(data.days_p90)} />
-        </div>
-        <div className="stat-row" style={{ marginTop: 8 }}>
-          <StatCard label="Daily DD Breach" value={pct((data.fail_pcts as Record<string, unknown>)?.daily_dd ?? data.daily_dd_breach_pct)} />
-          <StatCard label="Total DD Breach" value={pct((data.fail_pcts as Record<string, unknown>)?.total_dd ?? data.total_dd_breach_pct)} />
-        </div>
-      </div>
-    );
-  }
-
-  if (phase === "funded") {
-    return (
-      <div>
-        <div className="stat-row">
-          <StatCard label="Breach Rate" value={pct(data.breach_rate)} />
-          <StatCard label="Payout Rate" value={pct(data.payout_rate)} />
-          <StatCard label="Avg Earnings" value={dollar(data.avg_total_earnings)} />
-        </div>
-        <div className="stat-row" style={{ marginTop: 8 }}>
-          <StatCard label="Avg Payouts" value={Number(data.avg_payout_count ?? 0).toFixed(1)} />
-          <StatCard label="First Payout" value={days(data.avg_first_payout_day)} />
-          <StatCard label="Avg Days Active" value={days(data.avg_days_active)} />
-        </div>
-        {!!(data.breach_pcts as Record<string, unknown>) && (
-          <div className="stat-row" style={{ marginTop: 8 }}>
-            <StatCard label="Daily DD Breach" value={pct((data.breach_pcts as Record<string, unknown>).daily_dd)} />
-            <StatCard label="Total DD Breach" value={pct((data.breach_pcts as Record<string, unknown>).total_dd)} />
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // longterm
-  const bm = data.benchmark as Record<string, unknown> | null | undefined;
-  return (
-    <div>
-      <div className="stat-row">
-        <StatCard label="Survival Rate" value={pct((Number(data.pass_rate ?? 0)) * 100)} />
-        <StatCard label="Median Final Equity" value={dollar(data.median_equity)} />
-        <StatCard label="P10 Equity" value={dollar(data.p10_equity)} />
-        <StatCard label="P90 Equity" value={dollar(data.p90_equity)} />
-      </div>
-      <div className="stat-row" style={{ marginTop: 8 }}>
-        <StatCard label="Median Max DD" value={pct((Number(data.median_max_dd ?? 0)) * 100)} />
-        <StatCard label="Median Sharpe" value={Number(data.median_sharpe ?? 0).toFixed(2)} />
-        <StatCard label="Ann. Return" value={pct((Number(data.annualized_return ?? 0)) * 100)} />
-      </div>
-      {bm && !bm.error && (
-        <div style={{ marginTop: 16 }}>
-          <div className="section-label">Benchmark: {String(bm.ticker ?? "")}</div>
-          <div className="stat-row">
-            <StatCard label="Benchmark Ann. Return" value={pct((Number(bm.annualized_return ?? 0)) * 100)} />
-            <StatCard label="Benchmark Sharpe" value={Number(bm.sharpe ?? 0).toFixed(2)} />
-            <StatCard label="Benchmark Final Equity" value={dollar(bm.final_equity)} />
-          </div>
-        </div>
-      )}
-      {!!bm?.error && <p className="field-hint" style={{ color: "var(--warn, #e69500)" }}>Benchmark error: {String(bm.error)}</p>}
     </div>
   );
 }

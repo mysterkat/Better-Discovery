@@ -58,6 +58,16 @@ import plotly.graph_objects as go
 
 warnings.filterwarnings("ignore")
 
+# Cancel-check hook: when running inside the FastAPI app, the runners module
+# provides ``check_cancelled()`` which raises if the user cancelled the job.
+# When the toolkit is imported standalone (CLI / tests / notebooks) we fall
+# back to a no-op so the module stays importable without the app context.
+try:
+    from app.jobs.runners import check_cancelled  # type: ignore[import-not-found]
+except ImportError:
+    def check_cancelled():  # type: ignore[no-redef]
+        pass
+
 # -----------------------------------------------------------------------------
 #  USER CONFIGURATION  <- only edit this block
 # -----------------------------------------------------------------------------
@@ -335,16 +345,45 @@ def load_mt5_html(filepath):
         .pipe(pd.to_numeric, errors="coerce")
     )
 
+    # Parse commission and swap with the same cleanup, defaulting NaN to 0.
+    # Both are usually negative (cost) or zero in MT5 reports.
+    for _cost_col in ("commission", "swap"):
+        if _cost_col in df.columns:
+            df[_cost_col] = (
+                df[_cost_col]
+                .astype(str)
+                .str.replace(r"\s", "", regex=True)
+                .str.replace(",", ".")
+                .pipe(pd.to_numeric, errors="coerce")
+                .fillna(0.0)
+            )
+        else:
+            df[_cost_col] = 0.0
+
+    # Net P&L includes per-trade commission and swap costs.
+    # Adding is correct because MT5 reports these as negative numbers when they
+    # represent a cost; positive swap (credit) is also propagated correctly.
+    df["net_profit"] = df["profit"] + df["commission"] + df["swap"]
+
     # Parse timestamp
     df["time"] = pd.to_datetime(df["time"], format="%Y.%m.%d %H:%M:%S", errors="coerce")
     df["trade_date"] = df["time"].dt.date
 
     df = df.dropna(subset=["profit"]).reset_index(drop=True)
 
+    _commission_total = float(df["commission"].sum())
+    _swap_total       = float(df["swap"].sum())
+    _net_total        = float(df["net_profit"].sum())
+
     print("[INFO] Loaded", len(df), "closed trades from", path.name)
     print("[INFO] Date range:", str(df["trade_date"].min()), "->", str(df["trade_date"].max()))
     print("[INFO] Total P&L:  $" + str(round(df["profit"].sum(), 2)))
     print("[INFO] Win rate:    " + str(round((df["profit"] > 0).mean() * 100, 1)) + "%")
+    print(
+        "[INFO] Including commission ($" + str(round(_commission_total, 2))
+        + ") and swap ($" + str(round(_swap_total, 2))
+        + ") -- net P&L: $" + str(round(_net_total, 2))
+    )
 
     return df
 
@@ -353,8 +392,13 @@ def get_daily_pnl(df, scale):
     """
     Aggregate trades to daily P&L and scale to the target account size.
     Each element = one trading day (days with no trades are excluded).
+
+    Prefers the ``net_profit`` column when present (MT5 source — includes
+    commission + swap). Falls back to ``profit`` for sources where the
+    profit column is already net of costs (e.g. TradingView).
     """
-    profits_raw = df["profit"].to_numpy(dtype=float) * scale
+    pnl_col = "net_profit" if "net_profit" in df.columns else "profit"
+    profits_raw = df[pnl_col].to_numpy(dtype=float) * scale
     has_dates   = "trade_date" in df.columns and df["trade_date"].notna().any()
     if has_dates:
         return (
@@ -403,8 +447,11 @@ def _build_regime_daily(trades_df, scale=1.0):
     )
     regime_by_date = dominant.to_dict()
 
-    # Daily P&L per day (already scaled via daily_pnl, but build from raw trades)
-    daily_profit = df.groupby("trade_date")["profit"].sum() * scale
+    # Daily P&L per day (already scaled via daily_pnl, but build from raw trades).
+    # Prefer ``net_profit`` (commission + swap inclusive) when available, matching
+    # ``get_daily_pnl`` so the regime pools are consistent with the global pool.
+    pnl_col = "net_profit" if "net_profit" in df.columns else "profit"
+    daily_profit = df.groupby("trade_date")[pnl_col].sum() * scale
 
     # Pool of daily P&L values per dominant regime
     regime_pnl_pools = {r: [] for r in range(5)}
@@ -418,7 +465,9 @@ def _build_regime_daily(trades_df, scale=1.0):
 def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
                    max_total_dd_pct, min_days, max_sim_days, rng, n_sims,
                    trans_matrix=None, regime_pnl_pools=None, start_regime=None,
-                   phase_label="", predrawn_pnl=None):
+                   phase_label="", predrawn_pnl=None, intraday_dd_factor=1.0,
+                   dd_style="static", consistency_max_daily_pct=None,
+                   keep_curves=0):
     """
     Simulates one evaluation phase.
 
@@ -433,10 +482,44 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
     Min trading days:
         Each element in daily_pnl represents one trading day.
         Must accumulate min_days before the profit target check is run.
+
+    intraday_dd_factor:
+        Safety factor applied to BOTH the daily and total DD limits before
+        evaluation (1.0 = no adjustment, default).  Setting <1.0 tightens
+        the effective limits to leave headroom for intraday floating losses
+        on open positions which the end-of-day P&L cannot capture.  e.g.
+        0.70 means "treat my 5% daily as if it were 3.5%".
+
+    dd_style ('static' | 'trailing_eod' | 'trailing_intraday'):
+        - 'static'           : original behaviour — fixed total floor from
+                               the initial balance.
+        - 'trailing_eod'     : at the start of each new day, ratchet the
+                               total floor UP to ``equity * (1 - total_dd)``
+                               whenever that exceeds the current floor.
+                               Floor never moves down.
+        - 'trailing_intraday': identical to 'trailing_eod' under our EOD-only
+                               data granularity (no intraday peak available).
+                               Provided for API parity; behaves the same.
+
+    consistency_max_daily_pct (float | None):
+        If set (e.g. 0.30 = 30%), at the END of an otherwise passing sim,
+        check whether any single day's profit exceeded this fraction of the
+        sim's total POSITIVE profit. If so, retroactively flip ``passed`` to
+        False and stamp ``fail_reason = 'consistency_violation'``.
+
+    keep_curves (int):
+        When > 0, the equity paths for the FIRST ``keep_curves`` sims are
+        retained on the returned ``curves`` list (others are dropped to save
+        memory). When 0, all curves are returned (legacy behaviour).
     """
+    # Apply intraday safety factor: tighter effective limits than the rulebook.
+    effective_daily_loss_abs = balance * max_daily_dd_pct * intraday_dd_factor
+    effective_total_dd_pct   = max_total_dd_pct * intraday_dd_factor
+    effective_total_floor    = balance * (1.0 - effective_total_dd_pct)
+
     profit_target_abs = balance * profit_target_pct
-    daily_loss_abs    = balance * max_daily_dd_pct   # fixed dollar, never changes
-    total_floor       = balance * (1.0 - max_total_dd_pct)  # fixed floor, never moves
+    daily_loss_abs    = effective_daily_loss_abs   # fixed dollar, never changes
+    total_floor       = effective_total_floor       # fixed floor, never moves
 
     use_markov = (
         trans_matrix is not None
@@ -445,18 +528,30 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
 
     results = []
     curves  = []
+    _trailing = dd_style in ("trailing_eod", "trailing_intraday")
+    _keep_n   = max(0, int(keep_curves))
 
     _report_every = max(1, n_sims // 50)   # emit ~50 progress ticks per phase
     for _i in range(n_sims):
         if _i % _report_every == 0:
             print(f"MC_SIM {_i}/{n_sims} {phase_label}", flush=True)
-        equity      = balance
-        days_traded = 0
-        passed      = False
-        fail_reason = None
-        eq_path     = [equity]
+        # Cooperative cancel check every 500 sims (no-op when standalone).
+        if _i and (_i % 500 == 0):
+            check_cancelled()
+        equity        = balance
+        days_traded   = 0
+        passed        = False
+        fail_reason   = None
+        eq_path       = [equity]
+        current_floor = total_floor          # ratchets up under trailing modes
+        # Track per-day P&L for the optional consistency-rule post-check.
+        track_consistency = consistency_max_daily_pct is not None
+        day_pnl_log = [] if track_consistency else None
 
-        if use_markov:
+        # Only burn an RNG draw when the Markov path will actually fire — the
+        # predrawn path bypasses Markov, so the legacy unconditional ``integers``
+        # call broke seed reproducibility. Mirrors the funded loop fix.
+        if use_markov and predrawn_pnl is None:
             current_regime = (
                 int(start_regime)
                 if start_regime is not None
@@ -465,7 +560,7 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
 
         for _day in range(max_sim_days):
             # --- sample daily P&L (Markov-guided or plain resample) ---
-            if use_markov:
+            if use_markov and predrawn_pnl is None:
                 current_regime = int(
                     rng.choice(5, p=trans_matrix[current_regime])
                 )
@@ -482,18 +577,26 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
 
             # --- apply P&L and check rules (unchanged logic) ---
             day_open     = equity          # midnight snapshot for this day
+            # Trailing DD: at the start of each new day, ratchet the total floor
+            # UP if today's opening equity supports a higher floor. Never down.
+            if _trailing:
+                candidate = day_open * (1.0 - max_total_dd_pct * intraday_dd_factor)
+                if candidate > current_floor:
+                    current_floor = candidate
             days_traded += 1
             equity      += day_pnl
             equity       = max(equity, 0.0)
             eq_path.append(equity)
+            if track_consistency:
+                day_pnl_log.append(day_pnl)
 
             # daily loss breach: equity fell more than the fixed $ amount from open
             if equity < (day_open - daily_loss_abs):
                 fail_reason = "daily_dd"
                 break
 
-            # total loss breach: fixed floor
-            if equity < total_floor:
+            # total loss breach: floor (static or trailing)
+            if equity < current_floor:
                 fail_reason = "total_dd"
                 break
 
@@ -502,13 +605,29 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
                 passed = True
                 break
 
+        # If the loop ran out of days without passing or breaching, attribute
+        # the failure to profit shortfall (ran the clock without hitting target)
+        if not passed and fail_reason is None:
+            fail_reason = "profit_shortfall"
+
+        # Consistency rule: a single huge day cannot dominate total profit.
+        if passed and track_consistency and day_pnl_log:
+            pos_total = sum(p for p in day_pnl_log if p > 0)
+            if pos_total > 0:
+                biggest = max(day_pnl_log)
+                if biggest > pos_total * float(consistency_max_daily_pct):
+                    passed      = False
+                    fail_reason = "consistency_violation"
+
         results.append({
             "passed"      : passed,
             "fail_reason" : fail_reason if not passed else None,
             "days"        : days_traded,
             "final_equity": equity,
         })
-        curves.append(eq_path)
+        # Curve retention: legacy (keep all) when keep_curves==0, else first N.
+        if _keep_n == 0 or _i < _keep_n:
+            curves.append(eq_path)
 
     return results, curves
 
@@ -2157,7 +2276,7 @@ def _eval_phase_stats(results, n_total):
     total_fail = len(fail_df)
     fail_pcts  = {
         r: (int(fail_df["fail_reason"].eq(r).sum()) / total_fail * 100 if total_fail else 0.0)
-        for r in ("daily_dd", "total_dd")
+        for r in ("daily_dd", "total_dd", "profit_shortfall", "consistency_violation")
     }
     pass_df   = df_r[df_r["passed"]]
     days_arr  = pass_df["days"].values if len(pass_df) else np.array([0])
@@ -2168,7 +2287,8 @@ def _eval_phase_stats(results, n_total):
         "fail_pcts"              : fail_pcts,
         "daily_dd_breach_pct"    : fail_pcts.get("daily_dd", 0.0),
         "total_dd_breach_pct"    : fail_pcts.get("total_dd", 0.0),
-        "profit_shortfall_pct"   : (n_total - n_passed - total_fail) / n_total * 100 if n_total else 0.0,
+        "profit_shortfall_pct"   : fail_pcts.get("profit_shortfall", 0.0),
+        "consistency_violation_pct": fail_pcts.get("consistency_violation", 0.0),
         "avg_days"               : float(days_arr.mean()) if len(days_arr) else 0.0,
         "days_p10"               : float(np.percentile(days_arr, 10)) if len(days_arr) else 0.0,
         "days_p50"               : float(np.percentile(days_arr, 50)) if len(days_arr) else 0.0,
@@ -2181,52 +2301,183 @@ def _eval_phase_stats(results, n_total):
 def run_mc_phase1(daily_pnl: np.ndarray, *, balance=100_000, profit_pct=0.10,
                   daily_dd_pct=0.05, total_dd_pct=0.10, min_days=4,
                   n_sims=10_000, max_days=60, seed=None,
-                  regime_transition=None, predrawn_pnl=None) -> dict:
-    """Run Phase 1 (FTMO Challenge) MC simulation; return rich stats dict."""
+                  trans_matrix=None, regime_pnl_pools=None,
+                  regime_transition=None, predrawn_pnl=None,
+                  intraday_dd_factor=1.0,
+                  dd_style="static", consistency_max_daily_pct=None,
+                  keep_curves=0) -> dict:
+    """Run Phase 1 (FTMO Challenge) MC simulation; return rich stats dict.
+
+    ``trans_matrix`` and ``regime_pnl_pools`` enable Markov regime sampling
+    (matrix is the 5x5 transition probability matrix, pools is a dict of
+    regime_int -> list of daily P&L draws). ``regime_transition`` is kept as
+    a backward-compat alias for ``trans_matrix``.
+
+    ``intraday_dd_factor`` (default 1.0) tightens the effective DD limits to
+    leave headroom for intraday floating losses; see ``run_eval_phase``.
+
+    ``dd_style``, ``consistency_max_daily_pct``, ``keep_curves``: see
+    ``run_eval_phase`` docstring. When ``keep_curves > 0`` the result dict
+    additionally contains ``equity_curves`` (padded to ``max_days+1``).
+    """
     daily_pnl = np.asarray(daily_pnl, dtype=float)
     rng = _make_rng(seed)
-    results, _ = run_eval_phase(
+    if trans_matrix is None and regime_transition is not None:
+        trans_matrix = regime_transition
+    results, curves = run_eval_phase(
         daily_pnl, balance, profit_pct, daily_dd_pct, total_dd_pct,
         min_days, max_days, rng, n_sims,
-        trans_matrix=regime_transition,
+        trans_matrix=trans_matrix,
+        regime_pnl_pools=regime_pnl_pools,
         phase_label="P1",
         predrawn_pnl=predrawn_pnl,
+        intraday_dd_factor=intraday_dd_factor,
+        dd_style=dd_style,
+        consistency_max_daily_pct=consistency_max_daily_pct,
+        keep_curves=keep_curves,
     )
     stats = _eval_phase_stats(results, n_sims)
     stats["phase"] = "phase1"
+    if keep_curves and curves:
+        # Pad to a uniform length of max_days+1 for downstream chart consumers.
+        target = max_days + 1
+        padded = []
+        for c in curves[:keep_curves]:
+            if len(c) < target:
+                c = c + [c[-1]] * (target - len(c))
+            padded.append([float(v) for v in c])
+        stats["equity_curves"] = padded
     return stats
 
 
 def run_mc_phase2(daily_pnl, *, balance=100_000, profit_pct=0.05,
                   daily_dd_pct=0.05, total_dd_pct=0.10, min_days=4,
-                  n_sims=10_000, max_days=60, seed=None, predrawn_pnl=None) -> dict:
-    """Run Phase 2 (FTMO Verification) MC simulation; return rich stats dict."""
+                  n_sims=10_000, max_days=60, seed=None, predrawn_pnl=None,
+                  trans_matrix=None, regime_pnl_pools=None,
+                  intraday_dd_factor=1.0,
+                  dd_style="static", consistency_max_daily_pct=None,
+                  keep_curves=0) -> dict:
+    """Run Phase 2 (FTMO Verification) MC simulation; return rich stats dict.
+
+    See ``run_mc_phase1`` for ``trans_matrix`` / ``regime_pnl_pools``,
+    ``intraday_dd_factor``, ``dd_style``, ``consistency_max_daily_pct`` and
+    ``keep_curves`` semantics.
+    """
     daily_pnl = np.asarray(daily_pnl, dtype=float)
     rng = _make_rng(seed)
-    results, _ = run_eval_phase(
+    results, curves = run_eval_phase(
         daily_pnl, balance, profit_pct, daily_dd_pct, total_dd_pct,
         min_days, max_days, rng, n_sims,
+        trans_matrix=trans_matrix,
+        regime_pnl_pools=regime_pnl_pools,
         phase_label="P2",
         predrawn_pnl=predrawn_pnl,
+        intraday_dd_factor=intraday_dd_factor,
+        dd_style=dd_style,
+        consistency_max_daily_pct=consistency_max_daily_pct,
+        keep_curves=keep_curves,
     )
     stats = _eval_phase_stats(results, n_sims)
     stats["phase"] = "phase2"
+    if keep_curves and curves:
+        target = max_days + 1
+        padded = []
+        for c in curves[:keep_curves]:
+            if len(c) < target:
+                c = c + [c[-1]] * (target - len(c))
+            padded.append([float(v) for v in c])
+        stats["equity_curves"] = padded
     return stats
 
 
 def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
                      total_dd_pct=0.10, payout_cadence_days=30,
-                     months=12, n_sims=10_000, rng=None, predrawn_pnl=None) -> dict:
-    """Internal funded simulation loop; shared by run_mc_funded and helpers."""
+                     months=12, n_sims=10_000, rng=None, predrawn_pnl=None,
+                     payout_mode="schedule", payout_threshold=0.05,
+                     profit_split=0.80, balance_reset=True,
+                     min_days_payout=4, max_days=None,
+                     trans_matrix=None, regime_pnl_pools=None,
+                     intraday_dd_factor=1.0,
+                     dd_style="static", consistency_max_daily_pct=None,
+                     min_days_first_payout=0, keep_curves=0) -> dict:
+    """Internal funded simulation loop; shared by run_mc_funded and helpers.
+
+    Payout modes
+    ------------
+    schedule  : pay every ``payout_cadence_days`` if profit > 0 and at least
+                ``min_days_payout`` days have elapsed since the last payout.
+    threshold : pay whenever profit_above >= ``payout_threshold * balance``
+                AND at least ``min_days_payout`` have elapsed.
+    both      : either condition triggers a payout (whichever fires first).
+
+    profit_split   : trader's share of profit_above on payout (0.80 = 80%).
+    balance_reset  : True  → reset equity to ``balance`` after payout (the
+                              firm withdraws all profit above the line);
+                     False → withdraw only the trader's share, leaving the
+                              firm's share in the account as a buffer.
+                              The total floor in this mode is a TRAILING
+                              high-water rule: it only ratchets UP as the
+                              account grows, and never moves back down.
+
+    trans_matrix / regime_pnl_pools:
+        When both are provided, daily P&L is sampled via Markov regime
+        switching: each day picks a new regime via ``trans_matrix`` and
+        draws from that regime's pool (falls back to global ``daily_pnl``
+        if the pool has fewer than 5 samples). When ``predrawn_pnl`` is
+        also supplied, it takes precedence over Markov sampling.
+
+    intraday_dd_factor (default 1.0):
+        Multiplicative tightener applied to BOTH the daily and total DD
+        limits to leave headroom for intraday floating losses.
+
+    dd_style ('static' | 'trailing_eod' | 'trailing_intraday'):
+        Floor behaviour. 'static' uses the fixed initial floor. The two
+        trailing modes ratchet the floor UP at the start of each day to
+        ``equity * (1 - total_dd_pct)`` whenever that is higher; never down.
+        Under our EOD-only data ``trailing_intraday`` is identical to
+        ``trailing_eod`` (no intraday peak available).
+
+    consistency_max_daily_pct (float | None):
+        If set, after a sim ends with no breach, check whether any single
+        day's profit > this fraction of the sim's total positive profit.
+        If so, count it as a ``consistency_breach`` in the results.
+
+    min_days_first_payout (int):
+        Gates the FIRST payout by this many absolute days from account
+        start. Distinct from ``min_days_payout`` which is the spacing
+        between subsequent payouts.
+
+    keep_curves (int):
+        When > 0, the result dict additionally contains:
+            ``equity_curves`` — first N equity paths padded to ``max_days+1``
+            ``floor_curves``  — corresponding total-floor paths
+            ``survival``      — list len ``max_days+1``, fraction of sims
+                                 still active at day d (no breach yet).
+    """
     daily_pnl      = np.asarray(daily_pnl, dtype=float)
     if rng is None:
         rng = _make_rng(None)
-    max_days       = months * 21          # approx trading days per month
-    daily_loss_abs = balance * daily_dd_pct
-    total_floor    = balance * (1.0 - total_dd_pct)
+    if max_days is None or max_days <= 0:
+        max_days   = months * 21          # approx trading days per month
+    daily_loss_abs = balance * daily_dd_pct * intraday_dd_factor
+    total_floor    = balance * (1.0 - total_dd_pct * intraday_dd_factor)
+    payout_mode    = (payout_mode or "schedule").lower()
+    use_markov     = (trans_matrix is not None and regime_pnl_pools is not None)
+    _trailing      = dd_style in ("trailing_eod", "trailing_intraday")
+    _keep_n        = max(0, int(keep_curves))
+    _track_consistency = consistency_max_daily_pct is not None
+    # Effective per-day-recompute total-DD fraction (with intraday tightener).
+    _eff_total_dd  = total_dd_pct * intraday_dd_factor
 
     results = []
+    consistency_breaches = 0
+    eq_curves: list[list[float]] = []
+    fl_curves: list[list[float]] = []
+    # Survival[d] = number of sims still active by day d (pre-breach).
+    survival_counts = np.zeros(max_days + 1, dtype=np.int64)
     for _i in range(n_sims):
+        if _i and (_i % 500 == 0):
+            check_cancelled()
         equity            = balance
         current_floor     = total_floor
         days_active       = 0
@@ -2237,44 +2488,116 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
         breach_reason     = None
         breach_day        = None
         first_payout_day  = None
+        keep_this         = (_keep_n == 0) or (_i < _keep_n)
+        eq_path = [equity] if keep_this else None
+        fl_path = [current_floor] if keep_this else None
+        day_pnl_log = [] if _track_consistency else None
+
+        # Only burn an RNG draw when Markov sampling will actually fire.
+        # The predrawn path bypasses both Markov and ``rng.choice``, so the
+        # legacy unconditional ``integers`` call broke seed reproducibility.
+        if use_markov and predrawn_pnl is None:
+            current_regime = int(rng.integers(0, 5))
 
         for _day in range(max_days):
             if predrawn_pnl is not None:
                 _d = min(_day, predrawn_pnl.shape[1] - 1)
                 day_pnl = float(predrawn_pnl[_i % len(predrawn_pnl), _d])
+            elif use_markov:
+                current_regime = int(rng.choice(5, p=trans_matrix[current_regime]))
+                pool = regime_pnl_pools.get(current_regime, [])
+                if len(pool) >= 5:
+                    day_pnl = float(rng.choice(pool))
+                else:
+                    day_pnl = float(rng.choice(daily_pnl))
             else:
                 day_pnl = float(rng.choice(daily_pnl))
             day_open           = equity
+            # Trailing DD: ratchet the floor UP at the start of each new day
+            # if the previous EOD equity supports a higher floor. Never down.
+            if _trailing:
+                candidate = day_open * (1.0 - _eff_total_dd)
+                if candidate > current_floor:
+                    current_floor = candidate
             days_active       += 1
             days_since_payout += 1
             equity            += day_pnl
             equity             = max(equity, 0.0)
+            if _track_consistency:
+                day_pnl_log.append(day_pnl)
 
             if equity < (day_open - daily_loss_abs):
-                breach = True; breach_reason = "daily_dd"; breach_day = days_active; break
+                breach = True; breach_reason = "daily_dd"; breach_day = days_active
+                if keep_this:
+                    eq_path.append(equity); fl_path.append(current_floor)
+                break
             if equity < current_floor:
-                breach = True; breach_reason = "total_dd"; breach_day = days_active; break
+                breach = True; breach_reason = "total_dd"; breach_day = days_active
+                if keep_this:
+                    eq_path.append(equity); fl_path.append(current_floor)
+                break
 
             profit_above = equity - balance
-            if days_since_payout >= payout_cadence_days and profit_above > 0:
-                payout          = profit_above * 0.80
+            sched_hit = (payout_mode in ("schedule", "both")
+                         and days_since_payout >= payout_cadence_days
+                         and profit_above > 0)
+            thr_hit   = (payout_mode in ("threshold", "both")
+                         and profit_above >= balance * payout_threshold)
+            elig      = days_since_payout >= min_days_payout
+            # Gate the FIRST payout by an absolute days-from-start threshold.
+            first_gate_ok = (
+                first_payout_day is not None
+                or days_active >= min_days_first_payout
+            )
+            if elig and first_gate_ok and (sched_hit or thr_hit):
+                payout          = profit_above * profit_split
                 total_earnings += payout
                 payout_count   += 1
                 if first_payout_day is None:
                     first_payout_day = days_active
-                equity            = balance
-                current_floor     = total_floor
+                if balance_reset:
+                    equity        = balance
+                    current_floor = total_floor
+                else:
+                    # Withdraw only the trader's share — firm's share stays as a buffer.
+                    equity       -= payout
+                    # Trailing high-water floor: the floor only ever ratchets UP
+                    # as the account grows; it never moves down. This matches
+                    # how prop firms treat the post-payout drawdown reference.
+                    candidate = equity * (1.0 - total_dd_pct)
+                    if candidate > current_floor:
+                        current_floor = candidate
                 days_since_payout = 0
+            if keep_this:
+                eq_path.append(equity); fl_path.append(current_floor)
+
+        # Survival: each day from 0..days_active inclusive counts as "active".
+        survival_counts[: days_active + 1] += 1
+
+        # Optional consistency-rule post-check (funded variant: separate counter).
+        cons_breach = False
+        if (not breach) and _track_consistency and day_pnl_log:
+            pos_total = sum(p for p in day_pnl_log if p > 0)
+            if pos_total > 0:
+                biggest = max(day_pnl_log)
+                if biggest > pos_total * float(consistency_max_daily_pct):
+                    cons_breach = True
+                    consistency_breaches += 1
 
         results.append({
-            "breach"          : breach,
-            "breach_reason"   : breach_reason,
-            "breach_day"      : breach_day,
-            "payout_count"    : payout_count,
-            "total_earnings"  : total_earnings,
-            "first_payout_day": first_payout_day,
-            "days_active"     : days_active,
+            "breach"             : breach,
+            "breach_reason"      : breach_reason,
+            "breach_day"         : breach_day,
+            "payout_count"       : payout_count,
+            "total_earnings"     : total_earnings,
+            "first_payout_day"   : first_payout_day,
+            "days_active"        : days_active,
+            "consistency_breach" : cons_breach,
         })
+
+        if keep_this and eq_path is not None:
+            eq_curves.append(eq_path)
+            fl_curves.append(fl_path)
 
     df_r        = pd.DataFrame(results)
     breach_rate = df_r["breach"].mean() * 100
@@ -2287,7 +2610,7 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
     }
     paid_df = df_r[df_r["payout_count"] > 0]
     fpd_arr = paid_df["first_payout_day"].dropna().values
-    return {
+    out: dict = {
         "breach_rate"          : breach_rate,
         "payout_rate"          : payout_rate,
         "breach_pcts"          : breach_pcts,
@@ -2295,42 +2618,116 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
         "avg_payout_count"     : float(df_r["payout_count"].mean()),
         "avg_first_payout_day" : float(fpd_arr.mean()) if len(fpd_arr) else 0.0,
         "avg_days_active"      : float(df_r["days_active"].mean()),
+        "consistency_breaches" : int(consistency_breaches),
+        "consistency_breach_rate": (consistency_breaches / max(n_sims, 1)) * 100,
         "results_df"           : df_r,
     }
+    if _keep_n > 0:
+        target = max_days + 1
+        def _pad(paths):
+            return [
+                [float(v) for v in (p + [p[-1]] * (target - len(p)))] if len(p) < target
+                else [float(v) for v in p]
+                for p in paths
+            ]
+        out["equity_curves"] = _pad(eq_curves)
+        out["floor_curves"]  = _pad(fl_curves)
+        # Survival fraction at each day index.
+        out["survival"] = [float(c) / float(max(n_sims, 1)) for c in survival_counts.tolist()]
+    return out
 
 
 def run_mc_funded(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
                   total_dd_pct=0.10, payout_cadence_days=30,
-                  months=12, n_sims=10_000, seed=None, predrawn_pnl=None) -> dict:
-    """Run funded-account MC simulation; return breach/payout/earnings stats dict."""
+                  months=12, n_sims=10_000, seed=None, predrawn_pnl=None,
+                  payout_mode="schedule", payout_threshold=0.05,
+                  profit_split=0.80, balance_reset=True,
+                  min_days_payout=4, max_days=None,
+                  trans_matrix=None, regime_pnl_pools=None,
+                  intraday_dd_factor=1.0,
+                  dd_style="static", consistency_max_daily_pct=None,
+                  min_days_first_payout=0, keep_curves=0) -> dict:
+    """Run funded-account MC simulation; return breach/payout/earnings stats dict.
+
+    See ``_run_funded_loop`` for ``trans_matrix`` / ``regime_pnl_pools``,
+    ``intraday_dd_factor``, ``dd_style``, ``consistency_max_daily_pct``,
+    ``min_days_first_payout`` and ``keep_curves`` semantics.
+    """
     rng = _make_rng(seed)
     return _run_funded_loop(
         daily_pnl, balance=balance, daily_dd_pct=daily_dd_pct,
         total_dd_pct=total_dd_pct, payout_cadence_days=payout_cadence_days,
         months=months, n_sims=n_sims, rng=rng, predrawn_pnl=predrawn_pnl,
+        payout_mode=payout_mode, payout_threshold=payout_threshold,
+        profit_split=profit_split, balance_reset=balance_reset,
+        min_days_payout=min_days_payout, max_days=max_days,
+        trans_matrix=trans_matrix, regime_pnl_pools=regime_pnl_pools,
+        intraday_dd_factor=intraday_dd_factor,
+        dd_style=dd_style,
+        consistency_max_daily_pct=consistency_max_daily_pct,
+        min_days_first_payout=min_days_first_payout,
+        keep_curves=keep_curves,
     )
 
 
 def run_mc_longterm(daily_pnl, *, balance=100_000, years=5,
                     n_sims=10_000, seed=None, predrawn_pnl=None,
-                    benchmark_ticker="", ruin_pct=0.20) -> dict:
-    """Run long-term equity MC over years*252 days; return equity/Sharpe/max_dd stats."""
+                    benchmark_ticker="", ruin_pct=0.20,
+                    sample_paths=200, n_days=None,
+                    trans_matrix=None, regime_pnl_pools=None,
+                    intraday_dd_factor=1.0) -> dict:
+    """Run long-term equity MC; return equity/Sharpe/max_dd stats.
+
+    Horizon is set by ``n_days`` when provided, else ``years * 252``.
+    Also returns up to ``sample_paths`` padded equity paths for chart rendering.
+
+    trans_matrix / regime_pnl_pools:
+        When both are provided, daily P&L is sampled via Markov regime
+        switching (5x5 transition matrix + per-regime daily P&L pools).
+        ``predrawn_pnl`` takes precedence when supplied.
+
+    intraday_dd_factor (default 1.0):
+        Tightens the effective ruin floor (``ruin_pct *= intraday_dd_factor``)
+        to reflect intraday floating losses. Less impactful than for short-
+        horizon eval phases but kept for API consistency.
+    """
     daily_pnl = np.asarray(daily_pnl, dtype=float)
-    n_days    = years * 252
+    if n_days is None or n_days <= 0:
+        n_days = int(years * 252)
+    else:
+        n_days = int(n_days)
     rng       = _make_rng(seed)
-    ruin_floor = balance * (1.0 - ruin_pct)
+    effective_ruin_pct = ruin_pct * intraday_dd_factor
+    ruin_floor = balance * (1.0 - effective_ruin_pct)
+    use_markov = (trans_matrix is not None and regime_pnl_pools is not None)
     final_eqs = []
     max_dds   = []
     sharpes   = []
+    sample_idx = set(rng.choice(n_sims, size=min(sample_paths, n_sims), replace=False).tolist())
+    sampled_paths: list[list[float]] = []
     for _i in range(n_sims):
+        if _i and (_i % 500 == 0):
+            check_cancelled()
         equity   = balance
         peak     = equity
         path     = [equity]
         rets     = []
+        # Only burn an RNG draw when the Markov path will actually run; the
+        # predrawn-pnl path bypasses Markov, and the legacy unconditional
+        # ``integers`` call broke seed reproducibility for that case.
+        if use_markov and predrawn_pnl is None:
+            current_regime = int(rng.integers(0, 5))
         for _day in range(n_days):
             if predrawn_pnl is not None:
                 _d = min(_day, predrawn_pnl.shape[1] - 1)
                 pnl = float(predrawn_pnl[_i % len(predrawn_pnl), _d])
+            elif use_markov:
+                current_regime = int(rng.choice(5, p=trans_matrix[current_regime]))
+                pool = regime_pnl_pools.get(current_regime, [])
+                if len(pool) >= 5:
+                    pnl = float(rng.choice(pool))
+                else:
+                    pnl = float(rng.choice(daily_pnl))
             else:
                 pnl    = float(rng.choice(daily_pnl))
             ret    = pnl / equity if equity > 0 else 0.0
@@ -2347,11 +2744,23 @@ def run_mc_longterm(daily_pnl, *, balance=100_000, years=5,
             if v > peak_v: peak_v = v
             dd = (peak_v - v) / peak_v if peak_v > 0 else 0.0
             if dd > max_dd: max_dd = dd
-        dr = np.array(rets)
+        # Sharpe must use only returns from BEFORE ruin — never include the
+        # padded post-ruin flat segment, which would deflate volatility and
+        # perversely improve Sharpe for ruined paths. `rets` is appended
+        # once per traded day (and the loop breaks after appending on the
+        # ruin day), so slicing is implicit; we slice defensively to make
+        # the contract explicit and resilient to future loop edits.
+        n_real = len(rets)
+        dr = np.array(rets[:n_real])
         sharpe = float(dr.mean() / dr.std() * np.sqrt(252)) if (len(dr) > 1 and dr.std() > 0) else 0.0
         final_eqs.append(path[-1])
         max_dds.append(max_dd)
         sharpes.append(sharpe)
+        if _i in sample_idx:
+            # Pad to (n_days + 1) so all sampled paths are the same length.
+            if len(path) < n_days + 1:
+                path = path + [path[-1]] * (n_days + 1 - len(path))
+            sampled_paths.append([float(v) for v in path])
     fe = np.array(final_eqs)
     result: dict = {
         "pass_rate"        : float((fe > ruin_floor).mean()),
@@ -2362,6 +2771,13 @@ def run_mc_longterm(daily_pnl, *, balance=100_000, years=5,
         "median_sharpe"    : float(np.median(sharpes)),
         "annualized_return": float((np.median(fe) / balance) ** (1.0 / years) - 1),
         "benchmark"        : None,
+        "n_days"           : int(n_days),
+        "ruin_floor"       : float(ruin_floor),
+        "balance"          : float(balance),
+        "equity_paths"     : sampled_paths,
+        "max_dd"           : [float(v) for v in max_dds],
+        "final_equity"     : [float(v) for v in final_eqs],
+        "sharpe"           : [float(v) for v in sharpes],
     }
     if benchmark_ticker:
         try:

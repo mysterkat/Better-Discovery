@@ -45,3 +45,22 @@ class MCAdvancedRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     wait: bool = False
     wait_timeout_s: float = 30.0
+
+
+class McRunSummary(BaseModel):
+    """Lightweight projection of a saved/recent run for the list view.
+
+    Heavy fields (equity_curves, results_df, etc.) are stripped — the full
+    record is fetched separately via GET /mc/runs/{jobId}.
+    """
+    jobId: str
+    name: Optional[str] = None
+    timestamp: float
+    named: bool = False
+    params: dict[str, Any] = Field(default_factory=dict)
+    summary: Any = None
+
+
+class McRunSaveRequest(BaseModel):
+    """Body for POST /mc/runs/{jobId} — promote a job into the named save list."""
+    name: str = Field(..., min_length=1, max_length=120)
