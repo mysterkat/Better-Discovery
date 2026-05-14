@@ -5,9 +5,13 @@ import {
   getCurrentImport,
   getDefaultFolder,
   calcCandles,
+  installMt5Helper,
+  applyMt5Setup,
   type TfSpec,
   type Mt5CheckResult,
   type CurrentImport,
+  type Mt5InstallResult,
+  type Mt5ApplySetupResult,
 } from "../api/data";
 import { useJobs } from "../state/jobs";
 import JobProgress from "../components/JobProgress";
@@ -58,6 +62,11 @@ export default function DataImportTab() {
   const [starting, setStarting] = useState(false);
   const [currentImport, setCurrentImport] = useState<CurrentImport | null>(null);
   const [confirmReplace, setConfirmReplace] = useState(false);
+  // ── v0.7.0: BD indicator stack install + chart auto-setup ─────────────────
+  const [installState, setInstallState] = useState<Mt5InstallResult | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [setupState, setSetupState] = useState<Mt5ApplySetupResult | null>(null);
+  const [applying, setApplying] = useState(false);
 
   const job = useJobs((s) => (jobId ? s.jobs[jobId] : undefined));
   const setActiveJob = useJobs((s) => s.setActive);
@@ -95,10 +104,45 @@ export default function DataImportTab() {
     try {
       const r = await checkMt5();
       setMt5Status(r);
+      // v0.7.0: when MT5 connection succeeds for the first time in this
+      // session, kick off the BD indicator install in the background. The
+      // copy itself is idempotent (mtime-based) so re-runs are cheap.
+      if (r.ok && installState === null) {
+        void handleInstall();
+      }
     } catch (e) {
       setMt5Status({ ok: false, error: e instanceof Error ? e.message : String(e) });
     } finally {
       setChecking(false);
+    }
+  };
+
+  const handleInstall = async () => {
+    setInstalling(true);
+    try {
+      const r = await installMt5Helper();
+      setInstallState(r);
+    } catch (e) {
+      setInstallState({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  const handleApplySetup = async () => {
+    setApplying(true);
+    try {
+      const tfs = rows.map((r) => `${r.prefix.toUpperCase()}${r.time_value}`);
+      const r = await applyMt5Setup({
+        symbol,
+        timeframes: tfs,
+        wait_for_ack_s: 10.0,
+      });
+      setSetupState(r);
+    } catch (e) {
+      setSetupState({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setApplying(false);
     }
   };
 
@@ -246,6 +290,87 @@ export default function DataImportTab() {
           )}
         </div>
       </div>
+
+      {/* v0.7.0: BD indicator stack + chart auto-setup */}
+      {mt5Status?.ok && (
+        <div className="form-section">
+          <div className="section-label">BD Indicator Stack</div>
+          <div className="action-row" style={{ marginTop: 6, flexWrap: "wrap", gap: 8 }}>
+            <button
+              className="btn btn-secondary"
+              onClick={handleInstall}
+              disabled={installing}
+              title="Copy the 12 BD_*.mq5 indicators + BD_AutoSetup helper EA into the live MT5 install. Idempotent."
+            >
+              {installing ? "Installing…" : "⟳ Install / Update Indicators"}
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={handleApplySetup}
+              disabled={
+                applying ||
+                !installState?.ok ||
+                installState?.metaeditor !== "found" ||
+                !symbol.trim()
+              }
+              title="Tell BD_AutoSetup (must be attached to a chart in MT5) to open charts for the symbol+timeframes above with the BD indicator stack."
+            >
+              {applying ? "Applying…" : "↻ Open Charts in MT5"}
+            </button>
+          </div>
+
+          {installState && (
+            <div style={{ marginTop: 8 }}>
+              {!installState.ok && (
+                <span className="status-badge status-badge--err">
+                  ✗ Install failed — {installState.error}
+                </span>
+              )}
+              {installState.ok && (
+                <>
+                  <span className="status-badge status-badge--ok">
+                    ● Indicators installed
+                    {installState.indicators &&
+                      ` (${installState.indicators.copied.length} copied, ${installState.indicators.skipped.length} unchanged)`}
+                  </span>
+                  {installState.metaeditor === "missing" && (
+                    <div className="field-hint" style={{ marginTop: 6, color: "var(--warn-text, #c08020)" }}>
+                      ⚠️ MetaEditor not found next to terminal64.exe. Open MT5
+                      → press F4 once so MetaEditor compiles the freshly
+                      installed BD_*.mq5 sources, then return here.
+                    </div>
+                  )}
+                  {installState.next_steps?.map((s, i) => (
+                    <div key={i} className="field-hint" style={{ marginTop: 6 }}>
+                      → {s}
+                    </div>
+                  ))}
+                  {installState.compiled?.some((c) => !c.ok) && (
+                    <div className="field-hint" style={{ marginTop: 6, color: "var(--err-text, #c04040)" }}>
+                      ⚠️ {installState.compiled.filter((c) => !c.ok).map((c) => c.name).join(", ")} failed
+                      to compile. Open MetaEditor and check the log.
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {setupState && (
+            <div style={{ marginTop: 8 }}>
+              {setupState.ok && setupState.acked ? (
+                <span className="status-badge status-badge--ok">
+                  ● {setupState.ack?.opened.length ?? 0} chart(s) opened in MT5
+                </span>
+              ) : (
+                <span className="status-badge status-badge--err">
+                  ✗ {setupState.error}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Symbol */}
       <div className="form-section">
