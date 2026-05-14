@@ -192,6 +192,24 @@ SCORE_W_RR              = 0.25
 SCORE_W_STAB            = 0.15
 SCORE_WILSON_CONFIDENCE = 0.85
 
+# ── v0.6.0: Target-driven scoring ────────────────────────────────────────────
+# When ENABLE_TARGET_SCORING is True, _score_genetic switches from "maximise
+# everything" mode to "hit specific targets". Below target → quadratic penalty
+# pulls the GA up hard. At target → full reward. Above target → tiny log bonus
+# so the GA doesn't sacrifice another objective to push one metric higher.
+#
+# The EXCESS_BONUS_WEIGHT knob controls how strict the targeting is:
+#   0.0  → strict, no benefit to exceeding (GA stops climbing once targets hit)
+#   0.1  → mild (default) — exceed only when it's free
+#   0.3  → lenient — modest excess reward
+#   1.0  → legacy maximise-everything behaviour
+ENABLE_TARGET_SCORING   = True
+TARGET_WR_PCT           = 55.0   # win-rate goal (%)
+TARGET_PF               = 1.5    # profit-factor goal
+TARGET_RR               = 1.3    # R:R goal (avg payout / risk)
+TARGET_STABILITY        = 0.65   # time-consistency × distribution goal (0..1)
+EXCESS_BONUS_WEIGHT     = 0.1
+
 # Quality filters
 MIN_FREQ_PER_DAY        = 0.3
 MIN_WIN_RATE            = 48.0
@@ -1218,35 +1236,93 @@ def trade_distribution_score(trades_df,train_days):
     cv=counts.std()/max(counts.mean(),1)
     return max(0.0,min(1.0,1.0-cv/3.0))
 
-def score_rule(wins,losses,avg_rr,trades_df,train_days):
+def _target_score(actual: float, target: float, weight: float,
+                  excess_w: float = None) -> float:
+    """v0.6.0: asymmetric target-distance score for one objective.
+
+    * actual < target: quadratic penalty pulls the GA up hard.
+      score = weight * (actual / target)^2
+    * actual >= target: full reward + tiny log-scaled excess bonus so the GA
+      doesn't waste effort chasing a metric beyond its target unless it can
+      do so without sacrificing other objectives.
+      score = weight * (1.0 + excess_w * log(1 + (actual - target)))
+
+    ``excess_w`` defaults to the module-level ``EXCESS_BONUS_WEIGHT``. Set
+    excess_w=0 for strict targets, or 1.0 to recover legacy "max everything"
+    behaviour.
     """
-    Additive weighted scoring:
-    - Wilson WR (auto-penalises small N)
-    - Normalised profit factor
-    - RR as multiple of break-even
-    - Time stability
-    Combined additively so no single component collapses the score.
+    import math
+    if excess_w is None:
+        excess_w = globals().get("EXCESS_BONUS_WEIGHT", 0.1)
+    if target <= 0:
+        # No target → fall back to capped maximisation (legacy behaviour)
+        return weight * min(actual / max(target, 0.01), 2.0)
+    if actual >= target:
+        return weight * (1.0 + excess_w * math.log1p(actual - target))
+    return weight * ((actual / target) ** 2)
+
+
+def score_rule(wins, losses, avg_rr, trades_df, train_days):
     """
-    total=wins+losses
-    if total<5: return 0.0
+    Scoring is one of two modes (controlled by ``ENABLE_TARGET_SCORING``):
 
-    wr=wins/total
-    # dynamic break-even check
-    breakeven=((1-wr)/wr) if wr>0 else 999.0
-    if avg_rr<breakeven: return 0.0
+    TARGET MODE (default, v0.6.0+):
+      Each objective is scored relative to its user-set target. Below target
+      → quadratic penalty; at target → full credit; above target → tiny
+      log-scaled bonus (capped by EXCESS_BONUS_WEIGHT). The GA actively
+      evolves toward the target values rather than blindly maximising.
 
-    q_wr=wilson_lower(wins,total)
-    gl=losses; gw=wins*avg_rr if avg_rr>0 else 0
-    pf=gw/gl if gl>0 else 2.0
-    q_pf=min(pf,4.0)/4.0
-    q_rr=min(avg_rr/max(breakeven,0.01),2.0)/2.0
-    q_stab=time_consistency_score(trades_df)
-    q_dist=trade_distribution_score(trades_df,train_days)
+    MAXIMISE MODE (legacy, set ENABLE_TARGET_SCORING=False):
+      The original additive weighted scoring — Wilson WR, normalised PF,
+      RR as multiple of break-even, time stability — combined additively.
+      Behaviour identical to v0.5.0 and earlier.
+    """
+    total = wins + losses
+    if total < 5:
+        return 0.0
 
-    return (SCORE_W_WR*q_wr +
-            SCORE_W_PF*q_pf +
-            SCORE_W_RR*q_rr +
-            SCORE_W_STAB*q_stab*q_dist)
+    wr = wins / total
+    # Dynamic break-even check is a HARD constraint in both modes — if avg_rr
+    # doesn't cover the win-rate's break-even cost, the pattern is unprofitable
+    # by definition and gets killed.
+    breakeven = ((1 - wr) / wr) if wr > 0 else 999.0
+    if avg_rr < breakeven:
+        return 0.0
+
+    # Pre-compute the four objective values (same in both modes).
+    gl = losses
+    gw = wins * avg_rr if avg_rr > 0 else 0
+    pf = gw / gl if gl > 0 else 2.0
+    q_stab = time_consistency_score(trades_df)
+    q_dist = trade_distribution_score(trades_df, train_days)
+    stability = q_stab * q_dist
+
+    use_targets = bool(globals().get("ENABLE_TARGET_SCORING", True))
+    if use_targets:
+        # v0.6.0 target-driven mode. Convert each objective to its raw scale
+        # (WR as %, PF as ratio, RR as ratio, stability as 0..1) and score
+        # against the target.
+        wr_pct  = wr * 100.0
+        rr_val  = avg_rr / max(breakeven, 0.01)  # multiple of break-even
+        tgt_wr  = float(globals().get("TARGET_WR_PCT",   55.0))
+        tgt_pf  = float(globals().get("TARGET_PF",        1.5))
+        tgt_rr  = float(globals().get("TARGET_RR",        1.3))
+        tgt_st  = float(globals().get("TARGET_STABILITY", 0.65))
+        return (
+            _target_score(wr_pct,    tgt_wr, SCORE_W_WR) +
+            _target_score(pf,        tgt_pf, SCORE_W_PF) +
+            _target_score(rr_val,    tgt_rr, SCORE_W_RR) +
+            _target_score(stability, tgt_st, SCORE_W_STAB)
+        )
+
+    # Legacy maximise mode.
+    q_wr = wilson_lower(wins, total)
+    q_pf = min(pf, 4.0) / 4.0
+    q_rr = min(avg_rr / max(breakeven, 0.01), 2.0) / 2.0
+    return (SCORE_W_WR * q_wr +
+            SCORE_W_PF * q_pf +
+            SCORE_W_RR * q_rr +
+            SCORE_W_STAB * stability)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BACKTEST WORKER
@@ -2619,7 +2695,7 @@ def main():
              "Validate (test)","Quality Analysis","Export"]
     _sn=[0]
     def _stage(name):
-        _sn[0]+=1; print(f"\n[{_sn[0]}/{len(_STAGES)}] {name}")
+        _sn[0]+=1; print(f"\n[{_sn[0]}/{len(_STAGES)}] {name}", flush=True)
 
     print(f"\n{'='*65}")
     print(f"  PATTERN DISCOVERY ENGINE  v6")

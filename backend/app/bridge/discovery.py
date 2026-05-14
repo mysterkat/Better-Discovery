@@ -198,12 +198,35 @@ PARAM_META: dict[str, ParamMeta] = {
     "DISCRIM_MIN_ACCURACY":  ParamMeta("Discriminator Min Acc","Bidirectional", "float",
                                         "Min accuracy for direction classifier", min=0.5, max=0.9, step=0.01),
     # ── Scoring ─────────────────────────────────────────────────────────────
+    # v0.6.0: GA now hill-climbs toward user-set targets instead of blindly
+    # maximising. Below target → quadratic penalty. At target → full credit.
+    # Above target → tiny log bonus capped by EXCESS_BONUS_WEIGHT so the GA
+    # won't sacrifice one objective to push another past its target.
+    "ENABLE_TARGET_SCORING": ParamMeta("Target-Driven Scoring", "Scoring", "bool",
+                                        "When on (recommended), the GA evolves toward your target values "
+                                        "instead of blindly maximising. Turn off to use legacy v0.5 behaviour."),
+    "TARGET_WR_PCT":         ParamMeta("Target: Win Rate %",   "Scoring", "float",
+                                        "GA will aim for this win-rate. Exceeding is OK if "
+                                        "it costs nothing on other objectives.", min=40.0, max=85.0, step=0.5),
+    "TARGET_PF":             ParamMeta("Target: Profit Factor","Scoring", "float",
+                                        "GA aims for this profit factor.", min=1.1, max=4.0, step=0.05),
+    "TARGET_RR":             ParamMeta("Target: R:R",          "Scoring", "float",
+                                        "GA aims for this R:R as multiple of break-even.",
+                                        min=0.8, max=3.0, step=0.05),
+    "TARGET_STABILITY":      ParamMeta("Target: Stability",    "Scoring", "float",
+                                        "GA aims for this time-consistency × distribution score (0..1).",
+                                        min=0.3, max=0.95, step=0.05),
+    "EXCESS_BONUS_WEIGHT":   ParamMeta("Excess Bonus Weight",  "Scoring", "float",
+                                        "How much the GA rewards exceeding targets. 0 = strict, "
+                                        "0.1 = mild (recommended), 1.0 = legacy max-everything.",
+                                        min=0.0, max=1.0, step=0.05),
     "SCORE_W_WR":            ParamMeta("Weight: Win Rate",     "Scoring", "float", min=0.0, max=1.0, step=0.05),
     "SCORE_W_PF":            ParamMeta("Weight: Profit Factor","Scoring", "float", min=0.0, max=1.0, step=0.05),
     "SCORE_W_RR":            ParamMeta("Weight: Risk/Reward",  "Scoring", "float", min=0.0, max=1.0, step=0.05),
     "SCORE_W_STAB":          ParamMeta("Weight: Stability",    "Scoring", "float", min=0.0, max=1.0, step=0.05),
     "SCORE_WILSON_CONFIDENCE":ParamMeta("Wilson Confidence",   "Scoring", "float",
-                                         "Confidence level for Wilson score interval", min=0.5, max=0.99, step=0.01),
+                                         "Confidence level for Wilson score interval (used only when "
+                                         "Target-Driven Scoring is OFF)", min=0.5, max=0.99, step=0.01),
     # ── Quality Filters ─────────────────────────────────────────────────────
     "MIN_FREQ_PER_DAY":      ParamMeta("Min Freq/Day",         "Quality Filters", "float",
                                         "Min pattern occurrences per trading day", min=0.05, max=5.0, step=0.05),
@@ -545,6 +568,13 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
             "sl_pct":          _jsonify_val(r.get("sl_pct", 0)),
             "tp_pct":          _jsonify_val(r.get("tp_pct", 0)),
             "set_file":        set_path,
+            # v0.6.0: Rule conditions for the UI's "Indicators" table. Each
+            # rule is {col_name: (lower, upper)} mapping a feature/indicator
+            # to the inclusive range that must hold for the pattern to fire.
+            "genetic_rule":    {
+                str(col): [float(lo), float(hi)]
+                for col, (lo, hi) in (r.get("genetic_rule") or {}).items()
+            } if isinstance(r.get("genetic_rule"), dict) else {},
         })
 
     # Aggregate overview stats across all surviving patterns — handy

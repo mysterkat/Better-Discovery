@@ -124,6 +124,10 @@ MC_PARAM_META: dict[str, MCParamMeta] = {
                                        "Min trading days per payout cycle", min=1, max=60, step=1),
     "FD_BALANCE_RESET":   MCParamMeta("Balance Reset",      "Funded", "bool",
                                        "Reset balance to start after each payout"),
+    "FD_COMPOUND_PROFITS":MCParamMeta("Compound Profits",   "Funded", "bool",
+                                       "v0.6.0: leave the trader's share in the account (scaling-account model). "
+                                       "Overrides Balance Reset when on. Floor ratchets up to a fresh % "
+                                       "of the new equity. Default OFF."),
     "FD_MAX_SIM_DAYS":    MCParamMeta("Max Sim Days",       "Funded", "int", min=30, max=1000, step=10),
     # ── Long-term ───────────────────────────────────────────────────────────
     "LT_DAYS":            MCParamMeta("Sim Days",           "Long-term", "int",
@@ -217,6 +221,7 @@ _FD_KEY_MAP = {
     "payout_schedule":  "payout_cadence_days",
     "min_days_payout":  "min_days_payout",
     "balance_reset":    "balance_reset",
+    "compound_profits": "compound_profits",
     "max_sim_days":     "max_days",
 }
 _LT_KEY_MAP = {
@@ -379,6 +384,27 @@ def _wilson_ci(passed: int, total: int, z: float = 1.96) -> tuple[float, float]:
     return (low, high)
 
 
+def _sweep_worker(fn_name: str, args: tuple, kwargs: dict):
+    """Worker entry point for parallel sweep helpers (v0.6.0).
+
+    Must be a top-level function (picklable) so ProcessPoolExecutor can spawn
+    it. Re-imports mc_funded_test on first call per worker — the embedded
+    Python sidecar's sys.path already includes ``backend/toolkit`` (set up by
+    ``app.paths``), so the import resolves the same module the main process
+    uses. Returns the raw helper output; the parent jsonifies.
+    """
+    # Re-add the toolkit dir defensively in case the worker forked before
+    # app.paths had a chance to run (only matters on Windows spawn mode).
+    import sys, os
+    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    toolkit = os.path.join(here, "toolkit")
+    if os.path.isdir(toolkit) and toolkit not in sys.path:
+        sys.path.insert(0, toolkit)
+    import mc_funded_test as _mc
+    fn = getattr(_mc, fn_name)
+    return fn(*args, **kwargs)
+
+
 def _kelly_verdict(k: float) -> str:
     if k <= 0:
         return "negative"
@@ -535,6 +561,7 @@ def run_all_phases(
     fd["payout_cadence_days"]  = int(fd_kwargs.get("payout_cadence_days", 30))
     fd["profit_split"]         = float(fd_kwargs.get("profit_split", 0.80))
     fd["balance_reset"]        = bool(fd_kwargs.get("balance_reset", True))
+    fd["compound_profits"]     = bool(fd_kwargs.get("compound_profits", False))
 
     # ── Earnings-per-payout enrichment (#5 + #6 — v0.4.0.1) ────────────────
     # avg_earnings_per_payout: sum(total_earnings) / sum(payout_count) across
@@ -601,21 +628,9 @@ def run_all_phases(
     }
 
     # ── Tier 3 helpers (each isolated; failure must not poison the whole run) ──
-    # Cap sweep n_sims at 1000 (v0.4.0.1 — was 2000) — ~30% wall-time savings on
-    # the silent post-Phase-2 portion for negligible loss of confidence on the
-    # secondary charts (they're decision aids, not headline stats).
+    # Cap sweep n_sims at 1000 — for the secondary charts (decision aids), the
+    # confidence loss vs a 10k run is negligible.
     SWEEP_N_SIMS = min(n_sims, 1000)
-
-    # Lazy cancel-check + progress logger. The sidecar prints these so the
-    # frontend's JobProgress can see the SWEEP stage label even though the
-    # helpers themselves don't emit MC_SIM lines.
-    def _sweep_step(label: str) -> None:
-        print(f"[SWEEP] {label}", flush=True)
-        try:
-            from app.jobs.runners import check_cancelled
-            check_cancelled()
-        except ImportError:
-            pass
 
     p1_subset = {k: v for k, v in p1_kwargs.items()
                  if k in ("balance", "profit_pct", "daily_dd_pct",
@@ -623,67 +638,88 @@ def run_all_phases(
     p1_subset.setdefault("n_sims", SWEEP_N_SIMS)
     p1_subset.setdefault("seed", seed)
 
-    _sweep_step("lot_size_sweep (6 lot multipliers)")
-    try:
-        sweep_df = mc.lot_size_sweep(
-            daily_pnl, base_lot=1.0,
-            lots=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
-            **p1_subset,
-        )
-        result["lot_sweep"] = _jsonify(sweep_df)
-    except Exception as e:
-        result["lot_sweep"] = {"error": str(e)}
+    # v0.6.0: parallelize the 4 heavy sweeps via ProcessPoolExecutor. Kelly is
+    # analytic (~ms) so we keep it inline. Each task is a (name, callable,
+    # kwargs) tuple. The workers DON'T need to share state — each sweep is
+    # fully self-contained given daily_pnl + its kwargs. Cap at 4 workers
+    # because there are 4 sweeps to run; more workers wouldn't help.
+    sweep_tasks: list[tuple[str, dict]] = [
+        ("lot_sweep", {
+            "fn":   "lot_size_sweep",
+            "args": (daily_pnl,),
+            "kwargs": dict(base_lot=1.0, lots=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
+                            **p1_subset),
+        }),
+        ("payout_cadence_sweep", {
+            "fn":   "payout_cadence_optimizer",
+            "args": (daily_pnl,),
+            "kwargs": dict(balance=fd_balance, cadences=(14, 30, 60),
+                            months=12, n_sims=SWEEP_N_SIMS, seed=seed),
+        }),
+        ("ruin_horizons", {
+            "fn":   "risk_of_ruin_horizons",
+            "args": (daily_pnl,),
+            "kwargs": dict(balance=lt_balance,
+                            horizons_days=(30, 90, 180, 365, 730, 1825),
+                            ruin_dd_pct=float(lt_kwargs.get("ruin_pct", 0.20)),
+                            n_sims=min(SWEEP_N_SIMS, lt_n_sims), seed=seed),
+        }),
+        ("funded_lifetime", {
+            "fn":   "funded_lifetime",
+            "args": (daily_pnl,),
+            "kwargs": dict(balance=fd_balance, max_months=36,
+                            n_sims=SWEEP_N_SIMS, seed=seed),
+        }),
+    ]
 
-    _sweep_step("payout_cadence_optimizer (3 cadences)")
-    try:
-        cad_df = mc.payout_cadence_optimizer(
-            daily_pnl,
-            balance=fd_balance,
-            cadences=(14, 30, 60),
-            months=12,
-            n_sims=SWEEP_N_SIMS,
-            seed=seed,
-        )
-        result["payout_cadence_sweep"] = _jsonify(cad_df)
-    except Exception as e:
-        result["payout_cadence_sweep"] = {"error": str(e)}
-
-    _sweep_step("kelly_fraction (analytic)")
+    # Kelly first (analytic, no point parallelizing).
+    print("[SWEEP] kelly_fraction (analytic)", flush=True)
     try:
         result["kelly"] = _jsonify(mc.kelly_fraction(daily_pnl))
     except Exception as e:
         result["kelly"] = {"error": str(e)}
 
-    _sweep_step("risk_of_ruin_horizons (6 horizons)")
+    print(f"[SWEEP] launching {len(sweep_tasks)} parallel sweeps "
+          f"(lot_size, payout_cadence, ruin_horizons, funded_lifetime)", flush=True)
     try:
-        # Toolkit signature uses ``horizons_days`` + ``ruin_dd_pct`` (not the
-        # hypothetical ``horizons``/``balance``-only form). Map accordingly.
-        ror_df = mc.risk_of_ruin_horizons(
-            daily_pnl,
-            balance=lt_balance,
-            horizons_days=(30, 90, 180, 365, 730, 1825),
-            ruin_dd_pct=float(lt_kwargs.get("ruin_pct", 0.20)),
-            n_sims=min(SWEEP_N_SIMS, lt_n_sims),
-            seed=seed,
-        )
-        result["ruin_horizons"] = _jsonify(ror_df)
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        import os as _os
+        # max_workers = min(cpu_count, sweep_count) — Windows spawn overhead is
+        # high (~500ms per worker) so anything past 4 is waste here.
+        max_workers = min(len(sweep_tasks), max(2, (_os.cpu_count() or 4) - 1))
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futures = {
+                ex.submit(_sweep_worker, t["fn"], t["args"], t["kwargs"]): name
+                for name, t in sweep_tasks
+            }
+            for fut in as_completed(futures):
+                key = futures[fut]
+                try:
+                    result[key] = _jsonify(fut.result())
+                    print(f"[SWEEP] OK {key}", flush=True)
+                except Exception as e:
+                    result[key] = {"error": str(e)}
+                    print(f"[SWEEP] FAIL {key}: {e}", flush=True)
+                # Honor cancel between sweeps even though we can't cancel
+                # an already-running worker mid-loop.
+                try:
+                    from app.jobs.runners import check_cancelled
+                    check_cancelled()
+                except ImportError:
+                    pass
     except Exception as e:
-        result["ruin_horizons"] = {"error": str(e)}
+        # Fall back to serial if process-pool itself crashes — better to be
+        # slow than to lose all sweep data.
+        print(f"[SWEEP] parallel pool failed, falling back to serial: {e}", flush=True)
+        for name, t in sweep_tasks:
+            if name in result:
+                continue
+            try:
+                result[name] = _jsonify(_sweep_worker(t["fn"], t["args"], t["kwargs"]))
+            except Exception as e:
+                result[name] = {"error": str(e)}
 
-    _sweep_step("funded_lifetime (36 months)")
-    try:
-        # ``funded_lifetime`` toolkit signature: balance, max_months, n_sims, seed.
-        result["funded_lifetime"] = _jsonify(mc.funded_lifetime(
-            daily_pnl,
-            balance=fd_balance,
-            max_months=36,
-            n_sims=SWEEP_N_SIMS,
-            seed=seed,
-        ))
-    except Exception as e:
-        result["funded_lifetime"] = {"error": str(e)}
-
-    _sweep_step("verdict block + finalize")
+    print("[SWEEP] verdict block + finalize", flush=True)
 
     # ── Verdict block ────────────────────────────────────────────────────────
     challenge_fee = float(global_params.get("challenge_fee", 0.0))

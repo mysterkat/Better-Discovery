@@ -52,6 +52,15 @@ fn spawn_child(app: &AppHandle) -> Result<(), String> {
         .ok_or_else(|| format!("backend dir not found (root={})", root.display()))?;
 
     let python = resolve_python_exe(&root, resource_dir.as_deref());
+
+    // v0.6.0: refresh embedded-Python deps when backend/requirements.txt
+    // has changed since the last successful install. Tracks a fingerprint
+    // file next to the Python interpreter — pure-stdlib (no sha crate).
+    // Silently best-effort: pip failure (offline, etc.) doesn't block boot.
+    if let Err(e) = ensure_deps_synced(&python, &backend_dir) {
+        eprintln!("[sidecar] dep refresh skipped: {e}");
+    }
+
     let port = reserve_port()?;
 
     eprintln!(
@@ -241,6 +250,75 @@ fn monitor(app: AppHandle) {
         }
     }
 }
+
+/// v0.6.0: Detect requirements.txt change and re-sync embedded Python deps.
+///
+/// Uses (file len, mtime-secs) as a cheap fingerprint stored in
+/// ``<python_dir>/.requirements_fingerprint``. When the fingerprint mismatches
+/// (or is absent) we run ``python -m pip install -U -r requirements.txt`` and
+/// write the new fingerprint. Failure is non-fatal — pip may not have
+/// internet, and the rest of the app boots fine; consumers of optional deps
+/// (yfinance for ^GSPC benchmark, etc.) already fall back gracefully.
+fn ensure_deps_synced(python: &std::path::Path, backend_dir: &std::path::Path) -> Result<(), String> {
+    use std::time::UNIX_EPOCH;
+
+    let req_file = backend_dir.join("requirements.txt");
+    if !req_file.is_file() {
+        return Ok(()); // nothing to sync
+    }
+    let meta = std::fs::metadata(&req_file)
+        .map_err(|e| format!("stat requirements.txt: {e}"))?;
+    let len  = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let fingerprint = format!("{len}-{mtime}");
+
+    let py_dir = python
+        .parent()
+        .ok_or_else(|| "python has no parent dir".to_string())?;
+    let sentinel = py_dir.join(".requirements_fingerprint");
+
+    let cached = std::fs::read_to_string(&sentinel).ok().unwrap_or_default();
+    if cached.trim() == fingerprint {
+        return Ok(()); // up to date
+    }
+
+    eprintln!(
+        "[sidecar] requirements.txt changed (cached={} new={}); syncing deps...",
+        if cached.is_empty() { "<none>" } else { cached.trim() },
+        fingerprint,
+    );
+
+    let mut cmd = Command::new(python);
+    cmd.current_dir(backend_dir)
+        .args(["-m", "pip", "install", "--disable-pip-version-check",
+               "--upgrade", "-r", "requirements.txt"])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let status = cmd.status().map_err(|e| format!("spawn pip: {e}"))?;
+    if !status.success() {
+        return Err(format!("pip install exited with {status}"));
+    }
+
+    // Only update the sentinel on success — if pip failed, we'll retry next
+    // boot. Cheap.
+    if let Err(e) = std::fs::write(&sentinel, &fingerprint) {
+        eprintln!("[sidecar] could not write fingerprint sentinel: {e}");
+    }
+    eprintln!("[sidecar] deps synced");
+    Ok(())
+}
+
 
 /// Kill the sidecar if it's still running. Called on window/app close.
 pub fn shutdown(state: &AppState) {

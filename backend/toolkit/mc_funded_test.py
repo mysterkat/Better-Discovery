@@ -536,7 +536,9 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
     _trailing = dd_style in ("trailing_eod", "trailing_intraday")
     _keep_n   = max(0, int(keep_curves))
 
-    _report_every = max(1, n_sims // 50)   # emit ~50 progress ticks per phase
+    # v0.6.0: ~200 progress ticks per phase (4× finer than before) for a
+    # smoother progress bar. Cheap — just a print every ~50 sims at default n.
+    _report_every = max(1, n_sims // 200)
     for _i in range(n_sims):
         if _i % _report_every == 0:
             print(f"MC_SIM {_i}/{n_sims} {phase_label}", flush=True)
@@ -820,7 +822,7 @@ def simulate_funded(p2, df, trans_matrix=None, regime_pnl_pools=None):
 
     print("[INFO] Running", n_funded, "Funded simulations ...")
 
-    _report_every_fd = max(1, n_funded // 50)
+    _report_every_fd = max(1, n_funded // 200)   # v0.6.0: finer ticks
     for _fi in range(n_funded):
         if _fi % _report_every_fd == 0:
             print(f"MC_SIM {_fi}/{n_funded} Funded", flush=True)
@@ -2400,6 +2402,7 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
                      months=12, n_sims=10_000, rng=None, predrawn_pnl=None,
                      payout_mode="schedule", payout_threshold=0.05,
                      profit_split=0.80, balance_reset=True,
+                     compound_profits=False,
                      min_days_payout=4, max_days=None,
                      trans_matrix=None, regime_pnl_pools=None,
                      intraday_dd_factor=1.0,
@@ -2423,6 +2426,16 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
                               The total floor in this mode is a TRAILING
                               high-water rule: it only ratchets UP as the
                               account grows, and never moves back down.
+    compound_profits (v0.6.0, default False):
+                     When True, the trader's share is NOT withdrawn — the
+                     full profit_above stays in the account. Models a scaling
+                     account where you reinvest payouts to grow size over
+                     time. Floor ratchets up to a fixed % of the new equity.
+                     OVERRIDES balance_reset when True (they are mutually
+                     exclusive — compound means "never withdraw").
+                     ``total_earnings`` still tracks the *notional* trader
+                     share so KPIs continue to make sense (Avg ROI, Expected
+                     $/month etc.).
 
     trans_matrix / regime_pnl_pools:
         When both are provided, daily P&L is sampled via Markov regime
@@ -2560,7 +2573,15 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
                 payout_count   += 1
                 if first_payout_day is None:
                     first_payout_day = days_active
-                if balance_reset:
+                if compound_profits:
+                    # v0.6.0 compound mode: nothing withdrawn — full profit
+                    # stays in the account. Floor ratchets up to a fresh % of
+                    # the new equity (trailing high-water like balance_reset
+                    # =False, but on the full equity, not after a withdrawal).
+                    candidate = equity * (1.0 - total_dd_pct)
+                    if candidate > current_floor:
+                        current_floor = candidate
+                elif balance_reset:
                     equity        = balance
                     current_floor = total_floor
                 else:
@@ -2647,6 +2668,7 @@ def run_mc_funded(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
                   months=12, n_sims=10_000, seed=None, predrawn_pnl=None,
                   payout_mode="schedule", payout_threshold=0.05,
                   profit_split=0.80, balance_reset=True,
+                  compound_profits=False,
                   min_days_payout=4, max_days=None,
                   trans_matrix=None, regime_pnl_pools=None,
                   intraday_dd_factor=1.0,
@@ -2665,6 +2687,7 @@ def run_mc_funded(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
         months=months, n_sims=n_sims, rng=rng, predrawn_pnl=predrawn_pnl,
         payout_mode=payout_mode, payout_threshold=payout_threshold,
         profit_split=profit_split, balance_reset=balance_reset,
+        compound_profits=compound_profits,
         min_days_payout=min_days_payout, max_days=max_days,
         trans_matrix=trans_matrix, regime_pnl_pools=regime_pnl_pools,
         intraday_dd_factor=intraday_dd_factor,

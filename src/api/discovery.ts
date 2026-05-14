@@ -73,6 +73,9 @@ export interface PatternSummary {
   sl_pct: number;
   tp_pct: number;
   set_file: string | null;
+  /** v0.6.0: rule conditions { indicator_name: [lower_bound, upper_bound] }.
+   *  Used by the results UI to render an Indicators table per pattern. */
+  genetic_rule?: Record<string, [number, number]>;
 }
 
 export interface DiscoveryOverview {

@@ -349,6 +349,33 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
                       <div><span className="kv-key">SL</span><span>{fmt(p.sl_pct * 100, 3)}%</span></div>
                       <div><span className="kv-key">TP</span><span>{fmt(p.tp_pct * 100, 3)}%</span></div>
                       <div className="full-row"><span className="kv-key">.set file</span><span className="mono small">{p.set_file ?? "—"}</span></div>
+                      {p.genetic_rule && Object.keys(p.genetic_rule).length > 0 && (
+                        <div className="full-row" style={{ marginTop: 10 }}>
+                          <span className="kv-key" style={{ display: "block", marginBottom: 4 }}>
+                            Indicators ({Object.keys(p.genetic_rule).length})
+                          </span>
+                          <table className="indicators-table">
+                            <thead>
+                              <tr>
+                                <th style={{ width: 32 }} className="num">#</th>
+                                <th>Indicator</th>
+                                <th className="num">Min</th>
+                                <th className="num">Max</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {Object.entries(p.genetic_rule).map(([name, [lo, hi]], i) => (
+                                <tr key={name}>
+                                  <td className="num">{i + 1}</td>
+                                  <td className="mono">{name}</td>
+                                  <td className="num">{fmt(lo, 3)}</td>
+                                  <td className="num">{fmt(hi, 3)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
                       {p.marginal && (
                         <div className="full-row marginal-tag">
                           ⚠ Marginal — softed by{" "}

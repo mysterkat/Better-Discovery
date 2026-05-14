@@ -1303,6 +1303,50 @@ kbd {
 }
 .pd-reset-btn:hover { color: var(--accent); background: var(--bg3); }
 
+/* v0.6.0: per-group reset (↺ in accordion header) and 🎲 random-seed button.
+   Both inherit the inline icon look of .pd-reset-btn — no big white box. */
+.param-group-reset-btn {
+  background: none;
+  border: none;
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  margin-left: 6px;
+  border-radius: 4px;
+  line-height: 1;
+  transition: color 0.12s, background 0.12s;
+  flex-shrink: 0;
+  font-family: inherit;
+}
+.param-group-reset-btn:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--bg3);
+}
+.param-group-reset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.seed-random-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 9px;
+  margin-left: 8px;
+  border-radius: 5px;
+  line-height: 1.2;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+  font-family: inherit;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.seed-random-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent2);
+  background: var(--bg3);
+}
+.seed-random-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
 .pd-input-custom {
   border-color: var(--accent) !important;
   box-shadow: 0 0 0 1px var(--accent);
@@ -1800,4 +1844,44 @@ kbd {
   color: var(--text);
   z-index: 1000;
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+
+/* v0.6.0: Indicators table inside expanded pattern row */
+.indicators-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-top: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.indicators-table thead { background: var(--bg2); }
+.indicators-table th {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text2);
+  padding: 5px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.indicators-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+.indicators-table tbody tr:last-child td { border-bottom: none; }
+.indicators-table tbody tr:hover { background: var(--bg3); }
+.indicators-table th.num,
+.indicators-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.indicators-table td.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
 }
