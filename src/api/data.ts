@@ -90,3 +90,50 @@ export async function importCsv(path: string): Promise<DataPreview> {
 export async function getPreview(id: string): Promise<DataPreview> {
   return api<DataPreview>("GET", `/data/preview/${id}`);
 }
+
+// ── v0.7.0: MT5 indicator install + auto-chart setup ─────────────────────────
+
+export interface Mt5InstallResult {
+  ok: boolean;
+  error?: string;
+  mt5_paths?: { install: string; data: string; common: string };
+  indicators?: { copied: string[]; skipped: string[] };
+  helper_ea?: { copied: boolean; path: string };
+  compiled?: { name: string; ok: boolean; log: string }[];
+  metaeditor?: "found" | "missing";
+  next_steps?: string[];
+}
+
+export interface Mt5ApplySetupRequest {
+  symbol: string;
+  timeframes: string[];
+  /** Subset of {BD_PinBar, BD_MacdNorm, …} — undefined = all 12 */
+  indicators?: string[];
+  /** HTF used by BD_HtfDiv (default "M15") */
+  htf_for_div?: string;
+  /** Seconds to wait for the helper EA's ack file (default 10) */
+  wait_for_ack_s?: number;
+}
+
+export interface Mt5SetupAck {
+  version_acked: number;
+  timestamp: number;
+  opened: { symbol: string; timeframe: string; chart_id: number; ok: boolean }[];
+  errors: string[];
+}
+
+export interface Mt5ApplySetupResult {
+  ok: boolean;
+  error?: string;
+  config?: { version: number; config_path: string };
+  ack?: Mt5SetupAck;
+  acked?: boolean;
+}
+
+export async function installMt5Helper(): Promise<Mt5InstallResult> {
+  return api<Mt5InstallResult>("POST", "/data/mt5/install-helper");
+}
+
+export async function applyMt5Setup(req: Mt5ApplySetupRequest): Promise<Mt5ApplySetupResult> {
+  return api<Mt5ApplySetupResult>("POST", "/data/mt5/apply-setup", req);
+}

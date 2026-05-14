@@ -16,13 +16,25 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from pydantic import BaseModel, Field
+
 from ..bridge import data_import as di_bridge
 from ..bridge import mt5_import as mt5_bridge
+from ..bridge import mt5_setup as mt5_setup_bridge
 from ..jobs.manager import JOBS
 from ..jobs.runners import run_in_thread
 from ..paths import USER_DATA
 from ..schemas.common import JobRef
 from ..schemas.discovery import DataImportRequest, MT5FetchRequest
+
+
+# ── v0.7.0: MT5 indicator install + chart auto-setup payloads ────────────────
+class MT5ApplySetupRequest(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=32)
+    timeframes: list[str] = Field(..., min_length=1)
+    indicators: list[str] | None = None
+    htf_for_div: str = "M15"
+    wait_for_ack_s: float = 10.0
 
 router = APIRouter()
 
@@ -81,6 +93,52 @@ def mt5_current_import() -> dict[str, Any]:
     currently active for Pattern Discovery to consume.
     """
     return mt5_bridge.list_current_import()
+
+
+@router.post("/data/mt5/install-helper")
+def mt5_install_helper() -> dict[str, Any]:
+    """v0.7.0: Copy bundled BD indicators + helper EA into the live MT5.
+
+    Idempotent. Returns a payload describing what was copied, whether
+    metaeditor64.exe was found (so we know if compilation happened
+    automatically), and the next manual step the user has to do (attach
+    BD_AutoSetup to a chart once).
+
+    Errors surface as ``{"ok": false, "error": "..."}`` rather than
+    HTTPException so the UI can display them inline without a toast storm.
+    """
+    try:
+        return {"ok": True, **mt5_setup_bridge.ensure_installed()}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+@router.post("/data/mt5/apply-setup")
+def mt5_apply_setup(req: MT5ApplySetupRequest) -> dict[str, Any]:
+    """v0.7.0: Tell BD_AutoSetup to open charts for symbol+TFs with our stack.
+
+    Writes ``Common/Files/bd_setup.json`` (versioned) and polls the
+    ack file. On timeout returns ``{"ok": false, "error": "..."}``
+    so the UI can prompt the user to verify the helper EA is running.
+    """
+    try:
+        cfg = mt5_setup_bridge.apply_chart_setup(
+            symbol=req.symbol,
+            timeframes=req.timeframes,
+            indicators=req.indicators,
+            htf_for_div=req.htf_for_div,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    try:
+        ack = mt5_setup_bridge.wait_for_ack(
+            version=cfg["version"], timeout_s=req.wait_for_ack_s,
+        )
+    except TimeoutError as exc:
+        return {"ok": False, "error": str(exc), "config": cfg, "acked": False}
+
+    return {"ok": True, "config": cfg, "ack": ack, "acked": True}
 
 
 @router.post("/data/import")
