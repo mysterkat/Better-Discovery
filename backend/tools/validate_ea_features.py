@@ -114,6 +114,10 @@ def _python_features(hist_csv: Path) -> pd.DataFrame:
     df = pd6.load_raw_data()
     df = pd6.add_extended_features(df)
     df = pd6.add_v5_features(df)
+    # detect_regimes adds the `regime` column. Without this the diff
+    # tool reports regime as "missing in one side".
+    if hasattr(pd6, "detect_regimes"):
+        df = pd6.detect_regimes(df)
     return df
 
 
