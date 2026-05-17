@@ -169,7 +169,8 @@ jobs:
       # No installers here (they live on the public mirror so the auto-updater
       # can fetch them). This entry exists purely for changelog / progress
       # tracking, so when you browse the source repo's Releases tab you see
-      # every shipped version with auto-generated commit notes.
+      # every shipped version with full commit-level notes inline AND a
+      # CHANGELOG.txt asset attached for offline browsing.
       - name: Publish notes-only release to source repo
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -179,13 +180,58 @@ jobs:
           $version = "${{ steps.version.outputs.version }}"
           $repo    = "${{ github.repository }}"
           $mirror  = "https://github.com/mysterkat/better-discovery-releases/releases/tag/$tag"
-          $body    = @"
+
+          # Find the previous tag for the commit range. If none (first
+          # release), fall back to the root commit so we include everything.
+          # 'git fetch --tags' guarantees we have all tags after a shallow
+          # checkout; safe to run even if redundant.
+          git fetch --tags --quiet
+          $prevTag = (git describe --tags --abbrev=0 "$tag^" 2>$null).Trim()
+          if ([string]::IsNullOrWhiteSpace($prevTag)) {
+            $prevTag = (git rev-list --max-parents=0 HEAD | Select-Object -First 1).Trim()
+            Write-Host "No previous tag; using root commit $prevTag"
+          } else {
+            Write-Host "Diffing $prevTag..$tag"
+          }
+
+          # Build the bullet+body changelog from `git log`. Per commit:
+          #   * **subject** (sha)
+          #     <body indented 2 spaces>
+          # Subject-only commits collapse cleanly to a single line.
+          $changelog = & git log "$prevTag..$tag" `
+            --pretty=format:"* **%s** (%h)%n%w(0,2,2)%b%n" `
+            --no-merges
+          if ([string]::IsNullOrWhiteSpace($changelog)) {
+            $changelog = "_No commits between $prevTag and $tag._"
+          }
+
+          # Save to CHANGELOG.txt so we can attach as a release asset.
+          $txt = @"
+          BETTER DISCOVERY $version
+          Released $(Get-Date -Format 'yyyy-MM-dd')
+          Changes since $prevTag
+          ================================================================
+
+          $changelog
+          "@
+          $txt | Out-File -FilePath CHANGELOG.txt -Encoding utf8
+
+          # Compose the release body. Includes the mirror link, the bullet
+          # changelog inline, and a fallback compare URL for the diff view.
+          $body = @"
           **Installers for this release live on the public mirror:**
           $mirror
 
-          (The mirror exists because the Tauri auto-updater needs a public download URL while this source repo is private.)
+          *(The mirror exists because the Tauri auto-updater needs a public download URL while this source repo is private.)*
 
           ---
+
+          ## What changed since ``$prevTag``
+
+          $changelog
+
+          ---
+          **Full diff:** https://github.com/$repo/compare/$prevTag...$tag
           "@
 
           # Idempotent: delete prior source-repo release if a previous CI run
@@ -196,10 +242,8 @@ jobs:
             gh release delete $tag --repo $repo --yes
           }
 
-          # --generate-notes auto-builds a changelog from commits since the
-          # last tag. We prepend our mirror-link note above that.
           gh release create $tag `
             --repo $repo `
             --title "BETTER DISCOVERY $version" `
             --notes "$body" `
-            --generate-notes
+            "CHANGELOG.txt"
