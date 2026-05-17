@@ -10,7 +10,9 @@ jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: read
+      # v0.7.1: need write so the final step can create a notes-only release
+      # on this (source) repo. Binaries still ship from the public mirror.
+      contents: write
 
     steps:
       - name: Checkout
@@ -162,3 +164,42 @@ jobs:
             "$nsisPath" `
             "$msiPath" `
             "latest.json"
+
+      # ── v0.7.1: mirror a notes-only release to the source repo ───────────
+      # No installers here (they live on the public mirror so the auto-updater
+      # can fetch them). This entry exists purely for changelog / progress
+      # tracking, so when you browse the source repo's Releases tab you see
+      # every shipped version with auto-generated commit notes.
+      - name: Publish notes-only release to source repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag     = "${{ steps.version.outputs.tag }}"
+          $version = "${{ steps.version.outputs.version }}"
+          $repo    = "${{ github.repository }}"
+          $mirror  = "https://github.com/mysterkat/better-discovery-releases/releases/tag/$tag"
+          $body    = @"
+          **Installers for this release live on the public mirror:**
+          $mirror
+
+          (The mirror exists because the Tauri auto-updater needs a public download URL while this source repo is private.)
+
+          ---
+          "@
+
+          # Idempotent: delete prior source-repo release if a previous CI run
+          # already created one for this tag (e.g. on workflow re-run).
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Existing source-repo release $tag found, deleting..."
+            gh release delete $tag --repo $repo --yes
+          }
+
+          # --generate-notes auto-builds a changelog from commits since the
+          # last tag. We prepend our mirror-link note above that.
+          gh release create $tag `
+            --repo $repo `
+            --title "BETTER DISCOVERY $version" `
+            --notes "$body" `
+            --generate-notes
