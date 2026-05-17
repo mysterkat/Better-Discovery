@@ -59,7 +59,12 @@ VALIDATE_COLS = [
 # ── Python feature dump ──────────────────────────────────────────────────────
 
 def _python_features(hist_csv: Path) -> pd.DataFrame:
-    """Run pattern_discovery_v6's feature pipeline on a CSV.
+    """Run pattern_discovery_v6's full multi-TF feature pipeline on the data.
+
+    Uses ``load_raw_data()`` (not just ``_load_raw + _add_indicators``) so that
+    multi-timeframe-derived columns — ``mtf_bull_score`` and ``htf_div`` — are
+    actually populated. The single-TF path leaves both columns as zeros, which
+    silently breaks any later diff against MT5.
 
     Imports are deferred so the module can be imported without sklearn/pandas
     in environments where we only want to do diff (no python-dump).
@@ -67,8 +72,46 @@ def _python_features(hist_csv: Path) -> pd.DataFrame:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "toolkit"))
     import pattern_discovery_v6 as pd6  # type: ignore[import-not-found]
 
-    df = pd6._load_raw(str(hist_csv))
-    df = pd6._add_indicators(df)
+    hist_path = Path(hist_csv).resolve()
+    folder = hist_path.parent
+    primary_name = hist_path.name      # e.g. "xauusd_m5.csv"
+    sym = primary_name.split("_", 1)[0]
+
+    # Auto-discover companion TFs in the same folder ({sym}_*.csv). Pattern
+    # Discovery uses 5 slots; sort smallest TF → largest, primary is slot 1.
+    tf_minutes = {
+        "m1": 1, "m2": 2, "m3": 3, "m4": 4, "m5": 5, "m6": 6,
+        "m10": 10, "m12": 12, "m15": 15, "m20": 20, "m30": 30,
+        "h1": 60, "h2": 120, "h3": 180, "h4": 240, "h6": 360,
+        "h8": 480, "h12": 720, "d1": 1440, "w1": 10080, "mn1": 43200,
+    }
+    candidates: list[tuple[int, str]] = []
+    for f in folder.glob(f"{sym}_*.csv"):
+        tf = f.stem.split("_", 1)[1].lower()
+        candidates.append((tf_minutes.get(tf, 99_999_999), f.name))
+    candidates.sort()
+
+    if not candidates:
+        raise RuntimeError(f"No {sym}_*.csv files found in {folder}")
+    if primary_name not in {n for _, n in candidates}:
+        candidates.insert(0, (tf_minutes.get(primary_name.split("_", 1)[1].split(".")[0], 0), primary_name))
+
+    # Re-order so the user's selected primary is first
+    candidates.sort(key=lambda x: (x[1] != primary_name, x[0]))
+    slot_files = [n for _, n in candidates[:5]] + [""] * max(0, 5 - len(candidates))
+
+    print(f"  Multi-TF feature build: primary={primary_name}; signal slots={[s for s in slot_files[1:] if s] or '(none)'}")
+
+    # Wire pattern_discovery_v6 globals so load_raw_data() picks up our paths
+    pd6.DATA_FOLDER = str(folder)
+    pd6.TF1_FILE = slot_files[0]
+    pd6.TF2_FILE = slot_files[1]
+    pd6.TF3_FILE = slot_files[2]
+    pd6.TF4_FILE = slot_files[3]
+    pd6.TF5_FILE = slot_files[4]
+    pd6.PRIMARY_TF = 1
+
+    df = pd6.load_raw_data()
     df = pd6.add_extended_features(df)
     df = pd6.add_v5_features(df)
     return df

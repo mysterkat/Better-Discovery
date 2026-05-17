@@ -54,8 +54,9 @@ _INDICATOR_STEMS = (
     "BD_SDZone", "BD_VolPriceDiv", "BD_BBExpanding", "BD_PrevSessBias",
     "BD_POCdist", "BD_Regime", "BD_HtfDiv", "BD_MtfBullScore",
 )
-_HELPER_EA_STEM = "BD_AutoSetup"
-_INSTALL_SUBDIR = "BetterDiscovery"   # used under both Indicators/ and Experts/
+_HELPER_EA_STEM   = "BD_AutoSetup"
+_DUMPER_EA_STEM   = "BD_FeatureDump"   # one-shot validation-harness dumper
+_INSTALL_SUBDIR   = "BetterDiscovery"   # used under both Indicators/ and Experts/
 
 
 def _resolve_source_dir() -> Path:
@@ -184,6 +185,14 @@ def ensure_installed() -> dict[str, Any]:
     else:
         raise RuntimeError(f"Missing bundled helper EA source: {helper_src}")
 
+    # Also install the one-shot validation dumper (BD_FeatureDump) so users
+    # can run the indicator-drift harness without manual file copies.
+    dumper_src = svc_src / f"{_DUMPER_EA_STEM}.mq5"
+    dumper_dst = ea_dst / f"{_DUMPER_EA_STEM}.mq5"
+    dumper_copied = False
+    if dumper_src.is_file():
+        dumper_copied = _copy_if_newer(dumper_src, dumper_dst)
+
     metaeditor = install_dir / "metaeditor64.exe"
     compiled: list[dict[str, Any]] = []
     if metaeditor.is_file():
@@ -192,6 +201,9 @@ def ensure_installed() -> dict[str, Any]:
             compiled.append({"name": stem, "ok": ok, "log": log[-1500:]})
         ok, log = _compile_one(metaeditor, helper_dst)
         compiled.append({"name": _HELPER_EA_STEM, "ok": ok, "log": log[-1500:]})
+        if dumper_dst.is_file():
+            ok, log = _compile_one(metaeditor, dumper_dst)
+            compiled.append({"name": _DUMPER_EA_STEM, "ok": ok, "log": log[-1500:]})
         me_state = "found"
     else:
         me_state = "missing"
