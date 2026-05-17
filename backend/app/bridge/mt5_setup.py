@@ -278,6 +278,57 @@ def apply_chart_setup(
     return {"version": new_version, "config_path": str(cfg_file)}
 
 
+def dump_features(
+    symbol: str,
+    timeframe: str = "M5",
+    n_bars: int = 5000,
+    out_file: str = "bd_feature_dump.csv",
+    htf_for_div: str = "M10",
+    mtf_tf1: str = "M10",
+    mtf_tf2: str = "PERIOD_CURRENT",
+    wait_for_ack_s: float = 60.0,
+) -> dict[str, Any]:
+    """Trigger BD_AutoSetup (v0.7.1+) to dump the 27-feature CSV.
+
+    Reuses the same versioned-JSON polling protocol as ``apply_chart_setup``,
+    but writes ``action: "dump_features"`` so the EA dispatches to its
+    feature-dumper code path instead of opening charts.
+
+    The EA writes the CSV to ``<commondata>/Files/<out_file>`` and acks
+    via ``bd_setup_ack.json``. Returns the parsed ack on success.
+    """
+    common = _common_files_dir()
+    cfg_file = common / "bd_setup.json"
+    prev = 0
+    if cfg_file.is_file():
+        try:
+            prev = int(json.loads(cfg_file.read_text(encoding="utf-8")).get("version", 0))
+        except Exception:
+            prev = 0
+    new_version = prev + 1
+    payload = {
+        "version":     new_version,
+        "action":      "dump_features",
+        "symbol":      symbol,
+        "timeframe":   timeframe,
+        "n_bars":      n_bars,
+        "out_file":    out_file,
+        "htf_for_div": htf_for_div,
+        "mtf_tf1":     mtf_tf1,
+        "mtf_tf2":     mtf_tf2,
+    }
+    cfg_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    ack = wait_for_ack(new_version, timeout_s=wait_for_ack_s)
+    csv_path = common / out_file
+    return {
+        "config":   {"version": new_version, "config_path": str(cfg_file)},
+        "ack":      ack,
+        "csv_path": str(csv_path),
+        "csv_exists": csv_path.is_file(),
+        "csv_bytes":  csv_path.stat().st_size if csv_path.is_file() else 0,
+    }
+
+
 def wait_for_ack(version: int, timeout_s: float = 10.0) -> dict[str, Any]:
     """Poll ``bd_setup_ack.json`` until the helper EA echoes ``version``.
 
