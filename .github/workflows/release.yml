@@ -17,6 +17,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Need full history (not just the tag commit) so the
+          # 'Publish notes-only release to source repo' step can
+          # walk back to the previous tag for the commit-bullet changelog.
+          fetch-depth: 0
 
       - name: Read version from tag
         id: version
@@ -186,10 +191,16 @@ jobs:
           # 'git fetch --tags' guarantees we have all tags after a shallow
           # checkout; safe to run even if redundant.
           git fetch --tags --quiet
-          $prevTag = (git describe --tags --abbrev=0 "$tag^" 2>$null).Trim()
+          # git describe returns null on stderr if no prior tag exists. Calling
+          # .Trim() on null crashes pwsh with "you cannot call a method on a
+          # null-valued expression" — so capture into a temp and null-check first.
+          $prevTagRaw = git describe --tags --abbrev=0 "$tag^" 2>$null
+          $prevTag = ""
+          if ($prevTagRaw) { $prevTag = "$prevTagRaw".Trim() }
           if ([string]::IsNullOrWhiteSpace($prevTag)) {
-            $prevTag = (git rev-list --max-parents=0 HEAD | Select-Object -First 1).Trim()
-            Write-Host "No previous tag; using root commit $prevTag"
+            $rootRaw = git rev-list --max-parents=0 HEAD
+            $prevTag = "$($rootRaw | Select-Object -First 1)".Trim()
+            Write-Host "No previous tag found; using root commit $prevTag"
           } else {
             Write-Host "Diffing $prevTag..$tag"
           }
