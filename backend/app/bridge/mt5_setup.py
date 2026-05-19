@@ -120,9 +120,17 @@ def _copy_if_newer(src: Path, dst: Path) -> bool:
 
 
 def _compile_one(metaeditor: Path, source: Path) -> tuple[bool, str]:
-    """Invoke metaeditor64.exe to build a single .mq5. Returns (ok, log_tail)."""
+    """Invoke metaeditor64.exe to build a single .mq5. Returns (ok, log_tail).
+
+    NOTE: metaeditor64.exe does NOT follow Unix exit-code convention —
+    it returns 1 on success and 0 on failure.  Instead of trusting the
+    return code we parse the compile log for ``Result: N errors`` which
+    is always present and unambiguous.
+    """
+    import re
+
     log_file = source.with_suffix(".log")
-    proc = subprocess.run(
+    subprocess.run(
         [str(metaeditor), "/compile:" + str(source), "/log:" + str(log_file)],
         capture_output=True, text=True, timeout=120,
     )
@@ -132,7 +140,10 @@ def _compile_one(metaeditor: Path, source: Path) -> tuple[bool, str]:
             log_tail = log_file.read_text(encoding="utf-16", errors="replace")
         except OSError:
             pass
-    return (proc.returncode == 0, log_tail.strip())
+    # Parse "Result: N errors, M warnings" from the log to determine success.
+    m = re.search(r"Result:\s*(\d+)\s*error", log_tail)
+    ok = m is not None and int(m.group(1)) == 0
+    return (ok, log_tail.strip())
 
 
 def ensure_installed() -> dict[str, Any]:

@@ -20,7 +20,7 @@ type DataSource = "tradingview" | "mt5_html";
 export default function MonteCarloTab() {
   const [params, setParams] = useState<ParamDef[]>([]);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
-  const [dataSource, setDataSource] = useState<DataSource>("tradingview");
+  const [dataSource, setDataSource] = useState<DataSource>("mt5_html");
   const [csvPath, setCsvPath] = useState("");
   const [htmlPath, setHtmlPath] = useState("");
   const [openGroups, setOpenGroups] = useState<Set<string>>(

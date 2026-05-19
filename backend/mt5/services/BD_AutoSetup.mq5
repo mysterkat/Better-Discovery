@@ -229,94 +229,95 @@ bool DumpFeatures(const string symbol, ENUM_TIMEFRAMES tf, int nBars, const stri
      }
 
    int f = FileOpen(outFile, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
-   if(f == INVALID_HANDLE)
-     { err = StringFormat("FileOpen failed: %d", GetLastError()); goto release; }
-
-   FileWriteString(f,
-       "time,open,high,low,close,"
-       "rsi14,macd_norm,atr_pct,bb_width,trend,mtf_bull_score,"
-       "body_pct,rng_atr,vol_ratio,vol_body_conf,regime,vol_price_div,bb_expanding,"
-       "prev_sess_bias,poc_dist,bull,uwk_pct,lwk_pct,"
-       "stoch_k,stoch_d,pin_bar,inside_bar,outside_bar,htf_div,"
-       "rolling_sharpe,sd_zone,vwap_dist\n");
-
-   int totalBars = Bars(symbol, tf);
-   int n = MathMin(nBars, totalBars - 220);
-   for(int s = n; s >= 1; s--)
+   if(f != INVALID_HANDLE)
      {
-      datetime t = iTime(symbol, tf, s);
-      double   o = iOpen(symbol, tf, s);
-      double   h = iHigh(symbol, tf, s);
-      double   l = iLow (symbol, tf, s);
-      double   c = iClose(symbol, tf, s);
+      FileWriteString(f,
+          "time,open,high,low,close,"
+          "rsi14,macd_norm,atr_pct,bb_width,trend,mtf_bull_score,"
+          "body_pct,rng_atr,vol_ratio,vol_body_conf,regime,vol_price_div,bb_expanding,"
+          "prev_sess_bias,poc_dist,bull,uwk_pct,lwk_pct,"
+          "stoch_k,stoch_d,pin_bar,inside_bar,outside_bar,htf_div,"
+          "rolling_sharpe,sd_zone,vwap_dist\n");
 
-      double v[1];
-      double rsi14 = (CopyBuffer(hRSI, 0, s, 1, v) == 1) ? v[0] : 0;
-      double atr   = (CopyBuffer(hATR, 0, s, 1, v) == 1) ? v[0] : 0;
-      double bbm   = (CopyBuffer(hBB,  0, s, 1, v) == 1) ? v[0] : 0;
-      double bbu   = (CopyBuffer(hBB,  1, s, 1, v) == 1) ? v[0] : 0;
-      double bbl   = (CopyBuffer(hBB,  2, s, 1, v) == 1) ? v[0] : 0;
-      double e20   = (CopyBuffer(hEMA20,  0, s, 1, v) == 1) ? v[0] : 0;
-      double e50   = (CopyBuffer(hEMA50,  0, s, 1, v) == 1) ? v[0] : 0;
-      double e200  = (CopyBuffer(hEMA200, 0, s, 1, v) == 1) ? v[0] : 0;
-      double stk   = (CopyBuffer(hStoch, 0, s, 1, v) == 1) ? v[0] : 0;
-      double std_  = (CopyBuffer(hStoch, 1, s, 1, v) == 1) ? v[0] : 0;
+      int totalBars = Bars(symbol, tf);
+      int n = MathMin(nBars, totalBars - 220);
+      for(int s = n; s >= 1; s--)
+        {
+         datetime t = iTime(symbol, tf, s);
+         double   o = iOpen(symbol, tf, s);
+         double   h = iHigh(symbol, tf, s);
+         double   l = iLow (symbol, tf, s);
+         double   c = iClose(symbol, tf, s);
 
-      double atrPct  = (c > 0) ? atr/c : 0;
-      double bbWidth = (bbm > 0) ? (bbu-bbl)/bbm : 0;
-      double trend   = (e20>e50 && e50>e200) ? 1.0 : (e20<e50 && e50<e200 ? -1.0 : 0.0);
-      double rng     = h - l;
-      double body    = MathAbs(c - o);
-      double uwk     = h - MathMax(o, c);
-      double lwk     = MathMin(o, c) - l;
-      double bull    = (c >= o) ? 1.0 : 0.0;
-      double rngAtr  = (atr > 0) ? rng/atr : 0;
-      double bodyPct = (rng > 0) ? body/rng : 0;
-      double uwkPct  = (rng > 0) ? uwk/rng  : 0;
-      double lwkPct  = (rng > 0) ? lwk/rng  : 0;
-      double inside  = (h < iHigh(symbol,tf,s+1) && l > iLow(symbol,tf,s+1)) ? 1.0 : 0.0;
-      double outside = (h > iHigh(symbol,tf,s+1) && l < iLow(symbol,tf,s+1)) ? 1.0 : 0.0;
+         double v[1];
+         double rsi14 = (CopyBuffer(hRSI, 0, s, 1, v) == 1) ? v[0] : 0;
+         double atr   = (CopyBuffer(hATR, 0, s, 1, v) == 1) ? v[0] : 0;
+         double bbm   = (CopyBuffer(hBB,  0, s, 1, v) == 1) ? v[0] : 0;
+         double bbu   = (CopyBuffer(hBB,  1, s, 1, v) == 1) ? v[0] : 0;
+         double bbl   = (CopyBuffer(hBB,  2, s, 1, v) == 1) ? v[0] : 0;
+         double e20   = (CopyBuffer(hEMA20,  0, s, 1, v) == 1) ? v[0] : 0;
+         double e50   = (CopyBuffer(hEMA50,  0, s, 1, v) == 1) ? v[0] : 0;
+         double e200  = (CopyBuffer(hEMA200, 0, s, 1, v) == 1) ? v[0] : 0;
+         double stk   = (CopyBuffer(hStoch, 0, s, 1, v) == 1) ? v[0] : 0;
+         double std_  = (CopyBuffer(hStoch, 1, s, 1, v) == 1) ? v[0] : 0;
 
-      double rs   = (CopyBuffer(bd[0],  0, s, 1, v) == 1) ? v[0] : 0;
-      double mn   = (CopyBuffer(bd[1],  0, s, 1, v) == 1) ? v[0] : 0;
-      double vwd  = (CopyBuffer(bd[2],  0, s, 1, v) == 1) ? v[0] : 0;
-      double sdz  = (CopyBuffer(bd[3],  0, s, 1, v) == 1) ? v[0] : 0;
-      double vpd  = (CopyBuffer(bd[4],  0, s, 1, v) == 1) ? v[0] : 0;
-      double bbe  = (CopyBuffer(bd[5],  0, s, 1, v) == 1) ? v[0] : 0;
-      double pocd = (CopyBuffer(bd[6],  0, s, 1, v) == 1) ? v[0] : 0;
-      double pin  = (CopyBuffer(bd[7],  0, s, 1, v) == 1) ? v[0] : 0;
-      double psb  = (CopyBuffer(bd[8],  0, s, 1, v) == 1) ? v[0] : 0;
-      double reg  = (CopyBuffer(bd[9],  0, s, 1, v) == 1) ? v[0] : 0;
-      double hd   = (CopyBuffer(bd[10], 0, s, 1, v) == 1) ? v[0] : 0;
-      double mtfb = (CopyBuffer(bd[11], 0, s, 1, v) == 1) ? v[0] : 0;
+         double atrPct  = (c > 0) ? atr/c : 0;
+         double bbWidth = (bbm > 0) ? (bbu-bbl)/bbm : 0;
+         double trend   = (e20>e50 && e50>e200) ? 1.0 : (e20<e50 && e50<e200 ? -1.0 : 0.0);
+         double rng     = h - l;
+         double body    = MathAbs(c - o);
+         double uwk     = h - MathMax(o, c);
+         double lwk     = MathMin(o, c) - l;
+         double bull    = (c >= o) ? 1.0 : 0.0;
+         double rngAtr  = (atr > 0) ? rng/atr : 0;
+         double bodyPct = (rng > 0) ? body/rng : 0;
+         double uwkPct  = (rng > 0) ? uwk/rng  : 0;
+         double lwkPct  = (rng > 0) ? lwk/rng  : 0;
+         double inside  = (h < iHigh(symbol,tf,s+1) && l > iLow(symbol,tf,s+1)) ? 1.0 : 0.0;
+         double outside = (h > iHigh(symbol,tf,s+1) && l < iLow(symbol,tf,s+1)) ? 1.0 : 0.0;
 
-      // vol_ratio + vol_body_conf computed inline
-      double vsum = 0;
-      for(int k=1;k<=20;k++) vsum += (double)iTickVolume(symbol,tf,s+k);
-      double vma  = vsum / 20.0;
-      double vr   = (vma > 0) ? MathMin((double)iTickVolume(symbol,tf,s) / vma, 5.0) : 0.0;
-      double vbc  = MathMin(vr * bodyPct, 5.0);
+         double rs   = (CopyBuffer(bd[0],  0, s, 1, v) == 1) ? v[0] : 0;
+         double mn   = (CopyBuffer(bd[1],  0, s, 1, v) == 1) ? v[0] : 0;
+         double vwd  = (CopyBuffer(bd[2],  0, s, 1, v) == 1) ? v[0] : 0;
+         double sdz  = (CopyBuffer(bd[3],  0, s, 1, v) == 1) ? v[0] : 0;
+         double vpd  = (CopyBuffer(bd[4],  0, s, 1, v) == 1) ? v[0] : 0;
+         double bbe  = (CopyBuffer(bd[5],  0, s, 1, v) == 1) ? v[0] : 0;
+         double pocd = (CopyBuffer(bd[6],  0, s, 1, v) == 1) ? v[0] : 0;
+         double pin  = (CopyBuffer(bd[7],  0, s, 1, v) == 1) ? v[0] : 0;
+         double psb  = (CopyBuffer(bd[8],  0, s, 1, v) == 1) ? v[0] : 0;
+         double reg  = (CopyBuffer(bd[9],  0, s, 1, v) == 1) ? v[0] : 0;
+         double hd   = (CopyBuffer(bd[10], 0, s, 1, v) == 1) ? v[0] : 0;
+         double mtfb = (CopyBuffer(bd[11], 0, s, 1, v) == 1) ? v[0] : 0;
 
-      string line = StringFormat(
-         "%s,%.5f,%.5f,%.5f,%.5f,"
-         "%.6f,%.6f,%.6f,%.6f,%.0f,%.0f,"
-         "%.6f,%.6f,%.6f,%.6f,%.0f,%.0f,%.0f,"
-         "%.0f,%.6f,%.0f,%.6f,%.6f,"
-         "%.4f,%.4f,%.6f,%.0f,%.0f,%.0f,"
-         "%.6f,%.0f,%.6f\n",
-         TimeToString(t, TIME_DATE | TIME_MINUTES | TIME_SECONDS),
-         o, h, l, c,
-         rsi14, mn, atrPct, bbWidth, trend, mtfb,
-         bodyPct, rngAtr, vr, vbc, reg, vpd, bbe,
-         psb, pocd, bull, uwkPct, lwkPct,
-         stk, std_, pin, inside, outside, hd,
-         rs, sdz, vwd);
-      FileWriteString(f, line);
+         // vol_ratio + vol_body_conf computed inline
+         double vsum = 0;
+         for(int k=1;k<=20;k++) vsum += (double)iTickVolume(symbol,tf,s+k);
+         double vma  = vsum / 20.0;
+         double vr   = (vma > 0) ? MathMin((double)iTickVolume(symbol,tf,s) / vma, 5.0) : 0.0;
+         double vbc  = MathMin(vr * bodyPct, 5.0);
+
+         string line = StringFormat(
+            "%s,%.5f,%.5f,%.5f,%.5f,"
+            "%.6f,%.6f,%.6f,%.6f,%.0f,%.0f,"
+            "%.6f,%.6f,%.6f,%.6f,%.0f,%.0f,%.0f,"
+            "%.0f,%.6f,%.0f,%.6f,%.6f,"
+            "%.4f,%.4f,%.6f,%.0f,%.0f,%.0f,"
+            "%.6f,%.0f,%.6f\n",
+            TimeToString(t, TIME_DATE | TIME_MINUTES | TIME_SECONDS),
+            o, h, l, c,
+            rsi14, mn, atrPct, bbWidth, trend, mtfb,
+            bodyPct, rngAtr, vr, vbc, reg, vpd, bbe,
+            psb, pocd, bull, uwkPct, lwkPct,
+            stk, std_, pin, inside, outside, hd,
+            rs, sdz, vwd);
+         FileWriteString(f, line);
+        }
+      FileClose(f);
+      PrintFormat("BD_AutoSetup: dumped %d bars to %s", n, outFile);
      }
-   FileClose(f);
-   PrintFormat("BD_AutoSetup: dumped %d bars to %s", n, outFile);
+   else
+      err = StringFormat("FileOpen failed: %d", GetLastError());
 
-release:
    IndicatorRelease(hRSI); IndicatorRelease(hATR); IndicatorRelease(hBB);
    IndicatorRelease(hEMA20); IndicatorRelease(hEMA50); IndicatorRelease(hEMA200);
    IndicatorRelease(hStoch);

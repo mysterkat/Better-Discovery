@@ -367,6 +367,16 @@ export default function DataImportTab() {
                   ✗ {setupState.error}
                 </span>
               )}
+              {setupState.ack?.errors && setupState.ack.errors.length > 0 && (
+                <div className="field-hint" style={{ marginTop: 6, color: "var(--warn-text, #c08020)" }}>
+                  ⚠️ Helper EA reported {setupState.ack.errors.length} issue(s):
+                  <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+                    {setupState.ack.errors.map((e, i) => (
+                      <li key={i} style={{ listStyle: "disc" }}>{e}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
         </div>
