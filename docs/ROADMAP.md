@@ -1,13 +1,13 @@
 # BETTER DISCOVERY — Roadmap
 
-> Living document. Updated 2026-05-20 (v0.7.1 shipped; Strategy Library + Compare on `claude/distracted-pascal-e99b0b`, not yet tagged).
+> Living document. Updated 2026-05-21 (v0.7.2 shipped — Strategy Library + Compare tab).
 > Items grouped by target version. Effort is rough; ranking inside each version is by priority.
 
 ---
 
-## Shipped (unreleased — on `claude/distracted-pascal-e99b0b`)
+## Shipped — v0.7.2
 
-A different-scope v0.8.0 candidate that landed before the originally-planned "trade-count gap fix" work below. Either renumber the gap-fix work to v0.9.0 and tag this as v0.8.0, or hold this branch and ship the original v0.8.0 first — decision pending.
+Strategy Library + Compare tab. Shipped 2026-05-21 alongside v0.7.1 hotfix base. The originally-planned "trade-count gap fix" work is the next milestone (v0.8.0 below).
 
 **Strategy Library + Compare tab**
 - New top-level **Strategy Compare** tab (5th in the sidebar).
