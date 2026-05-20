@@ -84,6 +84,7 @@ export interface EvalPhaseResult {
 
 export interface FundedResult {
   breach_rate: number;
+  breach_before_payout_rate?: number;
   payout_rate: number;
   breach_pcts: { daily_dd: number; total_dd: number };
   avg_total_earnings: number;
@@ -153,6 +154,7 @@ export interface VerdictBlock {
   expected_monthly_usd?: number;
   expected_lifetime_months?: number;
   breach_rate?: number;
+  breach_before_payout_rate?: number;
   dominant_breach?: string;
   // Long-term variants
   p_ruin_1y?: number;

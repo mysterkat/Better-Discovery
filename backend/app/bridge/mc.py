@@ -891,9 +891,10 @@ def _build_verdict(
             "payout_rate":              payout_rate,
             "expected_monthly_usd":     expected_monthly,
             "expected_lifetime_months": months_active,
-            "breach_rate":              float(fd.get("breach_rate", 0.0)),
-            "dominant_breach":          dom_breach_name,
-            "avg_first_payout_day":     avg_fp,
+            "breach_rate":                  float(fd.get("breach_rate", 0.0)),
+            "breach_before_payout_rate":   float(fd.get("breach_before_payout_rate", 0.0)),
+            "dominant_breach":              dom_breach_name,
+            "avg_first_payout_day":         avg_fp,
         },
         "longterm": {
             "p_ruin_1y":     p_ruin_1y,

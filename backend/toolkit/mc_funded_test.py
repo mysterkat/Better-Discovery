@@ -933,6 +933,10 @@ def simulate_funded(p2, df, trans_matrix=None, regime_pnl_pools=None):
     avg_first_payout_day = float(paid_df["first_payout_day"].mean()) if len(paid_df) else 0.0
     avg_total_earnings   = float(results_df["total_earnings"].mean())
     avg_payout_count     = float(results_df["payout_count"].mean())
+    # % of sims that breached WITHOUT ever earning a single payout
+    breach_before_payout_rate = float(
+        (results_df["breach"] & results_df["first_payout_day"].isna()).mean() * 100
+    )
 
     # avg days to reach the average total earnings
     # uses all sims (including those that breached early with zero earnings)
@@ -956,8 +960,9 @@ def simulate_funded(p2, df, trans_matrix=None, regime_pnl_pools=None):
         "breach_pcts"         : breach_pcts,
         "avg_first_payout_day": avg_first_payout_day,
         "avg_total_earnings"  : avg_total_earnings,
-        "avg_payout_count"    : avg_payout_count,
-        "avg_days_to_earn"    : avg_days_to_earn,
+        "avg_payout_count"           : avg_payout_count,
+        "breach_before_payout_rate"  : breach_before_payout_rate,
+        "avg_days_to_earn"           : avg_days_to_earn,
         "survival"            : survival,
         "equity_curves"       : pad_curves(equity_curves_f),
         "floor_curves"        : pad_curves(floor_curves_f),

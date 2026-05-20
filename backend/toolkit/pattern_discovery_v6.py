@@ -1526,118 +1526,210 @@ def _init_genetic(arrays,hi,lo,cl,op,fwd,n,spread):
     global _GEN
     _GEN=dict(arrays=arrays,hi=hi,lo=lo,cl=cl,op=op,fwd=fwd,n=n,spread=spread)
 
-def _rule_match_mask(member_bi_arr, rule, arrays):
+def _time_consistency_np(result_wins: np.ndarray, bar_indices: np.ndarray,
+                          n_bars: int, train_days: int) -> float:
+    """Pure-NumPy replacement for time_consistency_score used in GA hot loop.
+
+    Approximates each trade's year from its bar index (same mapping as the
+    fake pd.Timestamp construction it replaces).  Returns fraction of years
+    where win rate >= 50%, clamped 0-1; identical semantics to the pandas version.
     """
-    v5: Vectorised rule evaluation.
-    Returns boolean mask over member_bi_arr where all rule conditions are met.
-    ~5-20x faster than the Python per-bar loop for large clusters.
+    if len(bar_indices) == 0:
+        return 0.0
+    years = (bar_indices * train_days // max(n_bars, 1) // 365).astype(np.int32)
+    unique_years = np.unique(years)
+    if len(unique_years) < 2:
+        return 0.6
+    ok = 0
+    for yr in unique_years:
+        mask = years == yr
+        if mask.sum() >= 5 and result_wins[mask].mean() >= 0.50:
+            ok += 1
+    return ok / len(unique_years)
+
+
+def _trade_distribution_np(bar_indices: np.ndarray, n_bars: int,
+                            train_days: int) -> float:
+    """Pure-NumPy replacement for trade_distribution_score used in GA hot loop."""
+    if len(bar_indices) == 0:
+        return 0.5
+    # quarter index: bar_idx → approximate quarter number (0, 1, 2, …)
+    quarters = (bar_indices * train_days // max(n_bars, 1) // 91).astype(np.int32)
+    unique_q, counts = np.unique(quarters, return_counts=True)
+    if len(unique_q) < 2:
+        return 0.5
+    cv = counts.std() / max(counts.mean(), 1)
+    return float(max(0.0, min(1.0, 1.0 - cv / 3.0)))
+
+
+def _rule_match_mask(member_bi_arr, rule, arrays, cache=None):
+    """v5: Vectorised rule evaluation with optional per-column mask caching.
+
+    cache: dict keyed by (col, lb, hb) → boolean array over the same
+    member_bi_arr.  Pass the same dict across calls within one GA worker to
+    avoid recomputing unchanged column conditions (speedup item #20).
     """
     mask = np.ones(len(member_bi_arr), dtype=bool)
     for col, (lb, hb) in rule.items():
         if col not in arrays:
             continue
-        arr = arrays[col]
-        vals = arr[member_bi_arr]          # fancy index — one shot
-        mask &= (vals >= lb) & (vals <= hb)
+        key = (col, lb, hb)
+        if cache is not None and key in cache:
+            col_mask = cache[key]
+        else:
+            arr = arrays[col]
+            vals = arr[member_bi_arr]
+            col_mask = (vals >= lb) & (vals <= hb)
+            if cache is not None:
+                cache[key] = col_mask
+        mask &= col_mask
     return mask
 
 
 def _score_genetic(member_bi, rule, sl_pct, tp_pct, direction,
-                   full_cluster_size, train_days):
-    """
-    Score a rule using additive Wilson-based fitness.
-    v5: rule matching is vectorised; inner trade loop unchanged (needs cooldown).
+                   full_cluster_size, train_days, _cache=None):
+    """Score a rule using additive Wilson-based fitness.
+
+    v9.0 speedups applied:
+      #20 — column mask cache passed in from the GA worker.
+      #21 — pure-NumPy consistency scoring (no pandas DataFrame construction).
+      #22 — vectorised SL/TP detection via 2-D numpy slice; sequential pass
+             is only the lightweight cooldown filter, not the heavy price scan.
     """
     e = _GEN; arrays = e["arrays"]
-    hi = e["hi"]; lo = e["lo"]; cl = e["cl"]; op = e["op"]
+    hi = e["hi"]; lo = e["lo"]; op = e["op"]
     fwd = e["fwd"]; n = e["n"]; spread = e["spread"]
     long = (direction == "LONG")
 
-    # ── vectorised rule match ──────────────────────────────────────────────
     member_arr = np.asarray(member_bi, dtype=np.int32)
     if len(member_arr) == 0:
         return 0.0
-    match_mask = _rule_match_mask(member_arr, rule, arrays)
+
+    # ── vectorised rule match (#20 cache) ─────────────────────────────────
+    match_mask = _rule_match_mask(member_arr, rule, arrays, _cache)
     matched = int(match_mask.sum())
 
-    # dynamic retention floor
     retention = matched / max(full_cluster_size, 1)
     min_retention = min((train_days * 1.0) / max(full_cluster_size, 1), 0.70)
     if retention < min_retention:
         return 0.0
 
-    # ── trade simulation on matched bars only (cooldown requires ordering) ──
-    # The outer loop is sequential (cooldown depends on last_sig).
-    # The inner SL/TP scan is replaced with cummax/cummin — no Python for-j loop.
-    matched_bi = member_arr[match_mask].tolist()
-    wins = losses = 0; gw = gl = 0.0; rr_list = []
-    last_sig = -COOLDOWN_BARS - 1
+    matched_arr = member_arr[match_mask]
 
-    for bi in matched_bi:
+    # ── filter: skip bars too close to the end ────────────────────────────
+    valid = matched_arr[matched_arr + 1 < n]
+    if len(valid) == 0:
+        return 0.0
+
+    # ── vectorised SL/TP detection (#22) ──────────────────────────────────
+    # Build forward-window index matrix: shape (n_trades, fwd).
+    # Clip to stay in bounds; pad with last valid index (price won't cross).
+    fwd_idx = valid[:, None] + np.arange(1, fwd + 1, dtype=np.int32)[None, :]
+    fwd_idx = np.clip(fwd_idx, 0, n - 1)
+
+    entries = op[valid + 1]
+    valid_entry = entries != 0
+    if not valid_entry.any():
+        return 0.0
+    valid = valid[valid_entry]
+    entries = entries[valid_entry]
+    fwd_idx = fwd_idx[valid_entry]
+
+    adj_entries = entries + (spread if long else -spread)
+    sl_v = adj_entries * (1 - sl_pct if long else 1 + sl_pct)
+    tp_v = adj_entries * (1 + tp_pct if long else 1 - tp_pct)
+    risk = np.abs(adj_entries - sl_v)
+    reward = np.abs(tp_v - adj_entries)
+    valid_risk = risk > 0
+    if not valid_risk.any():
+        return 0.0
+    valid = valid[valid_risk]
+    adj_entries = adj_entries[valid_risk]
+    sl_v = sl_v[valid_risk]; tp_v = tp_v[valid_risk]
+    risk = risk[valid_risk]; reward = reward[valid_risk]
+    fwd_idx = fwd_idx[valid_risk]
+
+    hi_mat = hi[fwd_idx]   # (n_trades, fwd)
+    lo_mat = lo[fwd_idx]
+
+    if long:
+        cum_hi = np.maximum.accumulate(hi_mat, axis=1)
+        cum_lo = np.minimum.accumulate(lo_mat, axis=1)
+        tp_any = cum_hi >= tp_v[:, None]
+        sl_any = cum_lo <= sl_v[:, None]
+    else:
+        cum_lo = np.minimum.accumulate(lo_mat, axis=1)
+        cum_hi = np.maximum.accumulate(hi_mat, axis=1)
+        tp_any = cum_lo <= tp_v[:, None]
+        sl_any = cum_hi >= sl_v[:, None]
+
+    tp_hit = tp_any.any(axis=1)
+    sl_hit = sl_any.any(axis=1)
+    tp_idx_v = np.where(tp_hit, np.argmax(tp_any, axis=1), fwd + 1)
+    sl_idx_v = np.where(sl_hit, np.argmax(sl_any, axis=1), fwd + 1)
+
+    # result per trade: 1=WIN, -1=LOSS, 0=timeout
+    results = np.where(tp_idx_v < sl_idx_v, 1,
+              np.where(sl_idx_v < tp_idx_v, -1, 0)).astype(np.int8)
+
+    # ── lightweight sequential cooldown filter ────────────────────────────
+    last_sig = -COOLDOWN_BARS - 1
+    sel: list[int] = []
+    for i, bi in enumerate(valid.tolist()):
         if bi - last_sig < COOLDOWN_BARS:
             continue
-        if bi + 1 >= n:
-            continue
-        entry = op[bi + 1] if bi + 1 < n else cl[bi]
-        if entry == 0:
-            continue
-        entry += spread if long else -spread
-        sl_v = entry * (1 - sl_pct) if long else entry * (1 + sl_pct)
-        tp_v = entry * (1 + tp_pct) if long else entry * (1 - tp_pct)
-        risk = abs(entry - sl_v)
-        if risk == 0:
-            continue
-        reward = abs(tp_v - entry)
+        if results[i] != 0:
+            last_sig = bi
+            sel.append(i)
 
-        # Slice the forward window once — avoids repeated hi[j]/lo[j] indexing
-        j_end = min(bi + fwd + 1, n)
-        hi_w = hi[bi + 1 : j_end]   # shape (fwd,) at most
-        lo_w = lo[bi + 1 : j_end]
-
-        if long:
-            # First bar where running-max high >= tp_v  (TP hit)
-            tp_idx_arr = np.where(np.maximum.accumulate(hi_w) >= tp_v)[0]
-            sl_idx_arr = np.where(np.minimum.accumulate(lo_w) <= sl_v)[0]
-        else:
-            # First bar where running-min low <= tp_v  (TP hit for short)
-            tp_idx_arr = np.where(np.minimum.accumulate(lo_w) <= tp_v)[0]
-            sl_idx_arr = np.where(np.maximum.accumulate(hi_w) >= sl_v)[0]
-
-        tp_idx = int(tp_idx_arr[0]) if len(tp_idx_arr) else fwd + 1
-        sl_idx = int(sl_idx_arr[0]) if len(sl_idx_arr) else fwd + 1
-        ht = tp_idx < sl_idx
-        hs = sl_idx < tp_idx
-
-        if ht:
-            last_sig = bi; wins += 1; gw += reward / risk
-            rr_list.append(reward / risk)
-        elif hs:
-            last_sig = bi; losses += 1; gl += 1.0
-            rr_list.append(-1.0)
-
-    total = wins + losses
+    if not sel:
+        return 0.0
+    sel_idx = np.asarray(sel, dtype=np.int32)
+    res_sel = results[sel_idx]
+    wins   = int((res_sel == 1).sum())
+    losses = int((res_sel == -1).sum())
+    total  = wins + losses
     if total < 10:
         return 0.0
 
-    avg_rr = float(np.mean([r for r in rr_list if r > 0])) if any(r > 0 for r in rr_list) else 0.0
+    rr_arr = reward[sel_idx] / risk[sel_idx]
+    avg_rr = float(rr_arr[res_sel == 1].mean()) if wins > 0 else 0.0
 
-    # approximate timestamps for time_consistency (bar index → calendar day)
-    trades_df_genetic = None
-    n_bars = e["n"]
-    rows = []
-    w_idx = l_idx = 0
-    for bi in matched_bi:
-        rows.append({
-            "time": pd.Timestamp("2016-01-01") + pd.Timedelta(days=int(bi / max(n_bars, 1) * train_days)),
-            "result": "WIN" if w_idx < wins else "LOSS",
-        })
-        if w_idx < wins: w_idx += 1
-        else: l_idx += 1
-        if w_idx + l_idx >= total: break
-    if rows:
-        trades_df_genetic = pd.DataFrame(rows)
+    # ── pure-NumPy consistency scoring (#21) ─────────────────────────────
+    traded_bars  = valid[sel_idx]           # bar indices of all trades
+    is_win_arr   = (res_sel == 1)
+    q_stab = _time_consistency_np(is_win_arr, traded_bars, n, train_days)
+    q_dist = _trade_distribution_np(traded_bars, n, train_days)
+    stability = q_stab * q_dist
 
-    return score_rule(wins, losses, avg_rr, trades_df_genetic, train_days)
+    # Re-use existing score_rule logic but bypass trades_df construction.
+    wr = wins / total
+    breakeven = ((1 - wr) / wr) if wr > 0 else 999.0
+    if avg_rr < breakeven:
+        return 0.0
+    gl = losses
+    gw = wins * avg_rr if avg_rr > 0 else 0
+    pf = gw / gl if gl > 0 else 2.0
+
+    use_targets = bool(globals().get("ENABLE_TARGET_SCORING", True))
+    if use_targets:
+        wr_pct  = wr * 100.0
+        rr_val  = avg_rr / max(breakeven, 0.01)
+        tgt_wr  = float(globals().get("TARGET_WR_PCT",   55.0))
+        tgt_pf  = float(globals().get("TARGET_PF",        1.5))
+        tgt_rr  = float(globals().get("TARGET_RR",        1.3))
+        tgt_st  = float(globals().get("TARGET_STABILITY", 0.65))
+        return (
+            _target_score(wr_pct,    tgt_wr, SCORE_W_WR) +
+            _target_score(pf,        tgt_pf, SCORE_W_PF) +
+            _target_score(rr_val,    tgt_rr, SCORE_W_RR) +
+            _target_score(stability, tgt_st, SCORE_W_STAB)
+        )
+    q_wr = wilson_lower(wins, total)
+    q_pf = min(pf, 4.0) / 4.0
+    q_rr = min(avg_rr / max(breakeven, 0.01), 2.0) / 2.0
+    return (SCORE_W_WR * q_wr + SCORE_W_PF * q_pf +
+            SCORE_W_RR * q_rr + SCORE_W_STAB * stability)
 
 def _diagnose_and_repair(rule,col_stats,member_bi,sl_pct,tp_pct,
                           direction,full_cluster_size,train_days,rng_):
@@ -1648,9 +1740,9 @@ def _diagnose_and_repair(rule,col_stats,member_bi,sl_pct,tp_pct,
     """
     e=_GEN; arrays=e["arrays"]
 
-    # Count how many bars match — vectorised
+    # Count how many bars match — vectorised (no cache; repair is infrequent)
     member_arr = np.asarray(member_bi, dtype=np.int32)
-    matched = int(_rule_match_mask(member_arr, rule, arrays).sum())
+    matched = int(_rule_match_mask(member_arr, rule, arrays, cache=None).sum())
     retention=matched/max(full_cluster_size,1)
 
     if retention<0.05:
@@ -1752,103 +1844,115 @@ def _cross_rules(r1,r2,rng_):
     return child
 
 def _genetic_worker(args):
+    """v9.0: adds per-worker column-mask cache (#20) and two-pass coarse/full
+    evaluation (#23).  Pass 1 runs on every-3rd bar for the first 75% of
+    generations (3× cheaper per eval); pass 2 polishes on the full bar set
+    for the final 25% of generations.
+    """
     (cid,member_bi,sl_pct,tp_pct,direction,full_cluster_size,
      island_id,generations,pop_size,mutate_rate,train_days,seed)=args
     rng_=np.random.default_rng(seed); arrays=_GEN["arrays"]
     if len(member_bi)<10: return cid,direction,island_id,{},0.0
 
+    member_arr_full = np.asarray(member_bi, dtype=np.int32)
     col_stats={}
     for col in GENE_COLS:
         if col not in arrays: continue
-        vals=np.array([float(arrays[col][bi]) for bi in member_bi])
+        vals=arrays[col][member_arr_full]
         col_stats[col]=(float(np.percentile(vals,5)),
                         float(np.percentile(vals,95)))
 
-    # Do NOT mirror col_stats for SHORT — evaluate rules against actual data
-    # Direction-specific features (bull=0, negative macd_norm, trend=-1)
-    # are naturally present in the data and will be discovered by the genetic
+    # #23 — coarse subset (every 3rd bar) used for pass 1
+    member_arr_coarse = member_arr_full[::3]
+    coarse_cluster_size = max(len(member_arr_coarse), 1)
+    # cutoff generation where we switch from coarse → full
+    pass1_gens = max(1, int(generations * 0.75))
+    pass2_gens = generations - pass1_gens
+
+    def _score(rule, use_full=False, cache=None):
+        bi = member_arr_full if use_full else member_arr_coarse
+        cs = full_cluster_size if use_full else coarse_cluster_size
+        return _score_genetic(bi, rule, sl_pct, tp_pct, direction, cs,
+                              train_days, _cache=cache)
+
+    # #20 — per-worker column mask cache (cleared between full/coarse switch)
+    cache: dict = {}
+
     pop=[_rand_rule(col_stats,GENE_N_COLS_MIN,GENE_N_COLS_MAX,rng_)
          for _ in range(pop_size)]
-    scores=[_score_genetic(member_bi,r,sl_pct,tp_pct,direction,
-                           full_cluster_size,train_days) for r in pop]
+    scores=[_score(r, cache=cache) for r in pop]
 
     best_r=pop[int(np.argmax(scores))]; best_s=max(scores)
     no_improve=0; cur_mutate=mutate_rate
-    # v5: Hall-of-Fame — retains top-10 rules seen across all generations
-    hof = [(best_s, dict(best_r))]   # list of (score, rule)
+    hof = [(best_s, dict(best_r))]
 
-    for gen in range(generations):
-        # Adaptive mutation: ramp up when stuck, decay gradually when improving
-        if no_improve>=5:
-            # increase toward 2x over 5 more stuck generations
-            cur_mutate=min(mutate_rate*(1.0+(no_improve-4)*0.2),mutate_rate*2.0,0.60)
-        elif cur_mutate>mutate_rate:
-            # gradual decay back to base rate (not instant reset)
-            cur_mutate=max(cur_mutate*0.80,mutate_rate)
+    def _run_generations(n_gens, use_full):
+        nonlocal pop, scores, best_r, best_s, no_improve, cur_mutate, hof, cache
+        if use_full:
+            cache = {}  # stale coarse masks are invalid on full member set
+        for gen in range(n_gens):
+            if no_improve>=5:
+                cur_mutate=min(mutate_rate*(1.0+(no_improve-4)*0.2),mutate_rate*2.0,0.60)
+            elif cur_mutate>mutate_rate:
+                cur_mutate=max(cur_mutate*0.80,mutate_rate)
 
-        # Diversity injection: if >80% of population same score, refresh bottom 20%
-        if len(set(round(s,4) for s in scores))/len(scores)<(1-GENE_DIVERSITY_THRESHOLD):
-            n_refresh=max(1,pop_size//5)
-            worst_idx=sorted(range(len(scores)),key=lambda i:scores[i])[:n_refresh]
-            for idx in worst_idx:
-                pop[idx]=_rand_rule(col_stats,GENE_N_COLS_MIN,GENE_N_COLS_MAX,rng_)
-                scores[idx]=_score_genetic(member_bi,pop[idx],sl_pct,tp_pct,
-                                           direction,full_cluster_size,train_days)
+            if len(set(round(s,4) for s in scores))/len(scores)<(1-GENE_DIVERSITY_THRESHOLD):
+                n_refresh=max(1,pop_size//5)
+                worst_idx=sorted(range(len(scores)),key=lambda i:scores[i])[:n_refresh]
+                for idx in worst_idx:
+                    pop[idx]=_rand_rule(col_stats,GENE_N_COLS_MIN,GENE_N_COLS_MAX,rng_)
+                    scores[idx]=_score(pop[idx], use_full, cache)
 
-        # Build new population via tournament selection + crossover + mutation
-        new_pop=[]
-        # Elitism: keep best 2 + inject one HoF rule every 5 gens
-        top2=sorted(range(len(scores)),key=lambda i:scores[i],reverse=True)[:2]
-        for idx in top2: new_pop.append(dict(pop[idx]))
-        if gen % 5 == 0 and hof:
-            _, hof_rule = max(hof, key=lambda x: x[0])
-            new_pop.append(dict(hof_rule))
+            new_pop=[]
+            top2=sorted(range(len(scores)),key=lambda i:scores[i],reverse=True)[:2]
+            for idx in top2: new_pop.append(dict(pop[idx]))
+            if gen % 5 == 0 and hof:
+                _, hof_rule = max(hof, key=lambda x: x[0])
+                new_pop.append(dict(hof_rule))
 
-        while len(new_pop)<pop_size:
-            p1=_tournament_select(pop,scores,k=3,rng_=rng_)
-            p2=_tournament_select(pop,scores,k=3,rng_=rng_)
-            child=_mutate_rule(_cross_rules(p1,p2,rng_),
-                               col_stats,cur_mutate,rng_)
-            if not child: continue
+            while len(new_pop)<pop_size:
+                p1=_tournament_select(pop,scores,k=3,rng_=rng_)
+                p2=_tournament_select(pop,scores,k=3,rng_=rng_)
+                child=_mutate_rule(_cross_rules(p1,p2,rng_),
+                                   col_stats,cur_mutate,rng_)
+                if not child: continue
+                child_score=_score(child, use_full, cache)
+                if child_score==0.0:
+                    for _ in range(GENE_REPAIR_ATTEMPTS):
+                        repaired=_diagnose_and_repair(
+                            child,col_stats,
+                            member_arr_full if use_full else member_arr_coarse,
+                            sl_pct,tp_pct,direction,
+                            full_cluster_size if use_full else coarse_cluster_size,
+                            train_days,rng_)
+                        if repaired:
+                            rs=_score(repaired, use_full, cache)
+                            if rs>0:
+                                child=repaired; child_score=rs; break
+                new_pop.append(child)
+                if child_score > 0:
+                    hof.append((child_score, dict(child)))
+                    hof.sort(key=lambda x: x[0], reverse=True)
+                    hof = hof[:10]
+                if child_score>best_s:
+                    best_s=child_score; best_r=dict(child)
+                    no_improve=max(0,no_improve-2)
 
-            child_score=_score_genetic(member_bi,child,sl_pct,tp_pct,
-                                       direction,full_cluster_size,train_days)
-            # Repair if score is 0
-            if child_score==0.0:
-                for _ in range(GENE_REPAIR_ATTEMPTS):
-                    repaired=_diagnose_and_repair(
-                        child,col_stats,member_bi,sl_pct,tp_pct,
-                        direction,full_cluster_size,train_days,rng_)
-                    if repaired:
-                        rs=_score_genetic(member_bi,repaired,sl_pct,tp_pct,
-                                          direction,full_cluster_size,train_days)
-                        if rs>0:
-                            child=repaired; child_score=rs; break
-
-            new_pop.append(child)
-            # Update Hall-of-Fame
-            if child_score > 0:
-                hof.append((child_score, dict(child)))
+            pop=new_pop[:pop_size]
+            scores=[_score(r, use_full, cache) for r in pop]
+            gen_best=max(scores)
+            if gen_best>best_s:
+                best_s=gen_best; best_r=pop[int(np.argmax(scores))]
+                hof.append((best_s, dict(best_r)))
                 hof.sort(key=lambda x: x[0], reverse=True)
-                hof = hof[:10]   # keep top-10
-            if child_score>best_s:
-                best_s=child_score; best_r=dict(child)
-                no_improve=max(0,no_improve-2)  # gradual decay on improvement
+                hof = hof[:10]
+                no_improve=max(0,no_improve-2)
+            else:
+                no_improve+=1
 
-        pop=new_pop[:pop_size]
-        scores=[_score_genetic(member_bi,r,sl_pct,tp_pct,direction,
-                               full_cluster_size,train_days) for r in pop]
-        gen_best=max(scores)
-        if gen_best>best_s:
-            best_s=gen_best; best_r=pop[int(np.argmax(scores))]
-            hof.append((best_s, dict(best_r)))
-            hof.sort(key=lambda x: x[0], reverse=True)
-            hof = hof[:10]
-            no_improve=max(0,no_improve-2)  # gradual decay
-        else:
-            no_improve+=1
+    _run_generations(pass1_gens, use_full=False)   # coarse pass
+    _run_generations(pass2_gens, use_full=True)    # full-data polish
 
-    # Return HoF winner if better than generation winner
     if hof:
         hof_best_s, hof_best_r = max(hof, key=lambda x: x[0])
         if hof_best_s > best_s:

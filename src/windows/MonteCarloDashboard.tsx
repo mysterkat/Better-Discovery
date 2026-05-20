@@ -1316,8 +1316,11 @@ function WarningsPanel({ result }: { result: Record<string, any> }) {
         p1.dominant_fail_pct != null && Number(p1.dominant_fail_pct) > 50) {
       list.push({ id: "p1-daily", message: "Daily DD is the binding constraint on Phase 1 — reduce per-trade size." });
     }
-    if (funded?.breach_rate != null && Number(funded.breach_rate) > 60) {
-      list.push({ id: "funded-breach", message: "Funded breach rate > 60% — most accounts blow up." });
+    const bbpr = funded?.breach_before_payout_rate != null
+      ? Number(funded.breach_before_payout_rate)
+      : funded?.breach_rate != null ? Number(funded.breach_rate) : null;
+    if (bbpr != null && bbpr > 60) {
+      list.push({ id: "funded-breach", message: `${bbpr.toFixed(1)}% of accounts breach before earning a single payout — reduce trade size or improve win rate.` });
     }
     return list;
   }, [verdict]);
@@ -1402,7 +1405,10 @@ function VerdictBlock({ phase, v, globalV }: {
     if (lifeMo != null) parts.push(`avg lifetime ${lifeMo.toFixed(1)} mo`);
     if (breach != null) parts.push(`breach rate ${breach.toFixed(1)}%`);
     secondary = parts.join(" · ");
-    if (breach != null && breach > 60) {
+    const bbpr2 = v.breach_before_payout_rate != null ? Number(v.breach_before_payout_rate) : null;
+    if (bbpr2 != null && bbpr2 > 60) {
+      insight = `${bbpr2.toFixed(1)}% breach before first payout via ${dom ?? "DD limits"} — reduce position size.`;
+    } else if (breach != null && breach > 60) {
       insight = `most accounts breach via ${dom ?? "DD limits"} — sizing too large for these guardrails.`;
     } else if (monthly != null && monthly <= 0) {
       insight = "expected monthly P&L is non-positive — fee will not be recovered.";
