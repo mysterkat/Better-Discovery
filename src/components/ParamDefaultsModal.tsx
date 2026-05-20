@@ -25,9 +25,8 @@ const DISCOVERY_GROUPS = [
   "SL / TP",
   "Genetic Pass 1",
   "Genetic Pass 2",
-  "Ensemble",
   "Bidirectional",
-  "Scoring",
+  "Scoring & Targets",
   "Quality Filters",
   "MC Auto-run",
 ];

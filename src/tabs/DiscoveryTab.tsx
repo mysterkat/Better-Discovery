@@ -45,6 +45,10 @@ export default function DiscoveryTab() {
   const [overrideOnce, setOverrideOnce] = useState(false);
   const [folderOverrides, setFolderOverrides] = useState<Record<string, string>>({});
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set(["Data & Files", "General"]));
+  // Per-group toggle for the "Show advanced (N)" collapse. A group's advanced
+  // section is implicitly open when any of its advanced fields has an edit or
+  // a persistent default override — see effectiveShowAdvanced() below.
+  const [showAdvanced, setShowAdvanced] = useState<Set<string>>(new Set());
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -112,6 +116,30 @@ export default function DiscoveryTab() {
       if (next.has(g)) next.delete(g); else next.add(g);
       return next;
     });
+
+  const toggleAdvanced = (g: string) =>
+    setShowAdvanced((prev) => {
+      const next = new Set(prev);
+      if (next.has(g)) next.delete(g); else next.add(g);
+      return next;
+    });
+
+  // A group's advanced fields are tier=="advanced". Treat missing tier as core
+  // so older backend builds keep rendering everything visibly.
+  const isAdvanced = (p: ParamDef) => p.tier === "advanced";
+  const partitionGroup = (gParams: ParamDef[]) => {
+    const core: ParamDef[] = [];
+    const advanced: ParamDef[] = [];
+    for (const p of gParams) (isAdvanced(p) ? advanced : core).push(p);
+    return { core, advanced };
+  };
+  // Auto-reveal the advanced section if the user has touched anything in it
+  // (either this session's overrides or a saved persistent default), so an
+  // edited field is never invisible.
+  const effectiveShowAdvanced = (group: string, advanced: ParamDef[]) => {
+    if (showAdvanced.has(group)) return true;
+    return advanced.some((p) => isEdited(p.key) || persistentDefaults[p.key] != null);
+  };
 
   const setValue = (key: string, val: string) => {
     setOverrides((prev) => {
@@ -436,36 +464,63 @@ export default function DiscoveryTab() {
           </div>
 
           {/* Parameter groups */}
-          {[...groups.entries()].map(([group, gParams]) => (
-            <div key={group} className="param-group">
-              <div className="param-group-header-row">
-                <button
-                  className="param-group-header"
-                  onClick={() => toggleGroup(group)}
-                >
-                  <span className="param-group-arrow">{openGroups.has(group) ? "▾" : "▸"}</span>
-                  {group}
-                  <span className="param-group-count">{gParams.length} settings</span>
-                </button>
-                {groupHasEdits(group) && (
+          {[...groups.entries()].map(([group, gParams]) => {
+            const { core, advanced } = partitionGroup(gParams);
+            const advOpen = effectiveShowAdvanced(group, advanced);
+            return (
+              <div key={group} className="param-group">
+                <div className="param-group-header-row">
                   <button
-                    type="button"
-                    className="param-group-reset-btn"
-                    onClick={() => resetGroup(group)}
-                    title={`Reset all fields in "${group}" to their defaults`}
-                    disabled={isRunning}
-                  >↺</button>
+                    className="param-group-header"
+                    onClick={() => toggleGroup(group)}
+                  >
+                    <span className="param-group-arrow">{openGroups.has(group) ? "▾" : "▸"}</span>
+                    {group}
+                    <span className="param-group-count">{gParams.length} settings</span>
+                  </button>
+                  {groupHasEdits(group) && (
+                    <button
+                      type="button"
+                      className="param-group-reset-btn"
+                      onClick={() => resetGroup(group)}
+                      title={`Reset all fields in "${group}" to their defaults`}
+                      disabled={isRunning}
+                    >↺</button>
+                  )}
+                </div>
+                {openGroups.has(group) && (
+                  <div className="param-group-body">
+                    {core.length > 0 && (
+                      <div className="override-grid">
+                        {core.map((p) => renderField(p))}
+                      </div>
+                    )}
+                    {advanced.length > 0 && (
+                      <>
+                        <button
+                          type="button"
+                          className="param-advanced-toggle"
+                          onClick={() => toggleAdvanced(group)}
+                          title={advOpen
+                            ? "Hide advanced settings"
+                            : "Show advanced settings for power users"}
+                        >
+                          <span className="param-group-arrow">{advOpen ? "▾" : "▸"}</span>
+                          {advOpen ? "Hide advanced" : "Show advanced"}
+                          <span className="param-group-count">{advanced.length}</span>
+                        </button>
+                        {advOpen && (
+                          <div className="override-grid param-advanced-grid">
+                            {advanced.map((p) => renderField(p))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
                 )}
               </div>
-              {openGroups.has(group) && (
-                <div className="param-group-body">
-                  <div className="override-grid">
-                    {gParams.map((p) => renderField(p))}
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </>
       )}
 

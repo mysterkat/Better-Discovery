@@ -68,12 +68,13 @@ def _resolve_userdata() -> Path:
 USER_DATA: Path = _resolve_userdata()
 
 # ── Guaranteed subdirectories ──────────────────────────────────────────────────
-for _sub in ("themes", "recent", "cache", "mql", "hist_data", "discovery"):
+for _sub in ("themes", "recent", "cache", "mql", "hist_data", "discovery", "library"):
     (USER_DATA / _sub).mkdir(exist_ok=True)
 
 # Convenient default path constants used by bridges.
 DEFAULT_HIST_DATA: Path   = USER_DATA / "hist_data"
 DEFAULT_DISC_OUTPUT: Path = USER_DATA / "discovery"
+DEFAULT_LIBRARY: Path     = USER_DATA / "library"
 
 
 def existing_src_available() -> bool:

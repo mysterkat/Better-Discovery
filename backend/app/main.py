@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # creating all userdata subdirs. Must happen before any bridge import.
 from . import paths  # noqa: F401
 from .config import CONFIG
-from .routers import data, discovery, health, mc, mql, settings as settings_router
+from .routers import data, discovery, health, library, mc, mql, settings as settings_router
 
 app = FastAPI(
     on_startup=[lambda: paths.validate_paths()],
@@ -37,6 +37,7 @@ if CONFIG.dev_origins:
 app.include_router(health.router, tags=["health"])
 app.include_router(data.router, tags=["data"])
 app.include_router(discovery.router, tags=["discovery"])
+app.include_router(library.router, tags=["library"])
 app.include_router(mc.router, tags=["mc"])
 app.include_router(mql.router, tags=["mql"])
 app.include_router(settings_router.router, tags=["settings"])
