@@ -5,7 +5,9 @@
 
 import { Fragment, useEffect, useState } from "react";
 import { getDiscoveryResults, getSetFileContent, type DiscoveryOverview, type JobRef, type PatternSummary } from "../api/discovery";
+import { saveToLibrary } from "../api/library";
 import { openFolder } from "../api/system";
+import IndicatorsTable from "../components/IndicatorsTable";
 import { renderValue, titleCase } from "../lib/format";
 import { useSettings } from "../state/settings";
 
@@ -220,6 +222,23 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
     }
   };
 
+  const saveToLib = async (p: PatternSummary) => {
+    if (!p.set_file) { flash("No .set file recorded for this pattern."); return; }
+    setBusyId(p.pattern_id);
+    try {
+      const r = await saveToLibrary({
+        pattern_id: p.pattern_id,
+        set_file: p.set_file,
+        metadata: p,
+      });
+      flash(r.duplicate ? `Updated ${p.pattern_id} in library.` : `Saved ${p.pattern_id} to library.`);
+    } catch (e) {
+      flash(`Save failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const downloadSetFile = async (p: PatternSummary) => {
     if (!p.set_file) { flash("No .set file recorded."); return; }
     setBusyId(p.pattern_id);
@@ -307,6 +326,14 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
                 <td>
                   <button
                     className="btn-mini"
+                    onClick={() => saveToLib(p)}
+                    disabled={busyId === p.pattern_id || !p.set_file}
+                    title="Save to Strategy Library for comparison later"
+                  >
+                    ⭐ Save
+                  </button>{" "}
+                  <button
+                    className="btn-mini"
                     onClick={() => copySetFile(p)}
                     disabled={busyId === p.pattern_id || !p.set_file}
                     title={p.set_file ?? "No .set file"}
@@ -319,7 +346,7 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
                     disabled={busyId === p.pattern_id || !p.set_file}
                     title={p.set_file ?? "No .set file"}
                   >
-                    Save…
+                    ⬇
                   </button>{" "}
                   <button
                     className="btn-mini"
@@ -354,26 +381,7 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
                           <span className="kv-key" style={{ display: "block", marginBottom: 4 }}>
                             Indicators ({Object.keys(p.genetic_rule).length})
                           </span>
-                          <table className="indicators-table">
-                            <thead>
-                              <tr>
-                                <th style={{ width: 32 }} className="num">#</th>
-                                <th>Indicator</th>
-                                <th className="num">Min</th>
-                                <th className="num">Max</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {Object.entries(p.genetic_rule).map(([name, [lo, hi]], i) => (
-                                <tr key={name}>
-                                  <td className="num">{i + 1}</td>
-                                  <td className="mono">{name}</td>
-                                  <td className="num">{fmt(lo, 3)}</td>
-                                  <td className="num">{fmt(hi, 3)}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                          <IndicatorsTable rule={p.genetic_rule} />
                         </div>
                       )}
                       {p.marginal && (

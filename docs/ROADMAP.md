@@ -1,7 +1,30 @@
 # BETTER DISCOVERY — Roadmap
 
-> Living document. Updated 2026-05-17 (v0.7.1 shipped).
+> Living document. Updated 2026-05-20 (v0.7.1 shipped; Strategy Library + Compare on `claude/distracted-pascal-e99b0b`, not yet tagged).
 > Items grouped by target version. Effort is rough; ranking inside each version is by priority.
+
+---
+
+## Shipped (unreleased — on `claude/distracted-pascal-e99b0b`)
+
+A different-scope v0.8.0 candidate that landed before the originally-planned "trade-count gap fix" work below. Either renumber the gap-fix work to v0.9.0 and tag this as v0.8.0, or hold this branch and ship the original v0.8.0 first — decision pending.
+
+**Strategy Library + Compare tab**
+- New top-level **Strategy Compare** tab (5th in the sidebar).
+- `⭐ Save` button on every Discovery result row → copies `.set` + auto-resolved `trades.csv` + `PatternSummary` JSON into `userdata/library/<pattern_id>/`.
+- Side-by-side comparison canvas with horizontal scroll.
+- **Diff mode** highlighting: indicators unique to one column (amber), shared but with different bounds (orange), best-in-row metric (green).
+- MT5 Strategy Tester `.htm` report drop slot per column → sandboxed iframe preview.
+- MT5 trades `.csv` drop slot → on-the-fly trade count / gross P/L / max DD summary.
+- Backend: new `library.py` router (`save` / `list` / `attach` / `mt5_html` / `delete`), all 5 routes round-trip-tested.
+- Extracted shared `IndicatorsTable` component reused by DiscoveryResults + Compare tab.
+
+**Discovery settings cleanup (tier-based)**
+- Added `tier: "core" | "advanced"` field to `ParamMeta`, surfaced via `/discovery/params`.
+- 36 power-user params demoted behind a per-group `▸ Show advanced (N)` collapse with auto-reveal when edited.
+- Audit run against all 79 PARAM_META keys: **zero dead params** — everything was already wired up. Cleanup was purely a presentation change.
+- Group rename: **Scoring → "Scoring & Targets"**. Label rename: **"Overlap Threshold" → "Max Trade Overlap"** (no longer in a single-item Ensemble group).
+- Description fixes on `SCORE_WILSON_CONFIDENCE` (drives wilson_wr display in both modes, not just legacy) and `SCORE_W_*` (active in both target and legacy modes with different semantics).
 
 ---
 
@@ -54,13 +77,15 @@ This release closes the gap between what Pattern Discovery predicts a strategy w
 
 | # | Item | Effort | Notes |
 |---|---|---|---|
-| 13 | Gray out / collapse the 5 legacy `SCORE_W_*` + `SCORE_WILSON_CONFIDENCE` params when `ENABLE_TARGET_SCORING=true` | 2 hrs | UI cleanup carryover from v0.7.1 roadmap |
+| ~~13~~ | ~~Gray out / collapse the 5 legacy `SCORE_W_*` + `SCORE_WILSON_CONFIDENCE` params when `ENABLE_TARGET_SCORING=true`~~ | ~~2 hrs~~ | ✅ **Done differently on `distracted-pascal-e99b0b`** — demoted to `tier="advanced"` (always behind "Show advanced") because the audit found `SCORE_W_*` are active in **both** target and legacy modes. The original "collapse when targets ON" would have hidden a knob the user still needs. |
 | 14 | Default `MULTI_SEED_COUNT` 6 → 1, add a "6× multi-seed" toggle | 1 hr | UX carryover |
-| 15 | Merge `Ensemble` (1 param) into `Quality Filters` accordion | 30 min | UI carryover |
+| ~~15~~ | ~~Merge `Ensemble` (1 param) into `Quality Filters` accordion~~ | ~~30 min~~ | ✅ **Done on `distracted-pascal-e99b0b`** — `ENSEMBLE_OVERLAP_THRESHOLD` now lives under Quality Filters with the new label "Max Trade Overlap". |
 | 16 | Rename `MIN_DIST_RR` → "Min SL/TP Ratio (filter)"; rename `MIN_TRADES_PER_DAY_PASS2` → "Min Trades/Day (P2 entry)" | 30 min | UI carryover |
 | 17 | Add `(?)` tooltips for `TARGET_WR_PCT` vs `MIN_WIN_RATE`, `MIN_DIST_RR` vs `TARGET_RR`, and the 5 WR fields in DiscoveryResults | 1.5 hrs | UI carryover |
-| 18 | Hide `INDICATOR_WARMUP_BARS`, `RECENT_BARS`, `OUTPUT_FOLDER` under "Show advanced" | 1 hr | UI carryover |
+| ~~18~~ | ~~Hide `INDICATOR_WARMUP_BARS`, `RECENT_BARS`, `OUTPUT_FOLDER` under "Show advanced"~~ | ~~1 hr~~ | ✅ **Done on `distracted-pascal-e99b0b`** — all three are in `_ADVANCED_KEYS`. The Advanced collapse pattern now applies to 36 params across the accordion, not just these three. |
 | 19 | Per-sub-seed fractional progress emission for Discovery `[i/N]` parser (was deferred earlier) | 4 hrs | UX carryover |
+
+**v0.8.x remaining effort:** ~7 hrs (items #14, #16, #17, #19).
 
 ---
 

@@ -18,6 +18,10 @@ export interface ParamDef {
   max?: number;
   step?: number;
   options?: string[];
+  /** "core" = always visible in the per-run accordion.
+   *  "advanced" = hidden behind a per-group "Show advanced (N)" collapse.
+   *  Defaults to "core" when the backend omits the field (older builds). */
+  tier?: "core" | "advanced";
 }
 
 export async function getDefaults(): Promise<Record<string, unknown>> {

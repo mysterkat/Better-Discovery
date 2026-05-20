@@ -1,6 +1,11 @@
 import { lazy, type ComponentType } from "react";
 
-export type TabId = "data-import" | "discovery" | "set-to-mql" | "monte-carlo";
+export type TabId =
+  | "data-import"
+  | "discovery"
+  | "strategy-compare"
+  | "set-to-mql"
+  | "monte-carlo";
 
 export interface TabDef {
   id: TabId;
@@ -21,6 +26,12 @@ export const TABS: TabDef[] = [
     label: "Pattern Discovery",
     icon: "🔍",
     Component: lazy(() => import("./tabs/DiscoveryTab")),
+  },
+  {
+    id: "strategy-compare",
+    label: "Strategy Compare",
+    icon: "≡",
+    Component: lazy(() => import("./tabs/StrategyCompareTab")),
   },
   {
     id: "set-to-mql",

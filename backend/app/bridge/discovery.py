@@ -70,6 +70,10 @@ class ParamMeta:
     max: float | None = None
     step: float | None = None
     options: list[str] = field(default_factory=list)  # for str enum
+    # "core" = always visible in the per-run accordion.
+    # "advanced" = hidden behind a per-group "Show advanced (N)" collapse.
+    # Tier is assigned after PARAM_META is built — see _ADVANCED_KEYS below.
+    tier: str = "core"
 
 
 # Full metadata map for every overridable constant.
@@ -187,9 +191,6 @@ PARAM_META: dict[str, ParamMeta] = {
     "PASS2_MUTATE_RATE":    ParamMeta("Mutation Rate (P2)",    "Genetic Pass 2", "float", min=0.05, max=0.5, step=0.05),
     "PASS2_QUANTILE_LO":    ParamMeta("Quantile Low (P2)",     "Genetic Pass 2", "float", min=0.05, max=0.45, step=0.05),
     "PASS2_QUANTILE_HI":    ParamMeta("Quantile High (P2)",    "Genetic Pass 2", "float", min=0.55, max=0.95, step=0.05),
-    # ── Ensemble ────────────────────────────────────────────────────────────
-    "ENSEMBLE_OVERLAP_THRESHOLD":ParamMeta("Overlap Threshold","Ensemble", "float",
-                                            "Max trade overlap allowed between patterns", min=0.3, max=1.0, step=0.05),
     # ── Bidirectional ───────────────────────────────────────────────────────
     "BIDIR_MIN_WR":          ParamMeta("Min Win Rate",         "Bidirectional", "float",
                                         "Min win-rate % to run direction check", min=45.0, max=70.0, step=0.5),
@@ -202,31 +203,44 @@ PARAM_META: dict[str, ParamMeta] = {
     # maximising. Below target → quadratic penalty. At target → full credit.
     # Above target → tiny log bonus capped by EXCESS_BONUS_WEIGHT so the GA
     # won't sacrifice one objective to push another past its target.
-    "ENABLE_TARGET_SCORING": ParamMeta("Target-Driven Scoring", "Scoring", "bool",
+    "ENABLE_TARGET_SCORING": ParamMeta("Target-Driven Scoring", "Scoring & Targets", "bool",
                                         "When on (recommended), the GA evolves toward your target values "
                                         "instead of blindly maximising. Turn off to use legacy v0.5 behaviour."),
-    "TARGET_WR_PCT":         ParamMeta("Target: Win Rate %",   "Scoring", "float",
+    "TARGET_WR_PCT":         ParamMeta("Target: Win Rate %",   "Scoring & Targets", "float",
                                         "GA will aim for this win-rate. Exceeding is OK if "
                                         "it costs nothing on other objectives.", min=40.0, max=85.0, step=0.5),
-    "TARGET_PF":             ParamMeta("Target: Profit Factor","Scoring", "float",
+    "TARGET_PF":             ParamMeta("Target: Profit Factor","Scoring & Targets", "float",
                                         "GA aims for this profit factor.", min=1.1, max=4.0, step=0.05),
-    "TARGET_RR":             ParamMeta("Target: R:R",          "Scoring", "float",
+    "TARGET_RR":             ParamMeta("Target: R:R",          "Scoring & Targets", "float",
                                         "GA aims for this R:R as multiple of break-even.",
                                         min=0.8, max=3.0, step=0.05),
-    "TARGET_STABILITY":      ParamMeta("Target: Stability",    "Scoring", "float",
+    "TARGET_STABILITY":      ParamMeta("Target: Stability",    "Scoring & Targets", "float",
                                         "GA aims for this time-consistency × distribution score (0..1).",
                                         min=0.3, max=0.95, step=0.05),
-    "EXCESS_BONUS_WEIGHT":   ParamMeta("Excess Bonus Weight",  "Scoring", "float",
+    "EXCESS_BONUS_WEIGHT":   ParamMeta("Excess Bonus Weight",  "Scoring & Targets", "float",
                                         "How much the GA rewards exceeding targets. 0 = strict, "
                                         "0.1 = mild (recommended), 1.0 = legacy max-everything.",
                                         min=0.0, max=1.0, step=0.05),
-    "SCORE_W_WR":            ParamMeta("Weight: Win Rate",     "Scoring", "float", min=0.0, max=1.0, step=0.05),
-    "SCORE_W_PF":            ParamMeta("Weight: Profit Factor","Scoring", "float", min=0.0, max=1.0, step=0.05),
-    "SCORE_W_RR":            ParamMeta("Weight: Risk/Reward",  "Scoring", "float", min=0.0, max=1.0, step=0.05),
-    "SCORE_W_STAB":          ParamMeta("Weight: Stability",    "Scoring", "float", min=0.0, max=1.0, step=0.05),
-    "SCORE_WILSON_CONFIDENCE":ParamMeta("Wilson Confidence",   "Scoring", "float",
-                                         "Confidence level for Wilson score interval (used only when "
-                                         "Target-Driven Scoring is OFF)", min=0.5, max=0.99, step=0.01),
+    # SCORE_W_* are used in BOTH modes: with target scoring they weight each
+    # objective's distance-to-target; in legacy mode they weight the absolute
+    # metric. Same knob, different semantics — keep them visible in both modes.
+    "SCORE_W_WR":            ParamMeta("Weight: Win Rate",     "Scoring & Targets", "float",
+                                        "Relative importance of WR (active in both target and legacy modes)",
+                                        min=0.0, max=1.0, step=0.05),
+    "SCORE_W_PF":            ParamMeta("Weight: Profit Factor","Scoring & Targets", "float",
+                                        "Relative importance of PF (active in both target and legacy modes)",
+                                        min=0.0, max=1.0, step=0.05),
+    "SCORE_W_RR":            ParamMeta("Weight: Risk/Reward",  "Scoring & Targets", "float",
+                                        "Relative importance of R:R (active in both target and legacy modes)",
+                                        min=0.0, max=1.0, step=0.05),
+    "SCORE_W_STAB":          ParamMeta("Weight: Stability",    "Scoring & Targets", "float",
+                                        "Relative importance of stability (active in both target and legacy modes)",
+                                        min=0.0, max=1.0, step=0.05),
+    "SCORE_WILSON_CONFIDENCE":ParamMeta("Wilson Confidence",   "Scoring & Targets", "float",
+                                         "Confidence level for Wilson score interval. Drives the GA only "
+                                         "in legacy mode (Target-Driven OFF), but also feeds the wilson_wr "
+                                         "column shown in every result row.",
+                                         min=0.5, max=0.99, step=0.01),
     # ── Quality Filters ─────────────────────────────────────────────────────
     "MIN_FREQ_PER_DAY":      ParamMeta("Min Freq/Day",         "Quality Filters", "float",
                                         "Min pattern occurrences per trading day", min=0.05, max=5.0, step=0.05),
@@ -246,6 +260,11 @@ PARAM_META: dict[str, ParamMeta] = {
                                         "Max allowed pattern-pair trade correlation", min=0.3, max=1.0, step=0.05),
     "RECENT_BARS":           ParamMeta("Recent Bars",          "Quality Filters", "int",
                                         "Recency window for stability scoring", min=1000, max=20000, step=500),
+    # v0.8.0: was its own single-item "Ensemble" group; merged here since it's
+    # functionally another quality gate (dedupes overlapping patterns).
+    "ENSEMBLE_OVERLAP_THRESHOLD":ParamMeta("Max Trade Overlap","Quality Filters", "float",
+                                            "Max trade overlap allowed between patterns (Jaccard)",
+                                            min=0.3, max=1.0, step=0.05),
     # ── MC Auto-run ─────────────────────────────────────────────────────────
     "RUN_MC_ON_TOP_N":       ParamMeta("Auto-MC Top N",        "MC Auto-run", "int",
                                         "Run quick MC on top-N patterns after discovery", min=0, max=20, step=1),
@@ -261,6 +280,42 @@ PARAM_META: dict[str, ParamMeta] = {
 
 # Flat set used as whitelist — derived from the metadata map so the two stay in sync.
 OVERRIDABLE_CONSTANTS: set[str] = set(PARAM_META.keys())
+
+
+# Params demoted behind a per-group "Show advanced (N)" collapse in the UI.
+# These are still fully active in the toolkit; they're just less commonly
+# touched, so hiding them by default cuts visual clutter without removing
+# any capability. Power users open the collapse to access them.
+_ADVANCED_KEYS: set[str] = {
+    # Data & Files
+    "MTF_SCORE_MODE", "HTF_DIV_TF", "OUTPUT_FOLDER",
+    # General
+    "MT5_SERVER_UTC_OFFSET", "INDICATOR_WARMUP_BARS",
+    # Regime & Features
+    "SHAPE_MATCH_THRESHOLD",
+    # Trade Simulation
+    "MEANINGFUL_SUSTAIN_BARS", "COOLDOWN_BARS",
+    # Genetic Pass 1
+    "GENE_N_COLS_MIN", "GENE_N_COLS_MAX", "GENE_REPAIR_ATTEMPTS",
+    "GENE_DIVERSITY_THRESHOLD", "GENE_ISLAND_COUNT", "GENE_MIGRATION_INTERVAL",
+    # Genetic Pass 2 — entire group is tuning territory
+    "TOP_FRACTION_PASS2", "MIN_TRADES_PER_DAY_PASS2",
+    "PASS2_GENERATIONS", "PASS2_POPULATION", "PASS2_MUTATE_RATE",
+    "PASS2_QUANTILE_LO", "PASS2_QUANTILE_HI",
+    # Bidirectional — gating thresholds rarely tuned
+    "BIDIR_MIN_WR", "BIDIR_MIN_TRADES", "DISCRIM_MIN_ACCURACY",
+    # Scoring — targets are the primary knobs; weights + bonus + wilson are advanced
+    "EXCESS_BONUS_WEIGHT",
+    "SCORE_W_WR", "SCORE_W_PF", "SCORE_W_RR", "SCORE_W_STAB",
+    "SCORE_WILSON_CONFIDENCE",
+    # Quality Filters
+    "CORRELATION_THRESHOLD", "RECENT_BARS",
+    # MC Auto-run — RUN_MC_ON_TOP_N is the master toggle; the rest are sizing
+    "MC_N_SIMS", "MC_BALANCE", "MC_LOT", "MC_MAX_DAYS",
+}
+for _k in _ADVANCED_KEYS:
+    if _k in PARAM_META:
+        PARAM_META[_k].tier = "advanced"
 
 
 def _get_module():
@@ -327,6 +382,7 @@ def list_defaults_with_meta() -> list[dict[str, Any]]:
             "group": meta.group,
             "type": meta.type,
             "description": meta.description,
+            "tier": meta.tier,
         }
         if meta.min is not None:
             entry["min"] = meta.min

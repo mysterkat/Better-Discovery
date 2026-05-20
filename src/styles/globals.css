@@ -974,6 +974,35 @@ kbd {
   background: var(--bg);
 }
 
+.param-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--text2);
+  font-size: 12px;
+  cursor: pointer;
+}
+.param-advanced-toggle:hover {
+  background: var(--bg2);
+  color: var(--text);
+}
+.param-advanced-toggle .param-group-count {
+  margin-left: auto;
+  padding: 1px 8px;
+}
+
+.param-advanced-grid {
+  margin-top: 10px;
+  padding: 12px;
+  background: var(--bg2);
+  border-radius: 6px;
+}
+
 /* ── MT5 connection status badge ──────────────────────────────────── */
 .status-badge {
   display: inline-flex;
@@ -1885,3 +1914,272 @@ kbd {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--text);
 }
+.indicators-table-compact th,
+.indicators-table-compact td {
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
+/* ── Strategy Compare tab (v0.8.0) ───────────────────────────────────────── */
+.strategy-compare-root {
+  padding: 16px 20px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.compare-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.compare-layout {
+  display: flex;
+  gap: 14px;
+  flex: 1;
+  min-height: 0;
+}
+
+.compare-rail {
+  flex: 0 0 280px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.compare-rail-title {
+  padding: 10px 12px;
+  font-weight: 600;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+}
+.compare-rail-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.compare-rail-list li {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.compare-rail-list li.selected {
+  background: rgba(100, 149, 237, 0.08);
+}
+.compare-rail-list li:last-child { border-bottom: none; }
+.compare-rail-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.compare-rail-id {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.compare-rail-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 2px;
+  padding-left: 26px;
+  font-size: 11px;
+}
+.compare-empty-rail {
+  padding: 16px;
+  text-align: center;
+}
+
+.compare-canvas {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  overflow-x: auto;
+  overflow-y: auto;
+}
+.compare-canvas-empty {
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text2);
+}
+.compare-columns {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  align-items: flex-start;
+}
+.compare-column {
+  flex: 0 0 320px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+  display: flex;
+  flex-direction: column;
+}
+.compare-column-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.compare-column-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compare-column-subhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.compare-section {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+.compare-section:first-of-type { border-top: none; }
+.compare-section h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text2);
+  letter-spacing: 0.04em;
+}
+.compare-metrics {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.compare-metrics td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.compare-metrics .kv-key { color: var(--text2); }
+.compare-metrics .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.mt5-attached { display: flex; flex-direction: column; gap: 6px; }
+
+.dir-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+.dir-badge.dir-long  { background: rgba(46, 213, 115, 0.18); color: #2bb35e; }
+.dir-badge.dir-short { background: rgba(255, 99, 132, 0.18); color: #d4385c; }
+
+.content-dropzone {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-top: 6px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text2);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.content-dropzone:hover { background: var(--bg3); border-color: var(--accent2); }
+.content-dropzone-hover { background: var(--bg3); border-color: var(--accent2); }
+.content-dropzone-disabled { opacity: 0.5; cursor: not-allowed; }
+.content-dropzone-compact { padding: 6px 8px; font-size: 10px; }
+.content-dropzone-icon { font-size: 14px; }
+.content-dropzone .field-hint { margin-left: auto; }
+
+/* ── Compare overview blocks (heatmap, alerts, equity chart) ─────────────── */
+.compare-overview-block {
+  margin: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+}
+.compare-overview-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.compare-overview-header h4 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+.duplicate-alert { margin: 0 0 6px; }
+.duplicate-alert:last-child { margin-bottom: 0; }
+
+/* ── Similarity heatmap table ────────────────────────────────────────────── */
+.heatmap-scroll { overflow-x: auto; }
+.heatmap {
+  border-collapse: collapse;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.heatmap th,
+.heatmap td {
+  padding: 4px 8px;
+  text-align: center;
+  border: 1px solid var(--border);
+  min-width: 56px;
+  white-space: nowrap;
+}
+.heatmap thead th {
+  background: var(--bg);
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+.heatmap tbody th {
+  background: var(--bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  text-align: right;
+}
+.heatmap-diag { color: var(--text2); background: var(--bg3); }
+.heatmap-loading { color: var(--text2); font-style: italic; }
+
+/* ── Rail uniqueness badge ───────────────────────────────────────────────── */
+.compare-rail-badge-row {
+  padding-left: 26px;
+  margin-top: 2px;
+}
+.uniq-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-radius: 3px;
+}
+.uniq-badge-uniq { background: rgba(46, 213, 115, 0.18); color: #2bb35e; }
+.uniq-badge-sim  { background: rgba(255, 215, 64, 0.18); color: #b48a00; }
+.uniq-badge-dup  { background: rgba(255, 99, 132, 0.18); color: #d4385c; }
