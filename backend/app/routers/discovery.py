@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException
 from ..bridge import discovery as disc_bridge
 from ..jobs.manager import JOBS
 from ..jobs.runners import run_in_thread
-from ..paths import DEFAULT_DISC_OUTPUT
+from ..paths import DEFAULT_DISC_OUTPUT, USER_DATA
 from ..schemas.common import JobRef
 from ..schemas.discovery import DiscoveryStartRequest
 
@@ -62,13 +62,47 @@ def discovery_results(job_id: str) -> JobRef:
 def discovery_set_file(path: str) -> dict:
     """Return the contents of a .set file produced by a discovery run.
 
-    The file path must resolve INSIDE the discovery output folder — this
-    prevents the endpoint from being abused to read arbitrary files.
+    Security: the file path must resolve INSIDE one of the known-safe roots
+    so the endpoint can't be abused to read arbitrary files.
+
+    v1.1.3 — allowed roots are:
+      * `DEFAULT_DISC_OUTPUT`          — the app's default discovery output
+      * `USER_DATA`                    — the broader app-writable area
+      * the toolkit module's current `OUTPUT_FOLDER` — handles user overrides
+        that point outside USER_DATA (e.g. a custom folder on the desktop)
+
+    Previously this used `str(resolved).startswith(str(safe_root))` against
+    only DEFAULT_DISC_OUTPUT — fragile on Windows (case, trailing-sep) AND
+    refused legitimate paths when the user overrode OUTPUT_FOLDER.
     """
     resolved = Path(path).resolve()
-    safe_root = DEFAULT_DISC_OUTPUT.resolve()
-    if not str(resolved).startswith(str(safe_root)):
-        raise HTTPException(403, f"path outside discovery output folder: {path}")
+
+    # Build the set of allowed roots (resolved + normalised).
+    allowed_roots: list[Path] = [
+        DEFAULT_DISC_OUTPUT.resolve(),
+        USER_DATA.resolve(),
+    ]
+    # Pull the current OUTPUT_FOLDER from the toolkit module so any custom
+    # override from the most recent / current run is also trusted.
+    try:
+        mod_out = getattr(disc_bridge._get_module(), "OUTPUT_FOLDER", None)
+        if mod_out:
+            allowed_roots.append(Path(str(mod_out)).resolve())
+    except Exception:
+        pass  # module load failure → fall back to the static roots above
+
+    def _inside(p: Path, root: Path) -> bool:
+        try:
+            p.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    if not any(_inside(resolved, r) for r in allowed_roots):
+        raise HTTPException(
+            403,
+            f"path outside any allowed discovery output folder: {path}",
+        )
     if not resolved.is_file() or resolved.suffix != ".set":
         raise HTTPException(404, f".set file not found: {path}")
     try:
