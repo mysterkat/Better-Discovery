@@ -162,17 +162,26 @@ PARAM_META: dict[str, ParamMeta] = {
                                        "Favourable excursion quantile for take-profit", min=0.3, max=0.99, step=0.01),
     "MIN_DIST_RR":          ParamMeta("Min R:R Distance",      "SL / TP", "float",
                                        "Minimum risk-reward ratio", min=0.1, max=3.0, step=0.05),
-    # ── Genetic Pass 1 ──────────────────────────────────────────────────────
-    "GENETIC_GENERATIONS":  ParamMeta("Generations",           "Genetic Pass 1 (GA)", "int",
-                                       "Evolution generations", min=5, max=100, step=5),
-    "GENETIC_POPULATION":   ParamMeta("Population",            "Genetic Pass 1 (GA)", "int",
-                                       "Individuals per generation", min=20, max=200, step=10),
+    # ── Search Budget (v1.1.1 — shared by GA and Optuna) ────────────────────
+    # n_trials for Optuna = GENETIC_GENERATIONS × GENETIC_POPULATION, so these
+    # four params apply regardless of optimizer choice and must stay active.
+    "GENETIC_GENERATIONS":  ParamMeta("Generations / Trial Multiplier",
+                                       "Search Budget", "int",
+                                       "GA: evolution generations.  Optuna: trials = generations × population.",
+                                       min=5, max=100, step=5),
+    "GENETIC_POPULATION":   ParamMeta("Population / Trial Multiplier",
+                                       "Search Budget", "int",
+                                       "GA: individuals per generation.  Optuna: trials = generations × population.",
+                                       min=20, max=200, step=10),
+    "GENE_N_COLS_MIN":      ParamMeta("Min Rule Columns",      "Search Budget", "int",
+                                       "Minimum conditions in a rule (enforced by both GA and Optuna).",
+                                       min=1, max=10, step=1),
+    "GENE_N_COLS_MAX":      ParamMeta("Max Rule Columns",      "Search Budget", "int",
+                                       "Maximum conditions in a rule (enforced by both GA and Optuna).",
+                                       min=2, max=15, step=1),
+    # ── Genetic Pass 1 (GA-specific knobs only) ─────────────────────────────
     "GENETIC_MUTATE_RATE":  ParamMeta("Mutation Rate",         "Genetic Pass 1 (GA)", "float",
                                        "Gene mutation probability", min=0.05, max=0.5, step=0.05),
-    "GENE_N_COLS_MIN":      ParamMeta("Min Gene Columns",      "Genetic Pass 1 (GA)", "int",
-                                       "Min conditions in a rule", min=1, max=10, step=1),
-    "GENE_N_COLS_MAX":      ParamMeta("Max Gene Columns",      "Genetic Pass 1 (GA)", "int",
-                                       "Max conditions in a rule", min=2, max=15, step=1),
     "GENE_REPAIR_ATTEMPTS": ParamMeta("Repair Attempts",       "Genetic Pass 1 (GA)", "int",
                                        "Tries to fix an invalid individual", min=1, max=10, step=1),
     "GENE_DIVERSITY_THRESHOLD":ParamMeta("Diversity Threshold","Genetic Pass 1 (GA)", "float",
@@ -198,15 +207,15 @@ PARAM_META: dict[str, ParamMeta] = {
                                        "Fraction of optimizer calls that hit the real scorer (rest use GBM).",
                                        min=0.05, max=0.5, step=0.05),
     # ── Genetic Pass 2 ──────────────────────────────────────────────────────
-    "TOP_FRACTION_PASS2":      ParamMeta("Top Fraction",       "Genetic Pass 2 (GA)", "float",
+    "TOP_FRACTION_PASS2":      ParamMeta("Top Fraction",       "Genetic Pass 2", "float",
                                           "Best-scoring fraction carried into pass 2", min=0.05, max=0.5, step=0.05),
-    "MIN_TRADES_PER_DAY_PASS2":ParamMeta("Min Trades/Day",     "Genetic Pass 2 (GA)", "float",
+    "MIN_TRADES_PER_DAY_PASS2":ParamMeta("Min Trades/Day",     "Genetic Pass 2", "float",
                                           "Min trade frequency required in pass 2", min=0.1, max=5.0, step=0.1),
-    "PASS2_GENERATIONS":    ParamMeta("Generations (P2)",      "Genetic Pass 2 (GA)", "int",  min=5, max=100, step=5),
-    "PASS2_POPULATION":     ParamMeta("Population (P2)",       "Genetic Pass 2 (GA)", "int",  min=10, max=100, step=5),
-    "PASS2_MUTATE_RATE":    ParamMeta("Mutation Rate (P2)",    "Genetic Pass 2 (GA)", "float", min=0.05, max=0.5, step=0.05),
-    "PASS2_QUANTILE_LO":    ParamMeta("Quantile Low (P2)",     "Genetic Pass 2 (GA)", "float", min=0.05, max=0.45, step=0.05),
-    "PASS2_QUANTILE_HI":    ParamMeta("Quantile High (P2)",    "Genetic Pass 2 (GA)", "float", min=0.55, max=0.95, step=0.05),
+    "PASS2_GENERATIONS":    ParamMeta("Generations (P2)",      "Genetic Pass 2", "int",  min=5, max=100, step=5),
+    "PASS2_POPULATION":     ParamMeta("Population (P2)",       "Genetic Pass 2", "int",  min=10, max=100, step=5),
+    "PASS2_MUTATE_RATE":    ParamMeta("Mutation Rate (P2)",    "Genetic Pass 2", "float", min=0.05, max=0.5, step=0.05),
+    "PASS2_QUANTILE_LO":    ParamMeta("Quantile Low (P2)",     "Genetic Pass 2", "float", min=0.05, max=0.45, step=0.05),
+    "PASS2_QUANTILE_HI":    ParamMeta("Quantile High (P2)",    "Genetic Pass 2", "float", min=0.55, max=0.95, step=0.05),
     # ── Bidirectional ───────────────────────────────────────────────────────
     "FORCE_DIRECTION":       ParamMeta("Force Direction",      "Bidirectional", "str",
                                         "Lock every cluster to a single trade direction. "
@@ -334,8 +343,11 @@ OVERRIDABLE_CONSTANTS: set[str] = set(PARAM_META.keys())
 # When the gate's key holds the listed value, the group is "active"; otherwise
 # the frontend shows it with reduced opacity and an "Inactive" badge.
 GROUP_GATES: dict[str, dict[str, str]] = {
+    # v1.1.1: only the GA-specific knobs in Pass 1 are gated.
+    # Search Budget (Generations/Population/MinCols/MaxCols) is shared with
+    # Optuna and stays active.  Pass 2 always runs as GA (no Optuna pass-2
+    # exists yet) so its params apply regardless of pass-1 optimizer.
     "Genetic Pass 1 (GA)": {"key": "GENE_OPTIMIZER", "value": "ga"},
-    "Genetic Pass 2 (GA)": {"key": "GENE_OPTIMIZER", "value": "ga"},
 }
 
 
@@ -348,12 +360,14 @@ _ADVANCED_KEYS: set[str] = {
     "SHAPE_MATCH_THRESHOLD",
     # Trade Simulation
     "MEANINGFUL_SUSTAIN_BARS", "COOLDOWN_BARS",
+    # Search Budget — power-user bounds on rule complexity
+    "GENE_N_COLS_MIN", "GENE_N_COLS_MAX",
     # Genetic Pass 1 (GA)
-    "GENE_N_COLS_MIN", "GENE_N_COLS_MAX", "GENE_REPAIR_ATTEMPTS",
+    "GENE_REPAIR_ATTEMPTS",
     "GENE_DIVERSITY_THRESHOLD", "GENE_ISLAND_COUNT", "GENE_MIGRATION_INTERVAL",
     # Optimizer — surrogate tuning is advanced; main toggle stays core
     "SURROGATE_REAL_FRAC",
-    # Genetic Pass 2 (GA) — entire group is tuning territory
+    # Genetic Pass 2 — entire group is tuning territory (always runs as GA)
     "TOP_FRACTION_PASS2", "MIN_TRADES_PER_DAY_PASS2",
     "PASS2_GENERATIONS", "PASS2_POPULATION", "PASS2_MUTATE_RATE",
     "PASS2_QUANTILE_LO", "PASS2_QUANTILE_HI",
