@@ -467,6 +467,127 @@ def _build_regime_daily(trades_df, scale=1.0):
     return regime_by_date, regime_pnl_pools
 
 
+# =============================================================================
+#  VECTORISED EVAL-PHASE FAST PATH (v0.9.x #25)
+#  Handles the common production case: predrawn pnl matrix, no Markov,
+#  static or trailing DD.  ~15-30× faster than the Python loop for
+#  10k sims × 60 days.  Falls back to run_eval_phase loop for Markov paths.
+# =============================================================================
+
+def _run_eval_phase_vec(pnl_mat, balance, profit_target_pct, max_daily_dd_pct,
+                        max_total_dd_pct, min_days, max_sim_days, n_sims,
+                        intraday_dd_factor=1.0, dd_style="static",
+                        consistency_max_daily_pct=None, keep_curves=0):
+    """Vectorised implementation of run_eval_phase for predrawn paths.
+
+    Parameters mirror run_eval_phase; ``pnl_mat`` is the (n_sims × max_sim_days)
+    float32 predrawn matrix.  Returns the same (results_list, curves_list)
+    tuple so the caller is a drop-in replacement.
+    """
+    eff_daily_loss  = balance * max_daily_dd_pct * intraday_dd_factor
+    eff_total_dd    = max_total_dd_pct * intraday_dd_factor
+    total_floor_0   = balance * (1.0 - eff_total_dd)
+    profit_tgt_abs  = balance * profit_target_pct
+    _trailing       = dd_style in ("trailing_eod", "trailing_intraday")
+    _INF            = max_sim_days  # sentinel: "never hit"
+
+    # ── equity matrix ──────────────────────────────────────────────────────
+    # shape: (n_sims, max_sim_days); pnl_mat may be float32 — promote to f64.
+    pnl = np.asarray(pnl_mat[:n_sims], dtype=np.float64)
+    if pnl.shape[1] < max_sim_days:
+        # Pad with resampled columns (shouldn't normally happen, but be safe).
+        pad = max_sim_days - pnl.shape[1]
+        pnl = np.hstack([pnl, pnl[:, :pad]])
+    pnl = pnl[:, :max_sim_days]
+
+    cum_pnl    = np.cumsum(pnl, axis=1)               # (n_sims, max_sim_days)
+    equity_mat = balance + cum_pnl                     # (n_sims, max_sim_days)
+
+    # ── daily DD breach: pnl[i,t] < -eff_daily_loss ───────────────────────
+    # Because daily floor = equity_before + pnl >= equity_before - daily_loss
+    daily_dd_breach = pnl < -eff_daily_loss            # (n_sims, max_sim_days)
+
+    # ── total DD breach ────────────────────────────────────────────────────
+    if _trailing:
+        # Trailing floor ratchets up at START of each day using prior equity.
+        equity_before = np.hstack([
+            np.full((n_sims, 1), balance),
+            equity_mat[:, :-1],
+        ])  # (n_sims, max_sim_days)
+        candidate     = equity_before * (1.0 - eff_total_dd)
+        floor_mat     = np.maximum(total_floor_0,
+                                   np.maximum.accumulate(candidate, axis=1))
+    else:
+        floor_mat = np.full((n_sims, max_sim_days), total_floor_0)
+
+    total_dd_breach  = equity_mat < floor_mat          # (n_sims, max_sim_days)
+    any_breach       = daily_dd_breach | total_dd_breach
+
+    # ── profit target (with min_days gate) ────────────────────────────────
+    profit_ok = cum_pnl >= profit_tgt_abs              # (n_sims, max_sim_days)
+    if min_days > 0:
+        profit_ok[:, :min_days] = False
+
+    # ── first-event index per sim ──────────────────────────────────────────
+    def _first_true(mask):
+        """Index of first True per row, or _INF if never True."""
+        any_t = mask.any(axis=1)
+        idx   = np.argmax(mask, axis=1)
+        return np.where(any_t, idx, _INF)
+
+    breach_day = _first_true(any_breach)   # 0-indexed, _INF if clean
+    pass_day   = _first_true(profit_ok)    # 0-indexed, _INF if never passed
+
+    # ── outcome per sim ────────────────────────────────────────────────────
+    passed     = (pass_day < breach_day) & (pass_day < max_sim_days)
+    days_arr   = np.where(passed, pass_day + 1,
+                 np.where(breach_day < max_sim_days, breach_day + 1,
+                          max_sim_days))
+
+    # Fail reason for breaching sims (advanced index into breach day column)
+    rows          = np.arange(n_sims)
+    safe_bd       = np.minimum(breach_day, max_sim_days - 1)
+    breach_is_dly = daily_dd_breach[rows, safe_bd] & (breach_day < max_sim_days)
+    fail_reason   = np.where(passed,        "pass",
+                    np.where(breach_is_dly, "daily_dd",
+                    np.where(breach_day < max_sim_days, "total_dd",
+                                            "profit_shortfall")))
+
+    # ── optional consistency check (loop only over passing sims) ──────────
+    if consistency_max_daily_pct is not None and passed.any():
+        cmax = float(consistency_max_daily_pct)
+        for i in np.where(passed)[0]:
+            nd   = int(days_arr[i])
+            dpnl = pnl[i, :nd]
+            pos  = dpnl[dpnl > 0].sum()
+            if pos > 0 and dpnl.max() > pos * cmax:
+                passed[i]     = False
+                fail_reason[i] = "consistency_violation"
+
+    # ── equity curves (first keep_curves sims, same format as loop) ───────
+    _keep_n = max(0, int(keep_curves))
+    curves  = []
+    for i in range(min(_keep_n or n_sims, n_sims)):
+        nd   = int(days_arr[i])
+        path = [balance] + list(equity_mat[i, :nd])
+        curves.append(path)
+
+    # ── build results list matching run_eval_phase output ─────────────────
+    final_eq_idx = np.minimum(days_arr - 1, max_sim_days - 1)
+    final_equity = equity_mat[rows, final_eq_idx]
+
+    results = [
+        {
+            "passed"      : bool(passed[i]),
+            "fail_reason" : None if passed[i] else fail_reason[i],
+            "days"        : int(days_arr[i]),
+            "final_equity": float(final_equity[i]),
+        }
+        for i in range(n_sims)
+    ]
+    return results, curves
+
+
 def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
                    max_total_dd_pct, min_days, max_sim_days, rng, n_sims,
                    trans_matrix=None, regime_pnl_pools=None, start_regime=None,
@@ -517,6 +638,25 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
         retained on the returned ``curves`` list (others are dropped to save
         memory). When 0, all curves are returned (legacy behaviour).
     """
+    # v0.9.x #25 — vectorised fast path for the common production case:
+    # predrawn path matrix available, no Markov sampling needed.
+    # Falls back to the Python loop below for Markov or live-RNG paths.
+    _can_vec = (
+        predrawn_pnl is not None
+        and trans_matrix is None
+        and isinstance(predrawn_pnl, np.ndarray)
+        and predrawn_pnl.ndim == 2
+    )
+    if _can_vec:
+        return _run_eval_phase_vec(
+            predrawn_pnl, balance, profit_target_pct, max_daily_dd_pct,
+            max_total_dd_pct, min_days, max_sim_days, n_sims,
+            intraday_dd_factor=intraday_dd_factor,
+            dd_style=dd_style,
+            consistency_max_daily_pct=consistency_max_daily_pct,
+            keep_curves=keep_curves,
+        )
+
     # Apply intraday safety factor: tighter effective limits than the rulebook.
     effective_daily_loss_abs = balance * max_daily_dd_pct * intraday_dd_factor
     effective_total_dd_pct   = max_total_dd_pct * intraday_dd_factor

@@ -168,6 +168,11 @@ GENE_REPAIR_ATTEMPTS     = 3
 GENE_DIVERSITY_THRESHOLD = 0.70
 GENE_ISLAND_COUNT        = 4
 GENE_MIGRATION_INTERVAL  = 10
+# v0.9.x #24 — deterministic crowding replaces island model in pass 1.
+# Single island of GENE_ISLAND_COUNT × pop_size with DC replacement;
+# maintains diversity without spawning GENE_ISLAND_COUNT separate processes.
+# Set to False to revert to island model (for A/B benchmarking).
+GENE_USE_CROWDING        = True
 
 # Pass 2
 TOP_FRACTION_PASS2       = 0.25
@@ -1852,6 +1857,16 @@ def _cross_rules(r1,r2,rng_):
         child={k:child[k] for k in keep}
     return child
 
+def _rule_distance(rule_a: dict, rule_b: dict) -> float:
+    """Jaccard distance on feature-column key sets (0 = identical, 1 = disjoint)."""
+    keys_a = set(rule_a.keys())
+    keys_b = set(rule_b.keys())
+    union = keys_a | keys_b
+    if not union:
+        return 0.0
+    return 1.0 - len(keys_a & keys_b) / len(union)
+
+
 def _genetic_worker(args):
     """v9.0: adds per-worker column-mask cache (#20) and two-pass coarse/full
     evaluation (#23).  Pass 1 runs on every-3rd bar for the first 75% of
@@ -1959,8 +1974,63 @@ def _genetic_worker(args):
             else:
                 no_improve+=1
 
-    _run_generations(pass1_gens, use_full=False)   # coarse pass
-    _run_generations(pass2_gens, use_full=True)    # full-data polish
+    def _run_generations_crowding(n_gens, use_full):
+        """Deterministic Crowding replacement: children compete with most-similar parent."""
+        nonlocal pop, scores, best_r, best_s, no_improve, cur_mutate, hof, cache
+        if use_full:
+            cache = {}
+        for gen in range(n_gens):
+            if no_improve >= 5:
+                cur_mutate = min(mutate_rate * (1.0 + (no_improve - 4) * 0.2), mutate_rate * 2.0, 0.60)
+            elif cur_mutate > mutate_rate:
+                cur_mutate = max(cur_mutate * 0.80, mutate_rate)
+
+            for _ in range(pop_size // 2):
+                i1 = int(rng_.integers(0, pop_size))
+                i2 = int(rng_.integers(0, pop_size))
+                while i2 == i1:
+                    i2 = int(rng_.integers(0, pop_size))
+                p1_r, p2_r = pop[i1], pop[i2]
+                c1 = _mutate_rule(_cross_rules(p1_r, p2_r, rng_), col_stats, cur_mutate, rng_)
+                c2 = _mutate_rule(_cross_rules(p2_r, p1_r, rng_), col_stats, cur_mutate, rng_)
+                if not c1 or not c2:
+                    continue
+                s1 = _score(c1, use_full, cache)
+                s2 = _score(c2, use_full, cache)
+                d11 = _rule_distance(c1, p1_r); d12 = _rule_distance(c1, p2_r)
+                d21 = _rule_distance(c2, p1_r); d22 = _rule_distance(c2, p2_r)
+                if d11 + d22 <= d12 + d21:
+                    if s1 > scores[i1]: pop[i1] = c1; scores[i1] = s1
+                    if s2 > scores[i2]: pop[i2] = c2; scores[i2] = s2
+                else:
+                    if s1 > scores[i2]: pop[i2] = c1; scores[i2] = s1
+                    if s2 > scores[i1]: pop[i1] = c2; scores[i1] = s2
+
+                for cs, ss in ((s1, c1), (s2, c2)):
+                    if cs > 0:
+                        hof.append((cs, dict(ss)))
+                    if cs > best_s:
+                        best_s = cs; best_r = dict(ss)
+
+            hof.sort(key=lambda x: x[0], reverse=True)
+            hof = hof[:10]
+            gen_best = max(scores)
+            if gen_best > best_s:
+                best_s = gen_best; best_r = dict(pop[int(np.argmax(scores))])
+                hof.append((best_s, dict(best_r)))
+                hof.sort(key=lambda x: x[0], reverse=True)
+                hof = hof[:10]
+                no_improve = max(0, no_improve - 2)
+            else:
+                no_improve += 1
+
+    use_crowding = bool(globals().get("GENE_USE_CROWDING", False))
+    if use_crowding:
+        _run_generations_crowding(pass1_gens, use_full=False)
+        _run_generations_crowding(pass2_gens, use_full=True)
+    else:
+        _run_generations(pass1_gens, use_full=False)   # coarse pass
+        _run_generations(pass2_gens, use_full=True)    # full-data polish
 
     if hof:
         hof_best_s, hof_best_r = max(hof, key=lambda x: x[0])
@@ -1978,8 +2048,9 @@ def genetic_refine_parallel(df,indices,labels,candidate_keys,
     candidate_keys: list of (cid, direction) tuples.
     """
     t0=time.time()
-    print(f"  Genetic pass 1: {len(candidate_keys)} rules × "
-          f"{GENE_ISLAND_COUNT} islands on {n_workers} cores ...")
+    use_crowding = bool(globals().get("GENE_USE_CROWDING", False))
+    mode_label = "crowding" if use_crowding else f"{GENE_ISLAND_COUNT} islands"
+    print(f"  Genetic pass 1: {len(candidate_keys)} rules × {mode_label} on {n_workers} cores ...")
     arrays={col:df[col].values.copy() for col in GENE_COLS if col in df.columns}
     hi=df["high"].values.copy(); lo=df["low"].values.copy()
     cl=df["close"].values.copy(); op=df["open"].values.copy(); n=len(df)
@@ -1989,17 +2060,25 @@ def genetic_refine_parallel(df,indices,labels,candidate_keys,
         if cid not in cm: cm[cid]=[]
         cm[cid].append(bi)
 
+    use_crowding = bool(globals().get("GENE_USE_CROWDING", False))
     args=[]
     for cid,direction in candidate_keys:
         d=price_dists.get(cid)
         sl_p=d["sl_pct"] if d else 0.002
         tp_p=d["tp_pct"] if d else 0.003
         full_size=len(cm.get(cid,[]))
-        for island in range(GENE_ISLAND_COUNT):
+        if use_crowding:
+            # Single large-population worker per (cid, direction) — DC maintains diversity
             args.append((cid,cm.get(cid,[]),sl_p,tp_p,direction,
-                         full_size,island,generations,pop_size,
+                         full_size,0,generations,pop_size*GENE_ISLAND_COUNT,
                          mutate_rate,train_days,
-                         seed+cid*100+island*7+{"LONG":0,"SHORT":1}.get(direction,0)))
+                         seed+cid*100+{"LONG":0,"SHORT":1}.get(direction,0)))
+        else:
+            for island in range(GENE_ISLAND_COUNT):
+                args.append((cid,cm.get(cid,[]),sl_p,tp_p,direction,
+                             full_size,island,generations,pop_size,
+                             mutate_rate,train_days,
+                             seed+cid*100+island*7+{"LONG":0,"SHORT":1}.get(direction,0)))
 
     with mp.Pool(n_workers,initializer=_init_genetic,
                  initargs=(arrays,hi,lo,cl,op,fwd,n,SPREAD_PTS)) as pool:
