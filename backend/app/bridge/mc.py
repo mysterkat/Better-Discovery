@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .. import paths  # ensure toolkit is on sys.path  # noqa: F401
+from ..jobs.runners import get_current_job
 
 # Maximum equity-curve samples returned to the frontend.
 N_CURVE_SIMS = 200
@@ -529,6 +530,15 @@ def run_all_phases(
                 kwargs.pop(opt, None)
             return fn(**kwargs)
 
+    def _notify_phase(label: str, frac: float) -> None:
+        """Update sidecar progress so the UI doesn't appear to stall between phases."""
+        job = get_current_job()
+        if job is None:
+            return
+        job.stage_name = label
+        job.progress   = max(0.0, min(1.0, frac))
+
+    _notify_phase("Running Phase 1 (Challenge)…", 0.05)
     p1 = _jsonify(_safe_call(mc.run_mc_phase1, daily_pnl=daily_pnl, n_sims=n_sims,
                              predrawn_pnl=pre_p1, **p1_kwargs, **extra, **eval_extra))
 
@@ -541,13 +551,17 @@ def run_all_phases(
     # rows + keeps RNG paths aligned). When predraw is None (Markov mode), this
     # is a no-op.
     pre_p2_sliced = pre_p2[:p2_n_sims] if (pre_p2 is not None and len(pre_p2) > p2_n_sims) else pre_p2
+    _notify_phase("Running Phase 2 (Verification)…", 0.35)
     p2 = _jsonify(_safe_call(mc.run_mc_phase2, daily_pnl=daily_pnl, n_sims=p2_n_sims,
                              predrawn_pnl=pre_p2_sliced, **p2_kwargs, **extra, **eval_extra))
 
+    _notify_phase("Running Funded simulation…", 0.60)
     fd = _jsonify(_safe_call(mc.run_mc_funded, daily_pnl=daily_pnl, n_sims=n_sims,
                              predrawn_pnl=pre_fd, **fd_kwargs, **extra, **fd_extra))
+    _notify_phase("Running Long-term projection…", 0.82)
     lt = _jsonify(_safe_call(mc.run_mc_longterm, daily_pnl=daily_pnl, n_sims=lt_n_sims,
                              predrawn_pnl=pre_lt, **lt_kwargs, **extra))
+    _notify_phase("Building verdict…", 0.95)
 
     # Echo the parameter dicts back so the dashboard can render KPI tables
     # without round-tripping to /mc/params.
@@ -887,6 +901,7 @@ def _build_verdict(
             "dominant_fail":     p2_dom_name,
             "dominant_fail_pct": p2_dom_pct,
         },
+        "combined_days_to_funded": float(p1.get("days_p50", 0.0)) + float(p2.get("days_p50", 0.0)),
         "funded": {
             "payout_rate":              payout_rate,
             "expected_monthly_usd":     expected_monthly,

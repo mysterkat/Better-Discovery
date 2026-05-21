@@ -208,7 +208,10 @@ TARGET_WR_PCT           = 55.0   # win-rate goal (%)
 TARGET_PF               = 1.5    # profit-factor goal
 TARGET_RR               = 1.3    # R:R goal (avg payout / risk)
 TARGET_STABILITY        = 0.65   # time-consistency × distribution goal (0..1)
+TARGET_TRADES_PER_DAY   = 1.0    # trades-per-day goal
 EXCESS_BONUS_WEIGHT     = 0.1
+
+SCORE_W_TRADES_PER_DAY = 0.15   # weight for trades/day target component
 
 # Quality filters
 MIN_FREQ_PER_DAY        = 0.3
@@ -1304,15 +1307,18 @@ def score_rule(wins, losses, avg_rr, trades_df, train_days):
         # against the target.
         wr_pct  = wr * 100.0
         rr_val  = avg_rr / max(breakeven, 0.01)  # multiple of break-even
-        tgt_wr  = float(globals().get("TARGET_WR_PCT",   55.0))
-        tgt_pf  = float(globals().get("TARGET_PF",        1.5))
-        tgt_rr  = float(globals().get("TARGET_RR",        1.3))
-        tgt_st  = float(globals().get("TARGET_STABILITY", 0.65))
+        tgt_wr  = float(globals().get("TARGET_WR_PCT",         55.0))
+        tgt_pf  = float(globals().get("TARGET_PF",              1.5))
+        tgt_rr  = float(globals().get("TARGET_RR",              1.3))
+        tgt_st  = float(globals().get("TARGET_STABILITY",       0.65))
+        tgt_tpd = float(globals().get("TARGET_TRADES_PER_DAY",  1.0))
+        tpd     = total / max(train_days, 1)
         return (
-            _target_score(wr_pct,    tgt_wr, SCORE_W_WR) +
-            _target_score(pf,        tgt_pf, SCORE_W_PF) +
-            _target_score(rr_val,    tgt_rr, SCORE_W_RR) +
-            _target_score(stability, tgt_st, SCORE_W_STAB)
+            _target_score(wr_pct,    tgt_wr,  SCORE_W_WR) +
+            _target_score(pf,        tgt_pf,  SCORE_W_PF) +
+            _target_score(rr_val,    tgt_rr,  SCORE_W_RR) +
+            _target_score(stability, tgt_st,  SCORE_W_STAB) +
+            _target_score(tpd,       tgt_tpd, SCORE_W_TRADES_PER_DAY)
         )
 
     # Legacy maximise mode.
@@ -1715,15 +1721,18 @@ def _score_genetic(member_bi, rule, sl_pct, tp_pct, direction,
     if use_targets:
         wr_pct  = wr * 100.0
         rr_val  = avg_rr / max(breakeven, 0.01)
-        tgt_wr  = float(globals().get("TARGET_WR_PCT",   55.0))
-        tgt_pf  = float(globals().get("TARGET_PF",        1.5))
-        tgt_rr  = float(globals().get("TARGET_RR",        1.3))
-        tgt_st  = float(globals().get("TARGET_STABILITY", 0.65))
+        tgt_wr  = float(globals().get("TARGET_WR_PCT",         55.0))
+        tgt_pf  = float(globals().get("TARGET_PF",              1.5))
+        tgt_rr  = float(globals().get("TARGET_RR",              1.3))
+        tgt_st  = float(globals().get("TARGET_STABILITY",       0.65))
+        tgt_tpd = float(globals().get("TARGET_TRADES_PER_DAY",  1.0))
+        tpd     = total / max(train_days, 1)
         return (
-            _target_score(wr_pct,    tgt_wr, SCORE_W_WR) +
-            _target_score(pf,        tgt_pf, SCORE_W_PF) +
-            _target_score(rr_val,    tgt_rr, SCORE_W_RR) +
-            _target_score(stability, tgt_st, SCORE_W_STAB)
+            _target_score(wr_pct,    tgt_wr,  SCORE_W_WR) +
+            _target_score(pf,        tgt_pf,  SCORE_W_PF) +
+            _target_score(rr_val,    tgt_rr,  SCORE_W_RR) +
+            _target_score(stability, tgt_st,  SCORE_W_STAB) +
+            _target_score(tpd,       tgt_tpd, SCORE_W_TRADES_PER_DAY)
         )
     q_wr = wilson_lower(wins, total)
     q_pf = min(pf, 4.0) / 4.0
@@ -2344,6 +2353,22 @@ def plot_regime_distribution(df,out):
 # ─────────────────────────────────────────────────────────────────────────────
 # .SET FILE GENERATOR — MetaTrader 5 parameter file for universal template EA
 # ─────────────────────────────────────────────────────────────────────────────
+
+# MT5 .set format requires the raw integer value for ENUM_TIMEFRAMES inputs.
+# Writing the Python string name (e.g. "PERIOD_M15") causes MT5 to silently
+# fall back to 0 = PERIOD_CURRENT for all SignalTFn slots.
+_TF_NAME_TO_INT: dict[str, int] = {
+    "PERIOD_CURRENT": 0,
+    "PERIOD_M1": 1,   "PERIOD_M2": 2,   "PERIOD_M3": 3,   "PERIOD_M4": 4,
+    "PERIOD_M5": 5,   "PERIOD_M6": 6,   "PERIOD_M10": 10, "PERIOD_M12": 12,
+    "PERIOD_M15": 15, "PERIOD_M20": 20, "PERIOD_M30": 30,
+    "PERIOD_H1": 16385, "PERIOD_H2": 16386, "PERIOD_H3": 16387,
+    "PERIOD_H4": 16388, "PERIOD_H6": 16390, "PERIOD_H8": 16392,
+    "PERIOD_H12": 16396, "PERIOD_D1": 16408, "PERIOD_W1": 32769,
+    "PERIOD_MN1": 49153,
+}
+
+
 def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
                       bidir_mode, discriminator, r, out_path):
     """
@@ -2526,7 +2551,7 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
         "; PERIOD_CURRENT = slot disabled.",
     ]
     for i, period in enumerate(_signal_periods, start=1):
-        lines.append(f"SignalTF{i}={period}")
+        lines.append(f"SignalTF{i}={_TF_NAME_TO_INT.get(period, 0)}")
 
     # Discriminator for bidirectional
     if bidir_mode=="BIDIRECTIONAL" and discriminator:

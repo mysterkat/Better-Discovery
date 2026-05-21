@@ -289,6 +289,9 @@ function Phase2Panel({ data, extras }: { data: EvalPhaseResult; extras: Record<s
   const phase2V = (verdict.phase2 ?? null) as Record<string, any> | null;
   const globalV = (verdict.global ?? null) as Record<string, any> | null;
   const ci = phase2V ? wilsonCi(phase2V.pass_rate, phase2V.pass_rate_ci_low, phase2V.pass_rate_ci_high) : null;
+  const combinedDays = verdict.combined_days_to_funded != null
+    ? Math.round(Number(verdict.combined_days_to_funded))
+    : null;
 
   return (
     <>
@@ -304,6 +307,9 @@ function Phase2Panel({ data, extras }: { data: EvalPhaseResult; extras: Record<s
             tone: data.pass_rate >= 50 ? "good" : "bad" },
           { label: "Combined",       value: pct(data.combined_pass_rate ?? 0),
             tone: (data.combined_pass_rate ?? 0) >= 20 ? "good" : "alt" },
+          ...(combinedDays != null
+            ? [{ label: "P1+P2 Median Days", value: `${combinedDays} days` }]
+            : []),
         ]}
       />
 

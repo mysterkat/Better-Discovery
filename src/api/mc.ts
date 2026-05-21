@@ -187,6 +187,7 @@ export interface AllPhasesResult {
     funded?: VerdictBlock;
     longterm?: VerdictBlock;
     global?: VerdictGlobal;
+    combined_days_to_funded?: number;
   };
   lot_sweep?: Array<{ lot: number; pass_rate: number; median_earnings: number }>;
   payout_cadence_sweep?: Array<{

@@ -217,6 +217,13 @@ PARAM_META: dict[str, ParamMeta] = {
     "TARGET_STABILITY":      ParamMeta("Target: Stability",    "Scoring & Targets", "float",
                                         "GA aims for this time-consistency × distribution score (0..1).",
                                         min=0.3, max=0.95, step=0.05),
+    "TARGET_TRADES_PER_DAY": ParamMeta("Target: Trades / Day", "Scoring & Targets", "float",
+                                        "GA aims for this average trades-per-calendar-day rate "
+                                        "(soft goal — doesn't reject patterns).",
+                                        min=0.1, max=10.0, step=0.1),
+    "SCORE_W_TRADES_PER_DAY": ParamMeta("Weight: Trades/Day",  "Scoring & Targets", "float",
+                                        "Relative importance of the trades-per-day objective.",
+                                        min=0.0, max=1.0, step=0.05),
     "EXCESS_BONUS_WEIGHT":   ParamMeta("Excess Bonus Weight",  "Scoring & Targets", "float",
                                         "How much the GA rewards exceeding targets. 0 = strict, "
                                         "0.1 = mild (recommended), 1.0 = legacy max-everything.",
@@ -520,12 +527,18 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         seed_count = max(1, int(getattr(mod, "MULTI_SEED_COUNT", 1) or 1))
         seed_base  = int(getattr(mod, "MULTI_SEED_BASE",
                                    getattr(mod, "RANDOM_SEED", 0)))
+        # Capture the effective seed NOW — before the finally block restores
+        # the module to its compiled default. Used to stamp single-seed results
+        # so the post-run glob finds the correct seed_{N} subfolder.
+        effective_seed = int(getattr(mod, "RANDOM_SEED", 0))
 
         if seed_count <= 1:
             if job is not None:
-                job.mark_seed(1, 1, int(getattr(mod, "RANDOM_SEED", 0)))
+                job.mark_seed(1, 1, effective_seed)
             r = mod.main()
             if r:
+                for result in r:
+                    result.setdefault("seed", effective_seed)
                 aggregated_results.extend(r)
         else:
             print(f"\n{'=' * 65}")
