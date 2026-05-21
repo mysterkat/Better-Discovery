@@ -3265,6 +3265,19 @@ def main():
 
     # ── Genetic / Optuna pass 1 ───────────────────────────────────────────────
     _optimizer = str(globals().get("GENE_OPTIMIZER", "ga")).lower()
+    # v1.1.2: pre-flight check so we fail BEFORE running clustering/backtest
+    # if the user picked Optuna without installing it.
+    if _optimizer == "optuna":
+        try:
+            import optuna  # noqa: F401
+        except ImportError:
+            raise RuntimeError(
+                "GENE_OPTIMIZER='optuna' but the optuna package is not installed.\n"
+                "  Install with:  pip install optuna>=4.0\n"
+                "  Or switch the Optimizer dropdown back to 'ga' in the Discovery tab.\n"
+                "  (optuna was added to backend/requirements.txt in v1.1.2 — "
+                "re-run your backend's pip install -r requirements.txt to pick it up.)"
+            )
     _stage(f"{'Optuna' if _optimizer == 'optuna' else 'Genetic'} Pass 1")
     if candidates:
         if _optimizer == "optuna":

@@ -21,3 +21,8 @@ lxml>=5.0
 # on the long-term equity fan. Without this dep the feature falls back to
 # a noisy "yfinance not installed" warning at runtime.
 yfinance>=0.2.40
+
+# v1.0.0-dev: Optuna TPE optimizer (alternative to the GA in pattern
+# discovery). Required when GENE_OPTIMIZER="optuna" in the Discovery tab.
+# Without it, the optuna path raises a friendly error pointing here.
+optuna>=4.0
