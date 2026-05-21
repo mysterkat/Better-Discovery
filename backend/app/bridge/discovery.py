@@ -181,6 +181,20 @@ PARAM_META: dict[str, ParamMeta] = {
                                        "Parallel island sub-populations", min=1, max=8, step=1),
     "GENE_MIGRATION_INTERVAL":ParamMeta("Migration Interval",  "Genetic Pass 1", "int",
                                           "Generations between island migrations", min=2, max=30, step=1),
+    "GENE_USE_CROWDING":    ParamMeta("Deterministic Crowding","Genetic Pass 1", "bool",
+                                       "Replace island model with DC replacement (v0.9.x #24). "
+                                       "Maintains diversity without migration; set False to revert to island model."),
+    # ── v1.0 optimizer ──────────────────────────────────────────────────────
+    "GENE_OPTIMIZER":       ParamMeta("Optimizer",             "Genetic Pass 1", "str",
+                                       "ga = evolutionary GA (default); optuna = Bayesian TPE search. "
+                                       "Requires: pip install optuna",
+                                       options=["ga", "optuna"]),
+    "SURROGATE_ENABLED":    ParamMeta("Surrogate Model",       "Genetic Pass 1", "bool",
+                                       "Train a GBM on scored rules to predict fitness cheaply. "
+                                       "After SURROGATE_MIN_SAMPLES real evals, 90% of calls use the predictor."),
+    "SURROGATE_REAL_FRAC":  ParamMeta("Surrogate Real Frac",   "Genetic Pass 1", "float",
+                                       "Fraction of optimizer calls that hit the real scorer (rest use GBM).",
+                                       min=0.05, max=0.5, step=0.05),
     # ── Genetic Pass 2 ──────────────────────────────────────────────────────
     "TOP_FRACTION_PASS2":      ParamMeta("Top Fraction",       "Genetic Pass 2", "float",
                                           "Best-scoring fraction carried into pass 2", min=0.05, max=0.5, step=0.05),

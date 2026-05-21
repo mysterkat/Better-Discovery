@@ -174,6 +174,19 @@ GENE_MIGRATION_INTERVAL  = 10
 # Set to False to revert to island model (for A/B benchmarking).
 GENE_USE_CROWDING        = True
 
+# v1.0 optimizer selection — "ga" | "optuna"
+# "optuna" uses TPE (Bayesian) search instead of the evolutionary GA.
+# Requires: pip install optuna
+GENE_OPTIMIZER           = "ga"
+
+# v1.0 surrogate fitness model — wraps whichever optimizer is active.
+# After SURROGATE_MIN_SAMPLES real evals the GBM predicts fitness;
+# only SURROGATE_REAL_FRAC of subsequent calls hit the real scorer.
+SURROGATE_ENABLED        = False
+SURROGATE_REAL_FRAC      = 0.10   # fraction of evals using real fitness
+SURROGATE_MIN_SAMPLES    = 40     # real evals before first surrogate fit
+SURROGATE_RETRAIN_EVERY  = 20     # retrain after every N new real evals
+
 # Pass 2
 TOP_FRACTION_PASS2       = 0.25
 MIN_TRADES_PER_DAY_PASS2 = 0.5
@@ -2186,6 +2199,169 @@ def _genetic_p2_worker(args):
     return (cid,direction),best_r,best_s
 
 
+def _optuna_worker(args):
+    """v1.0 #26/#27: Optuna TPE optimizer (+ optional surrogate) for one (cid, direction)."""
+    (cid, member_bi, sl_pct, tp_pct, direction, full_size,
+     n_trials, train_days, seed, use_surrogate) = args
+
+    import optuna as _optuna
+    _optuna.logging.set_verbosity(_optuna.logging.WARNING)
+
+    arrays_ = _GEN["arrays"]
+    if len(member_bi) < 10:
+        return cid, direction, 0, {}, 0.0
+
+    member_arr = np.asarray(member_bi, dtype=np.int32)
+    col_stats: dict = {}
+    for col in GENE_COLS:
+        if col not in arrays_: continue
+        vals = arrays_[col][member_arr]
+        col_stats[col] = (float(np.percentile(vals, 5)), float(np.percentile(vals, 95)))
+
+    sorted_cols = sorted(col_stats.keys())
+    rng_ = np.random.default_rng(seed)
+
+    # ── Surrogate state ───────────────────────────────────────────────────────
+    surr_X: list = []
+    surr_y: list = []
+    surrogate = None
+    real_eval_count = [0]
+    real_since_retrain = [0]
+
+    def _rule_to_vec(rule: dict) -> list:
+        vec = []
+        for col in sorted_cols:
+            vmin, vmax = col_stats[col]
+            span = vmax - vmin if vmax > vmin else 1.0
+            if col in rule:
+                lo, hi = rule[col]
+                vec.extend([1.0, (lo - vmin) / span, (hi - vmin) / span])
+            else:
+                vec.extend([0.0, 0.0, 0.0])
+        return vec
+
+    def _real_score(rule: dict) -> float:
+        s = _score_genetic(member_bi, rule, sl_pct, tp_pct, direction, full_size, train_days)
+        real_eval_count[0] += 1
+        real_since_retrain[0] += 1
+        if use_surrogate:
+            surr_X.append(_rule_to_vec(rule))
+            surr_y.append(s)
+            n_real = len(surr_y)
+            if (n_real >= SURROGATE_MIN_SAMPLES and
+                    real_since_retrain[0] >= SURROGATE_RETRAIN_EVERY):
+                nonlocal surrogate
+                from sklearn.ensemble import GradientBoostingRegressor
+                surrogate = GradientBoostingRegressor(
+                    n_estimators=80, max_depth=3, learning_rate=0.1,
+                    random_state=int(seed) % (2 ** 31))
+                surrogate.fit(surr_X, surr_y)
+                real_since_retrain[0] = 0
+        return s
+
+    def _eval(rule: dict) -> float:
+        if (use_surrogate and surrogate is not None and
+                rng_.random() > SURROGATE_REAL_FRAC):
+            pred = float(surrogate.predict([_rule_to_vec(rule)])[0])
+            return max(0.0, pred)
+        return _real_score(rule)
+
+    # ── Objective ─────────────────────────────────────────────────────────────
+    def objective(trial: "_optuna.Trial") -> float:
+        rule: dict = {}
+        for col in sorted_cols:
+            use = trial.suggest_categorical(f"use_{col}", [0, 1])
+            if not use:
+                continue
+            vmin, vmax = col_stats[col]
+            lo_pct = trial.suggest_float(f"lo_pct_{col}", 0.0, 0.95)
+            w_pct  = trial.suggest_float(f"w_pct_{col}",  0.01, 1.0 - lo_pct)
+            lo = vmin + lo_pct * (vmax - vmin)
+            hi = vmin + (lo_pct + w_pct) * (vmax - vmin)
+            if lo < hi:
+                rule[col] = (lo, hi)
+        if len(rule) < GENE_N_COLS_MIN:
+            return 0.0
+        if len(rule) > GENE_N_COLS_MAX:
+            keep = list(rule.keys())[:GENE_N_COLS_MAX]
+            rule = {k: rule[k] for k in keep}
+        return _eval(rule)
+
+    # ── Reconstruct best rule from trial params ───────────────────────────────
+    def _params_to_rule(params: dict) -> dict:
+        rule: dict = {}
+        for col in sorted_cols:
+            if not params.get(f"use_{col}", 0):
+                continue
+            vmin, vmax = col_stats[col]
+            lo_pct = params.get(f"lo_pct_{col}", 0.0)
+            w_pct  = params.get(f"w_pct_{col}", 0.1)
+            lo = vmin + lo_pct * (vmax - vmin)
+            hi = vmin + (lo_pct + w_pct) * (vmax - vmin)
+            if lo < hi:
+                rule[col] = (lo, hi)
+        return rule
+
+    sampler = _optuna.samplers.TPESampler(seed=int(seed) % (2 ** 31))
+    study = _optuna.create_study(direction="maximize", sampler=sampler)
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    best_rule = _params_to_rule(study.best_trial.params)
+    best_score = float(study.best_value)
+    return cid, direction, 0, best_rule, best_score
+
+
+def optuna_refine_parallel(df, indices, labels, candidate_keys,
+                            price_dists, fwd,
+                            n_trials, train_days, seed, n_workers):
+    """
+    v1.0 #26/#27: Optuna TPE optimizer as a drop-in replacement for
+    genetic_refine_parallel().  Returns the same {(cid,direction):(rule,score)} dict.
+    n_trials ≈ GENETIC_GENERATIONS × GENETIC_POPULATION for a fair comparison.
+    """
+    t0 = time.time()
+    use_surrogate = bool(globals().get("SURROGATE_ENABLED", False))
+    mode = "TPE + surrogate" if use_surrogate else "TPE"
+    print(f"  Optuna {mode}: {len(candidate_keys)} rules × {n_trials} trials "
+          f"on {n_workers} cores ...")
+
+    arrays = {col: df[col].values.copy() for col in GENE_COLS if col in df.columns}
+    hi = df["high"].values.copy(); lo_arr = df["low"].values.copy()
+    cl = df["close"].values.copy(); op = df["open"].values.copy(); n = len(df)
+    cm: dict = {}
+    for pos, bi in enumerate(indices):
+        cid = int(labels[pos])
+        if cid not in cm: cm[cid] = []
+        cm[cid].append(bi)
+
+    args = []
+    for cid, direction in candidate_keys:
+        d = price_dists.get(cid)
+        sl_p = d["sl_pct"] if d else 0.002
+        tp_p = d["tp_pct"] if d else 0.003
+        full_size = len(cm.get(cid, []))
+        args.append((cid, cm.get(cid, []), sl_p, tp_p, direction,
+                     full_size, n_trials, train_days,
+                     seed + cid * 100 + {"LONG": 0, "SHORT": 1}.get(direction, 0),
+                     use_surrogate))
+
+    with mp.Pool(n_workers, initializer=_init_genetic,
+                 initargs=(arrays, hi, lo_arr, cl, op, fwd, n, SPREAD_PTS)) as pool:
+        results = []; t0g = time.time()
+        for i, r in enumerate(pool.imap_unordered(_optuna_worker, args)):
+            results.append(r)
+            _pbar(i + 1, len(args), "optimizing", t0=t0g)
+
+    best: dict = {}
+    for cid, direction, _island, rule, score in results:
+        key = (cid, direction)
+        if key not in best or score > best[key][1]:
+            best[key] = (rule, score)
+
+    print(f"  Optuna done  [{_elapsed(t0)}]")
+    return best
+
+
 def _bt_refined_worker(args):
     """Module-level backtest worker for backtest_refined (Windows pickling)."""
     key,fbi,sl_p,tp_p,dirn=args
@@ -3027,14 +3203,22 @@ def main():
     print(f"  {len(candidates)} candidates for genetic pass 1 "
           f"(min {min_trades_p1} trades)")
 
-    # ── Genetic pass 1 ────────────────────────────────────────────────────────
-    _stage("Genetic Pass 1")
+    # ── Genetic / Optuna pass 1 ───────────────────────────────────────────────
+    _optimizer = str(globals().get("GENE_OPTIMIZER", "ga")).lower()
+    _stage(f"{'Optuna' if _optimizer == 'optuna' else 'Genetic'} Pass 1")
     if candidates:
-        genetic_p1=genetic_refine_parallel(
-            df_train,idx_tr,labels_tr,candidates,
-            price_dists_tr,bidir_info,FORWARD_BARS,
-            GENETIC_GENERATIONS,GENETIC_POPULATION,
-            GENETIC_MUTATE_RATE,train_days,RANDOM_SEED,nw)
+        if _optimizer == "optuna":
+            _n_trials = GENETIC_GENERATIONS * GENETIC_POPULATION  # equiv budget
+            genetic_p1 = optuna_refine_parallel(
+                df_train, idx_tr, labels_tr, candidates,
+                price_dists_tr, FORWARD_BARS,
+                _n_trials, train_days, RANDOM_SEED, nw)
+        else:
+            genetic_p1=genetic_refine_parallel(
+                df_train,idx_tr,labels_tr,candidates,
+                price_dists_tr,bidir_info,FORWARD_BARS,
+                GENETIC_GENERATIONS,GENETIC_POPULATION,
+                GENETIC_MUTATE_RATE,train_days,RANDOM_SEED,nw)
     else:
         genetic_p1={}; print("  No candidates.")
 
