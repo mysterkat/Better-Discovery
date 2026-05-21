@@ -18,6 +18,13 @@ export default function App() {
     string | null
   >(null);
 
+  // Keep visited tabs mounted so their state survives navigation.
+  // tabKeys is incremented on reset to force a fresh remount of that tab.
+  const [mountedTabs, setMountedTabs] = useState<Set<TabId>>(
+    () => new Set(["data-import" as TabId])
+  );
+  const [tabKeys, setTabKeys] = useState<Partial<Record<TabId, number>>>({});
+
   const loadSettings = useSettings((s) => s.load);
   const loadParamDefaults = useParamDefaults((s) => s.load);
 
@@ -63,7 +70,19 @@ export default function App() {
     };
   }, [loadSettings, loadParamDefaults]);
 
-  const activeTabDef = TABS.find((t) => t.id === activeTab);
+  // Mount the tab on first visit so it stays alive for the rest of the session.
+  useEffect(() => {
+    setMountedTabs((prev) => {
+      if (prev.has(activeTab)) return prev;
+      const next = new Set(prev);
+      next.add(activeTab);
+      return next;
+    });
+  }, [activeTab]);
+
+  const handleResetTab = () => {
+    setTabKeys((prev) => ({ ...prev, [activeTab]: (prev[activeTab] ?? 0) + 1 }));
+  };
 
   return (
     <div className="app-shell">
@@ -71,6 +90,7 @@ export default function App() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         onSettings={() => setSettingsOpen(true)}
+        onResetTab={handleResetTab}
       />
 
       {updateAvailableVersion && (
@@ -88,11 +108,16 @@ export default function App() {
           <p className="backend-wait">Connecting to backend…</p>
         )}
 
-        {backendReady && activeTabDef && (
-          <Suspense fallback={<p className="tab-loading">Loading…</p>}>
-            <activeTabDef.Component />
-          </Suspense>
-        )}
+        {backendReady && TABS.filter((t) => mountedTabs.has(t.id)).map((t) => (
+          <div
+            key={t.id}
+            style={{ display: t.id === activeTab ? undefined : "none", height: "100%" }}
+          >
+            <Suspense fallback={<p className="tab-loading">Loading…</p>}>
+              <t.Component key={tabKeys[t.id] ?? 0} />
+            </Suspense>
+          </div>
+        ))}
       </main>
 
       <SettingsPanel

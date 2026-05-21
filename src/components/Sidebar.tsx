@@ -4,9 +4,10 @@ interface SidebarProps {
   activeTab: TabId;
   onTabChange: (id: TabId) => void;
   onSettings: () => void;
+  onResetTab: () => void;
 }
 
-export default function Sidebar({ activeTab, onTabChange, onSettings }: SidebarProps) {
+export default function Sidebar({ activeTab, onTabChange, onSettings, onResetTab }: SidebarProps) {
   return (
     <nav className="sidebar">
       <div className="sidebar-brand">BETTER DISCOVERY</div>
@@ -29,6 +30,14 @@ export default function Sidebar({ activeTab, onTabChange, onSettings }: SidebarP
       </ul>
 
       <div className="sidebar-footer">
+        <button
+          className="sidebar-reset-btn"
+          onClick={onResetTab}
+          title="Reset current tab to defaults"
+        >
+          <span aria-hidden="true">↺</span>
+          <span>Reset tab</span>
+        </button>
         <button className="sidebar-settings-btn" onClick={onSettings} title="Settings">
           <span aria-hidden="true">⚙</span>
           <span>Settings</span>
