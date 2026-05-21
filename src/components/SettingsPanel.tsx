@@ -46,10 +46,19 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     setClearMsg(null);
     try {
       const r = await clearCache(toDelete);
-      setClearMsg({
-        kind: "ok",
-        text: `Cleared ${r.total_files} file${r.total_files === 1 ? "" : "s"} (${formatBytes(r.total_bytes)}).`,
-      });
+      // v1.1.4: surface per-file errors instead of always showing success.
+      const errCount = r.errors?.length ?? 0;
+      const base = `Cleared ${r.total_files} file${r.total_files === 1 ? "" : "s"} (${formatBytes(r.total_bytes)}).`;
+      if (errCount > 0) {
+        const head = r.errors!.slice(0, 3).join("\n• ");
+        const more = errCount > 3 ? `\n…and ${errCount - 3} more` : "";
+        setClearMsg({
+          kind: "err",
+          text: `${base}\n${errCount} file${errCount === 1 ? "" : "s"} could NOT be deleted (likely open in Excel / Explorer / antivirus):\n• ${head}${more}`,
+        });
+      } else {
+        setClearMsg({ kind: "ok", text: base });
+      }
     } catch (e) {
       setClearMsg({
         kind: "err",

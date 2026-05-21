@@ -184,41 +184,52 @@ def open_folder(req: OpenFolderRequest) -> dict[str, Any]:
 _ALL_CACHE_TYPES = frozenset({"discovery", "mql", "library_reports"})
 
 
-def _clear_folder(folder: Path) -> tuple[int, int]:
-    """Recursively delete all contents of a folder. Returns (files, bytes)."""
+def _clear_folder(folder: Path) -> tuple[int, int, list[str]]:
+    """Recursively delete all contents of a folder.
+
+    v1.1.4 — honest accounting:
+      * Each file's size is measured BEFORE attempting unlink, but the counter
+        is incremented only AFTER the unlink succeeds.
+      * Windows file locks (CSV open in Excel, PNG previewed in Explorer,
+        backend's own matplotlib handle, antivirus scan) raise PermissionError;
+        previously these were swallowed by `ignore_errors=True` so the UI
+        reported a fake success.  Now they're collected and returned so the
+        endpoint can surface them.
+
+    Returns (files_removed, bytes_removed, errors).
+    """
     files_removed = 0
     bytes_removed = 0
+    errors: list[str] = []
     if not folder.is_dir():
-        return files_removed, bytes_removed
-    for entry in folder.iterdir():
+        return files_removed, bytes_removed, errors
+
+    # Walk depth-first so subdirs are emptied before we try to remove them.
+    for sub in sorted(folder.rglob("*"), key=lambda p: -len(p.parts)):
         try:
-            if entry.is_dir():
-                for sub in entry.rglob("*"):
-                    if sub.is_file():
-                        try:
-                            bytes_removed += sub.stat().st_size
-                            files_removed += 1
-                        except OSError:
-                            pass
-                shutil.rmtree(entry, ignore_errors=True)
-            else:
+            if sub.is_file() or sub.is_symlink():
                 try:
-                    bytes_removed += entry.stat().st_size
+                    size = sub.stat().st_size
                 except OSError:
-                    pass
-                entry.unlink(missing_ok=True)
+                    size = 0
+                sub.unlink()
                 files_removed += 1
-        except OSError:
-            continue
-    return files_removed, bytes_removed
+                bytes_removed += size
+            elif sub.is_dir():
+                sub.rmdir()  # raises if non-empty (shouldn't happen, sorted depth-first)
+        except OSError as e:
+            errors.append(f"{sub}: {e.__class__.__name__}: {e}")
+
+    return files_removed, bytes_removed, errors
 
 
-def _clear_library_reports() -> tuple[int, int]:
+def _clear_library_reports() -> tuple[int, int, list[str]]:
     """Remove only MT5 attachment files from library entries; keeps the entries."""
     files_removed = 0
     bytes_removed = 0
+    errors: list[str] = []
     if not DEFAULT_LIBRARY.is_dir():
-        return files_removed, bytes_removed
+        return files_removed, bytes_removed, errors
     for entry_dir in DEFAULT_LIBRARY.iterdir():
         if not entry_dir.is_dir():
             continue
@@ -226,12 +237,13 @@ def _clear_library_reports() -> tuple[int, int]:
             fpath = entry_dir / fname
             if fpath.is_file():
                 try:
-                    bytes_removed += fpath.stat().st_size
+                    size = fpath.stat().st_size
                     fpath.unlink()
                     files_removed += 1
-                except OSError:
-                    pass
-    return files_removed, bytes_removed
+                    bytes_removed += size
+                except OSError as e:
+                    errors.append(f"{fpath}: {e.__class__.__name__}: {e}")
+    return files_removed, bytes_removed, errors
 
 
 class ClearCacheRequest(BaseModel):
@@ -260,24 +272,53 @@ def clear_cache(body: ClearCacheRequest | None = None) -> dict[str, Any]:
     summary: dict[str, Any] = {"ok": True, "folders": {}}
     total_files = 0
     total_bytes = 0
+    all_errors: list[str] = []
+
+    def _accumulate(name: str, files: int, bytes_: int, errors: list[str]) -> None:
+        nonlocal total_files, total_bytes
+        summary["folders"][name] = {
+            "files_removed": files,
+            "bytes_removed": bytes_,
+            "errors": errors,
+        }
+        total_files += files
+        total_bytes += bytes_
+        all_errors.extend(errors)
 
     if "discovery" in requested:
-        f, b = _clear_folder(DEFAULT_DISC_OUTPUT)
-        summary["folders"]["discovery"] = {"files_removed": f, "bytes_removed": b}
-        total_files += f; total_bytes += b
+        # v1.1.4: clear BOTH the default AND the user's current OUTPUT_FOLDER
+        # override (if it points somewhere else).  Without this, a user who
+        # set a custom OUTPUT_FOLDER would see Cache Clear leave their actual
+        # output files untouched.
+        roots: list[Path] = [DEFAULT_DISC_OUTPUT]
+        try:
+            from ..bridge import discovery as _disc_bridge
+            mod_out = getattr(_disc_bridge._get_module(), "OUTPUT_FOLDER", None)
+            if mod_out:
+                override = Path(str(mod_out)).resolve()
+                if override.is_dir() and override != DEFAULT_DISC_OUTPUT.resolve():
+                    roots.append(override)
+        except Exception:
+            pass
+        agg_f = agg_b = 0; agg_err: list[str] = []
+        for root in roots:
+            f, b, errs = _clear_folder(root)
+            agg_f += f; agg_b += b; agg_err.extend(errs)
+        _accumulate("discovery", agg_f, agg_b, agg_err)
 
     if "mql" in requested:
-        f, b = _clear_folder(USER_DATA / "mql")
-        summary["folders"]["mql"] = {"files_removed": f, "bytes_removed": b}
-        total_files += f; total_bytes += b
+        f, b, errs = _clear_folder(USER_DATA / "mql")
+        _accumulate("mql", f, b, errs)
 
     if "library_reports" in requested:
-        f, b = _clear_library_reports()
-        summary["folders"]["library_reports"] = {"files_removed": f, "bytes_removed": b}
-        total_files += f; total_bytes += b
+        f, b, errs = _clear_library_reports()
+        _accumulate("library_reports", f, b, errs)
 
     summary["total_files"] = total_files
     summary["total_bytes"] = total_bytes
+    # v1.1.4: surface any per-file errors instead of silently swallowing them.
+    summary["errors"] = all_errors
+    summary["ok"] = len(all_errors) == 0
     return summary
 
 

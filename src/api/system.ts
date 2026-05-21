@@ -6,10 +6,16 @@ export interface OpenFolderResponse {
 }
 
 export interface ClearCacheResponse {
+  /** v1.1.4: false when any file failed to delete (was always true before). */
   ok: boolean;
   total_files: number;
   total_bytes: number;
-  folders: Record<string, { files_removed: number; bytes_removed: number }>;
+  folders: Record<
+    string,
+    { files_removed: number; bytes_removed: number; errors?: string[] }
+  >;
+  /** v1.1.4: aggregated per-file errors across all cache types. */
+  errors?: string[];
 }
 
 /** Reveal a userdata folder (or the parent of a file) in the OS file manager. */
