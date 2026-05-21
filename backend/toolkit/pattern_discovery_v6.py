@@ -203,12 +203,31 @@ BIDIR_MIN_WR         = 52.0
 BIDIR_MIN_TRADES     = 15
 DISCRIM_MIN_ACCURACY = 0.62
 
+# FORCE_DIRECTION — lock all clusters to a single trade direction at the
+# engine level.  Solves the "MT5 long-only doesn't match Discovery" gap:
+# when BIDIRECTIONAL clusters get DirectionMode=2 (.set), the EA relies on
+# the discriminator to pick LONG vs SHORT per-bar.  If the user then forces
+# the EA long-only, ~50% of intended trades silently vanish.
+#   "auto"       — empirical classification (default, current behaviour)
+#   "long_only"  — force every cluster to LONG_ONLY, no discriminator emitted
+#   "short_only" — force every cluster to SHORT_ONLY, no discriminator emitted
+FORCE_DIRECTION      = "auto"
+
 # Scoring weights
 SCORE_W_WR              = 0.30
 SCORE_W_PF              = 0.30
 SCORE_W_RR              = 0.25
 SCORE_W_STAB            = 0.15
 SCORE_WILSON_CONFIDENCE = 0.85
+
+# Rule-complexity bonus (Bug #32 — "force more indicators").
+# Soft additive bonus that grows linearly with len(rule) above GENE_N_COLS_MIN,
+# reaching the full weight at GENE_N_COLS_MAX.  Set > 0 to bias the GA toward
+# richer rules when many candidates land on 3-4 columns.
+# 0.00 = off (default)
+# 0.05 = mild preference (tie-breaker)
+# 0.15 = strong preference
+SCORE_W_RULE_COMPLEXITY = 0.0
 
 # ── v0.6.0: Target-driven scoring ────────────────────────────────────────────
 # When ENABLE_TARGET_SCORING is True, _score_genetic switches from "maximise
@@ -991,7 +1010,17 @@ def analyze_bidirectionality(df,indices,labels,n_cl,price_dists,fwd):
         long_ok=(l_wr>=BIDIR_MIN_WR and l_total>=BIDIR_MIN_TRADES)
         short_ok=(s_wr>=BIDIR_MIN_WR and s_total>=BIDIR_MIN_TRADES)
 
-        if long_ok and short_ok:
+        # Engine-level direction lock (Bug #30 — long-only MT5 mismatch fix).
+        # When set, override empirical classification so the GA refines
+        # purely directional rules and .set files emit DirectionMode=0/1
+        # with no discriminator — guaranteeing parity with a long-only or
+        # short-only MT5 EA configuration.
+        _force = str(globals().get("FORCE_DIRECTION", "auto")).lower()
+        if _force == "long_only":
+            mode = "LONG_ONLY"; discrim = None
+        elif _force == "short_only":
+            mode = "SHORT_ONLY"; discrim = None
+        elif long_ok and short_ok:
             mode="BIDIRECTIONAL"
             # Find direction discriminator
             discrim=find_direction_discriminator(
@@ -1256,6 +1285,23 @@ def trade_distribution_score(trades_df,train_days):
     # coefficient of variation — lower is more evenly distributed
     cv=counts.std()/max(counts.mean(),1)
     return max(0.0,min(1.0,1.0-cv/3.0))
+
+def _complexity_bonus(n_cols: int) -> float:
+    """Bug #32: bonus for rules using more indicator columns.
+
+    Linear ramp: 0.0 at n_cols == GENE_N_COLS_MIN, full weight at GENE_N_COLS_MAX.
+    Returns 0.0 when SCORE_W_RULE_COMPLEXITY is 0 (default).
+    """
+    w = float(globals().get("SCORE_W_RULE_COMPLEXITY", 0.0))
+    if w <= 0.0 or n_cols <= 0:
+        return 0.0
+    lo = int(globals().get("GENE_N_COLS_MIN", 3))
+    hi = int(globals().get("GENE_N_COLS_MAX", 6))
+    if hi <= lo:
+        return 0.0
+    frac = max(0.0, min(1.0, (n_cols - lo) / (hi - lo)))
+    return w * frac
+
 
 def _target_score(actual: float, target: float, weight: float,
                   excess_w: float = None) -> float:
@@ -1736,6 +1782,8 @@ def _score_genetic(member_bi, rule, sl_pct, tp_pct, direction,
     pf = gw / gl if gl > 0 else 2.0
 
     use_targets = bool(globals().get("ENABLE_TARGET_SCORING", True))
+    # Bug #32: additive bonus that grows with rule complexity (number of cols).
+    cmplx = _complexity_bonus(len(rule))
     if use_targets:
         wr_pct  = wr * 100.0
         rr_val  = avg_rr / max(breakeven, 0.01)
@@ -1750,13 +1798,14 @@ def _score_genetic(member_bi, rule, sl_pct, tp_pct, direction,
             _target_score(pf,        tgt_pf,  SCORE_W_PF) +
             _target_score(rr_val,    tgt_rr,  SCORE_W_RR) +
             _target_score(stability, tgt_st,  SCORE_W_STAB) +
-            _target_score(tpd,       tgt_tpd, SCORE_W_TRADES_PER_DAY)
+            _target_score(tpd,       tgt_tpd, SCORE_W_TRADES_PER_DAY) +
+            cmplx
         )
     q_wr = wilson_lower(wins, total)
     q_pf = min(pf, 4.0) / 4.0
     q_rr = min(avg_rr / max(breakeven, 0.01), 2.0) / 2.0
     return (SCORE_W_WR * q_wr + SCORE_W_PF * q_pf +
-            SCORE_W_RR * q_rr + SCORE_W_STAB * stability)
+            SCORE_W_RR * q_rr + SCORE_W_STAB * stability + cmplx)
 
 def _diagnose_and_repair(rule,col_stats,member_bi,sl_pct,tp_pct,
                           direction,full_cluster_size,train_days,rng_):
@@ -2771,6 +2820,17 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
     # Direction
     lines.append(f"DirectionMode={dir_mode}")
     lines.append(f"; 0=LongOnly 1=ShortOnly 2=Auto(discriminator)")
+    if dir_mode == 2:
+        lines += [
+            "; ┌──────────────────────────────────────────────────────────────┐",
+            "; │  WARNING: BIDIRECTIONAL pattern — DO NOT override            │",
+            "; │  DirectionMode to 0/1 in MT5.  Reported metrics assume the   │",
+            "; │  discriminator picks LONG/SHORT per bar.  Forcing a single   │",
+            "; │  side silently drops ~half the intended trades.              │",
+            "; │  For a true single-direction strategy, re-run Discovery      │",
+            "; │  with FORCE_DIRECTION=long_only (or short_only).             │",
+            "; └──────────────────────────────────────────────────────────────┘",
+        ]
 
     # SignalTF1..4 — feed the EA's multi-TF inputs with the timeframes that
     # were actually used in this discovery run. Map CSV filename → MQL5

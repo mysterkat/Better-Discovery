@@ -135,6 +135,25 @@ export default function DiscoveryTab() {
       return next;
     });
 
+  // Task #31: group-level gating. A group is "active" when its gate's key
+  // currently holds the gate's value (taking session override → persistent
+  // default → code default). Inactive groups are visually dimmed + tagged.
+  const currentValueOf = (key: string): string | null => {
+    const ov = overrides[key]?.trim();
+    if (ov) return ov;
+    const pd = persistentDefaults[key];
+    if (pd != null) return String(pd);
+    const def = params.find((p) => p.key === key);
+    return def?.value != null ? String(def.value) : null;
+  };
+  const groupGate = (gParams: ParamDef[]) =>
+    gParams.find((p) => p.gated_by)?.gated_by ?? null;
+  const isGroupActive = (gParams: ParamDef[]): boolean => {
+    const g = groupGate(gParams);
+    if (!g) return true;
+    return currentValueOf(g.key) === g.value;
+  };
+
   // A group's advanced fields are tier=="advanced". Treat missing tier as core
   // so older backend builds keep rendering everything visibly.
   const isAdvanced = (p: ParamDef) => p.tier === "advanced";
@@ -478,8 +497,14 @@ export default function DiscoveryTab() {
           {[...groups.entries()].map(([group, gParams]) => {
             const { core, advanced } = partitionGroup(gParams);
             const advOpen = effectiveShowAdvanced(group, advanced);
+            // Task #31: gate state for this group
+            const gate = groupGate(gParams);
+            const active = isGroupActive(gParams);
             return (
-              <div key={group} className="param-group">
+              <div
+                key={group}
+                className={`param-group${!active ? " param-group-inactive" : ""}`}
+              >
                 <div className="param-group-header-row">
                   <button
                     className="param-group-header"
@@ -488,6 +513,14 @@ export default function DiscoveryTab() {
                     <span className="param-group-arrow">{openGroups.has(group) ? "▾" : "▸"}</span>
                     {group}
                     <span className="param-group-count">{gParams.length} settings</span>
+                    {gate && !active && (
+                      <span
+                        className="param-group-gate-badge"
+                        title={`Only active when ${gate.key} = ${gate.value} (currently ${currentValueOf(gate.key) ?? "—"})`}
+                      >
+                        inactive · {gate.value}-mode only
+                      </span>
+                    )}
                   </button>
                   {groupHasEdits(group) && (
                     <button
