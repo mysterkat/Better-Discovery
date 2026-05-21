@@ -95,3 +95,8 @@ export const getDiscoveryTradesCsv = (id: string) => fetchCsvText(id, "trades_cs
 
 /** Attached MT5 trades CSV. Null if not attached. */
 export const getMt5TradesCsv = (id: string) => fetchCsvText(id, "mt5_csv");
+
+/** fix 3a: Remove an attachment (mt5_html or mt5_csv) without deleting the library entry. */
+export async function detachFromLibrary(patternId: string, kind: AttachKind): Promise<LibraryEntry> {
+  return api<LibraryEntry>("DELETE", `/library/${encodeURIComponent(patternId)}/attachment/${kind}`);
+}

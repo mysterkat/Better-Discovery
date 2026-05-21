@@ -2,7 +2,7 @@ import { useState } from "react";
 import ThemePicker from "./ThemePicker";
 import UpdateSection from "./UpdateSection";
 import ParamDefaultsModal from "./ParamDefaultsModal";
-import { clearCache } from "../api/system";
+import { clearCache, CACHE_TYPE_LABELS, type CacheType } from "../api/system";
 
 interface SettingsPanelProps {
   open: boolean;
@@ -16,24 +16,36 @@ function formatBytes(b: number): string {
   return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+// fix 4b: all known cache types
+const ALL_CACHE_TYPES = Object.keys(CACHE_TYPE_LABELS) as CacheType[];
+
 export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [paramDefaultsOpen, setParamDefaultsOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [clearMsg, setClearMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  // fix 4b: per-cache-type selection (all checked by default)
+  const [selectedTypes, setSelectedTypes] = useState<Set<CacheType>>(new Set(ALL_CACHE_TYPES));
 
-  const onClearCache = async () => {
+  const toggleCacheType = (t: CacheType) =>
+    setSelectedTypes((prev) => {
+      const next = new Set(prev);
+      if (next.has(t)) next.delete(t); else next.add(t);
+      return next;
+    });
+
+  const onClearCache = async (types?: CacheType[]) => {
     if (clearing) return;
-    // Cheap confirm — destructive but fully recoverable by re-running discovery.
+    const toDelete = types ?? ALL_CACHE_TYPES;
+    if (toDelete.length === 0) return;
+    const labels = toDelete.map((t) => `• ${CACHE_TYPE_LABELS[t]}`).join("\n");
     const ok = window.confirm(
-      "Delete all generated files in userdata/discovery and userdata/mql?\n\n" +
-        "This removes .set / .mq5 / .csv / .png artifacts. Settings, themes, " +
-        "parameter defaults, and imported MT5 history are NOT touched.",
+      `Delete the following cache types?\n\n${labels}\n\nSettings, themes, parameter defaults, and imported MT5 history are NOT touched.`,
     );
     if (!ok) return;
     setClearing(true);
     setClearMsg(null);
     try {
-      const r = await clearCache();
+      const r = await clearCache(toDelete);
       setClearMsg({
         kind: "ok",
         text: `Cleared ${r.total_files} file${r.total_files === 1 ? "" : "s"} (${formatBytes(r.total_bytes)}).`,
@@ -93,22 +105,49 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             </p>
           </div>
 
-          {/* ── Cache ── */}
+          {/* fix 4a/4b: Granular cache controls ── */}
           <div className="settings-section">
             <p className="settings-section-title">Cache</p>
-            <button
-              className="pd-settings-btn"
-              onClick={onClearCache}
-              disabled={clearing}
-            >
-              <span className="pd-settings-btn-icon">🗑</span>
-              <span>{clearing ? "Clearing…" : "Clear generated files"}</span>
-            </button>
-            <p style={{ fontSize: 11, color: "var(--text2)", marginTop: 8, lineHeight: 1.4 }}>
-              Deletes .set / .mq5 / .csv / .png artifacts in
-              <code> userdata/discovery</code> and <code>userdata/mql</code>. Imported
-              MT5 history, settings, and themes are kept.
+            <p style={{ fontSize: 11, color: "var(--text2)", marginBottom: 8, lineHeight: 1.4 }}>
+              Select which caches to clear. History, settings, themes, and library entries are never removed.
             </p>
+            {ALL_CACHE_TYPES.map((t) => (
+              <label key={t} className="toggle-label" style={{ marginBottom: 5, fontSize: 12 }}>
+                <span className="toggle-wrap">
+                  <input
+                    type="checkbox"
+                    className="toggle-input"
+                    checked={selectedTypes.has(t)}
+                    onChange={() => toggleCacheType(t)}
+                    disabled={clearing}
+                  />
+                  <span className="toggle-track" />
+                </span>
+                {CACHE_TYPE_LABELS[t]}
+              </label>
+            ))}
+            <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+              <button
+                className="pd-settings-btn"
+                style={{ flex: 1 }}
+                onClick={() => onClearCache([...selectedTypes])}
+                disabled={clearing || selectedTypes.size === 0}
+                title="Clear only the checked types"
+              >
+                <span className="pd-settings-btn-icon">🗑</span>
+                <span>{clearing ? "Clearing…" : `Clear selected (${selectedTypes.size})`}</span>
+              </button>
+              <button
+                className="pd-settings-btn"
+                style={{ flex: 1 }}
+                onClick={() => { setSelectedTypes(new Set(ALL_CACHE_TYPES)); onClearCache(ALL_CACHE_TYPES); }}
+                disabled={clearing}
+                title="Clear all cache types at once"
+              >
+                <span className="pd-settings-btn-icon">🗑</span>
+                <span>{clearing ? "Clearing…" : "Clear all"}</span>
+              </button>
+            </div>
             {clearMsg && (
               <p
                 style={{

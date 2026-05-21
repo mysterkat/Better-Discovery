@@ -9,6 +9,17 @@ import { openResultWindow } from "../lib/windows";
 // Folder-type keys whose override is controlled by the one-shot toggle.
 const FOLDER_KEYS = new Set(["DATA_FOLDER", "OUTPUT_FOLDER"]);
 
+// fix 2b: (?) hover tooltip popup for param descriptions
+function ParamTooltip({ description }: { description: string }) {
+  if (!description) return null;
+  return (
+    <span className="param-tooltip-wrap">
+      <span className="param-tooltip-icon" tabIndex={0} role="button" aria-label="Parameter description">?</span>
+      <span className="param-tooltip-popup">{description}</span>
+    </span>
+  );
+}
+
 // TF filename keys are hidden from the per-run tab — the banner shows what's
 // actually loaded (auto-detected from the latest MT5 import). Power users can
 // still override these in Settings → Edit Default Values, where the override
@@ -360,6 +371,7 @@ export default function DiscoveryTab() {
       <div key={p.key} className="field">
         <label className="field-label">
           {p.label}
+          {p.description && <ParamTooltip description={p.description} />}
           <span className="field-default"> (default: {def})</span>
           {edited && (
             <button
@@ -393,10 +405,9 @@ export default function DiscoveryTab() {
             </button>
           )}
         </div>
-        {(p.description || hint) && (
+        {hint && (
           <span className="field-hint">
-            {p.description}
-            {hint ? ` (${hint})` : ""}
+            {hint ? `(${hint})` : ""}
           </span>
         )}
       </div>

@@ -163,49 +163,58 @@ PARAM_META: dict[str, ParamMeta] = {
     "MIN_DIST_RR":          ParamMeta("Min R:R Distance",      "SL / TP", "float",
                                        "Minimum risk-reward ratio", min=0.1, max=3.0, step=0.05),
     # ── Genetic Pass 1 ──────────────────────────────────────────────────────
-    "GENETIC_GENERATIONS":  ParamMeta("Generations",           "Genetic Pass 1", "int",
+    "GENETIC_GENERATIONS":  ParamMeta("Generations",           "Genetic Pass 1 (GA)", "int",
                                        "Evolution generations", min=5, max=100, step=5),
-    "GENETIC_POPULATION":   ParamMeta("Population",            "Genetic Pass 1", "int",
+    "GENETIC_POPULATION":   ParamMeta("Population",            "Genetic Pass 1 (GA)", "int",
                                        "Individuals per generation", min=20, max=200, step=10),
-    "GENETIC_MUTATE_RATE":  ParamMeta("Mutation Rate",         "Genetic Pass 1", "float",
+    "GENETIC_MUTATE_RATE":  ParamMeta("Mutation Rate",         "Genetic Pass 1 (GA)", "float",
                                        "Gene mutation probability", min=0.05, max=0.5, step=0.05),
-    "GENE_N_COLS_MIN":      ParamMeta("Min Gene Columns",      "Genetic Pass 1", "int",
+    "GENE_N_COLS_MIN":      ParamMeta("Min Gene Columns",      "Genetic Pass 1 (GA)", "int",
                                        "Min conditions in a rule", min=1, max=10, step=1),
-    "GENE_N_COLS_MAX":      ParamMeta("Max Gene Columns",      "Genetic Pass 1", "int",
+    "GENE_N_COLS_MAX":      ParamMeta("Max Gene Columns",      "Genetic Pass 1 (GA)", "int",
                                        "Max conditions in a rule", min=2, max=15, step=1),
-    "GENE_REPAIR_ATTEMPTS": ParamMeta("Repair Attempts",       "Genetic Pass 1", "int",
+    "GENE_REPAIR_ATTEMPTS": ParamMeta("Repair Attempts",       "Genetic Pass 1 (GA)", "int",
                                        "Tries to fix an invalid individual", min=1, max=10, step=1),
-    "GENE_DIVERSITY_THRESHOLD":ParamMeta("Diversity Threshold","Genetic Pass 1", "float",
+    "GENE_DIVERSITY_THRESHOLD":ParamMeta("Diversity Threshold","Genetic Pass 1 (GA)", "float",
                                           "Similarity above which an individual is dropped", min=0.3, max=1.0, step=0.05),
-    "GENE_ISLAND_COUNT":    ParamMeta("Island Count",          "Genetic Pass 1", "int",
+    "GENE_ISLAND_COUNT":    ParamMeta("Island Count",          "Genetic Pass 1 (GA)", "int",
                                        "Parallel island sub-populations", min=1, max=8, step=1),
-    "GENE_MIGRATION_INTERVAL":ParamMeta("Migration Interval",  "Genetic Pass 1", "int",
+    "GENE_MIGRATION_INTERVAL":ParamMeta("Migration Interval",  "Genetic Pass 1 (GA)", "int",
                                           "Generations between island migrations", min=2, max=30, step=1),
-    "GENE_USE_CROWDING":    ParamMeta("Deterministic Crowding","Genetic Pass 1", "bool",
+    "GENE_USE_CROWDING":    ParamMeta("Deterministic Crowding","Genetic Pass 1 (GA)", "bool",
                                        "Replace island model with DC replacement (v0.9.x #24). "
                                        "Maintains diversity without migration; set False to revert to island model."),
-    # ── v1.0 optimizer ──────────────────────────────────────────────────────
-    "GENE_OPTIMIZER":       ParamMeta("Optimizer",             "Genetic Pass 1", "str",
+    # ── Optimizer (Task #31 — moved out of "Genetic Pass 1" so it's clearly
+    #   a cross-cutting selector, not a GA-specific knob) ─────────────────
+    "GENE_OPTIMIZER":       ParamMeta("Optimizer",             "Optimizer", "str",
                                        "ga = evolutionary GA (default); optuna = Bayesian TPE search. "
-                                       "Requires: pip install optuna",
+                                       "Switching this hides the GA-specific accordions below.",
                                        options=["ga", "optuna"]),
-    "SURROGATE_ENABLED":    ParamMeta("Surrogate Model",       "Genetic Pass 1", "bool",
+    "SURROGATE_ENABLED":    ParamMeta("Surrogate Model",       "Optimizer", "bool",
                                        "Train a GBM on scored rules to predict fitness cheaply. "
-                                       "After SURROGATE_MIN_SAMPLES real evals, 90% of calls use the predictor."),
-    "SURROGATE_REAL_FRAC":  ParamMeta("Surrogate Real Frac",   "Genetic Pass 1", "float",
+                                       "After SURROGATE_MIN_SAMPLES real evals, ~90% of calls use the predictor. "
+                                       "Wraps either optimizer."),
+    "SURROGATE_REAL_FRAC":  ParamMeta("Surrogate Real Frac",   "Optimizer", "float",
                                        "Fraction of optimizer calls that hit the real scorer (rest use GBM).",
                                        min=0.05, max=0.5, step=0.05),
     # ── Genetic Pass 2 ──────────────────────────────────────────────────────
-    "TOP_FRACTION_PASS2":      ParamMeta("Top Fraction",       "Genetic Pass 2", "float",
+    "TOP_FRACTION_PASS2":      ParamMeta("Top Fraction",       "Genetic Pass 2 (GA)", "float",
                                           "Best-scoring fraction carried into pass 2", min=0.05, max=0.5, step=0.05),
-    "MIN_TRADES_PER_DAY_PASS2":ParamMeta("Min Trades/Day",     "Genetic Pass 2", "float",
+    "MIN_TRADES_PER_DAY_PASS2":ParamMeta("Min Trades/Day",     "Genetic Pass 2 (GA)", "float",
                                           "Min trade frequency required in pass 2", min=0.1, max=5.0, step=0.1),
-    "PASS2_GENERATIONS":    ParamMeta("Generations (P2)",      "Genetic Pass 2", "int",  min=5, max=100, step=5),
-    "PASS2_POPULATION":     ParamMeta("Population (P2)",       "Genetic Pass 2", "int",  min=10, max=100, step=5),
-    "PASS2_MUTATE_RATE":    ParamMeta("Mutation Rate (P2)",    "Genetic Pass 2", "float", min=0.05, max=0.5, step=0.05),
-    "PASS2_QUANTILE_LO":    ParamMeta("Quantile Low (P2)",     "Genetic Pass 2", "float", min=0.05, max=0.45, step=0.05),
-    "PASS2_QUANTILE_HI":    ParamMeta("Quantile High (P2)",    "Genetic Pass 2", "float", min=0.55, max=0.95, step=0.05),
+    "PASS2_GENERATIONS":    ParamMeta("Generations (P2)",      "Genetic Pass 2 (GA)", "int",  min=5, max=100, step=5),
+    "PASS2_POPULATION":     ParamMeta("Population (P2)",       "Genetic Pass 2 (GA)", "int",  min=10, max=100, step=5),
+    "PASS2_MUTATE_RATE":    ParamMeta("Mutation Rate (P2)",    "Genetic Pass 2 (GA)", "float", min=0.05, max=0.5, step=0.05),
+    "PASS2_QUANTILE_LO":    ParamMeta("Quantile Low (P2)",     "Genetic Pass 2 (GA)", "float", min=0.05, max=0.45, step=0.05),
+    "PASS2_QUANTILE_HI":    ParamMeta("Quantile High (P2)",    "Genetic Pass 2 (GA)", "float", min=0.55, max=0.95, step=0.05),
     # ── Bidirectional ───────────────────────────────────────────────────────
+    "FORCE_DIRECTION":       ParamMeta("Force Direction",      "Bidirectional", "str",
+                                        "Lock every cluster to a single trade direction. "
+                                        "Use long_only or short_only when your MT5 EA is configured for a single side — "
+                                        "this prevents the bidirectional discriminator from being emitted, "
+                                        "guaranteeing the .set parity with single-direction MT5 runs. "
+                                        "auto (default) = empirical per-cluster classification.",
+                                        options=["auto", "long_only", "short_only"]),
     "BIDIR_MIN_WR":          ParamMeta("Min Win Rate",         "Bidirectional", "float",
                                         "Min win-rate % to run direction check", min=45.0, max=70.0, step=0.5),
     "BIDIR_MIN_TRADES":      ParamMeta("Min Trades",           "Bidirectional", "int",
@@ -218,28 +227,40 @@ PARAM_META: dict[str, ParamMeta] = {
     # Above target → tiny log bonus capped by EXCESS_BONUS_WEIGHT so the GA
     # won't sacrifice one objective to push another past its target.
     "ENABLE_TARGET_SCORING": ParamMeta("Target-Driven Scoring", "Scoring & Targets", "bool",
-                                        "When on (recommended), the GA evolves toward your target values "
+                                        # fix 2c: "GA" → "the optimizer" (Optuna now shares scorer)
+                                        "When on (recommended), the optimizer evolves toward your target values "
                                         "instead of blindly maximising. Turn off to use legacy v0.5 behaviour."),
     "TARGET_WR_PCT":         ParamMeta("Target: Win Rate %",   "Scoring & Targets", "float",
-                                        "GA will aim for this win-rate. Exceeding is OK if "
+                                        # fix 2c: "GA " → "the optimizer "
+                                        "The optimizer will aim for this win-rate. Exceeding is OK if "
                                         "it costs nothing on other objectives.", min=40.0, max=85.0, step=0.5),
     "TARGET_PF":             ParamMeta("Target: Profit Factor","Scoring & Targets", "float",
-                                        "GA aims for this profit factor.", min=1.1, max=4.0, step=0.05),
+                                        # fix 2c: "GA " → "the optimizer "
+                                        "The optimizer aims for this profit factor.", min=1.1, max=4.0, step=0.05),
     "TARGET_RR":             ParamMeta("Target: R:R",          "Scoring & Targets", "float",
-                                        "GA aims for this R:R as multiple of break-even.",
+                                        # fix 2c: "GA " → "the optimizer "
+                                        "The optimizer aims for this R:R as multiple of break-even.",
                                         min=0.8, max=3.0, step=0.05),
     "TARGET_STABILITY":      ParamMeta("Target: Stability",    "Scoring & Targets", "float",
-                                        "GA aims for this time-consistency × distribution score (0..1).",
+                                        # fix 2c: "GA " → "the optimizer "
+                                        "The optimizer aims for this time-consistency × distribution score (0..1).",
                                         min=0.3, max=0.95, step=0.05),
     "TARGET_TRADES_PER_DAY": ParamMeta("Target: Trades / Day", "Scoring & Targets", "float",
-                                        "GA aims for this average trades-per-calendar-day rate "
+                                        # fix 2c: "GA " → "the optimizer "
+                                        "The optimizer aims for this average trades-per-calendar-day rate "
                                         "(soft goal — doesn't reject patterns).",
                                         min=0.1, max=10.0, step=0.1),
     "SCORE_W_TRADES_PER_DAY": ParamMeta("Weight: Trades/Day",  "Scoring & Targets", "float",
                                         "Relative importance of the trades-per-day objective.",
                                         min=0.0, max=1.0, step=0.05),
+    "SCORE_W_RULE_COMPLEXITY": ParamMeta("Weight: Rule Complexity", "Scoring & Targets", "float",
+                                        "Bonus for rules that use more indicator columns. "
+                                        "0 = off (default). 0.05 = mild tie-breaker. 0.15 = strong preference. "
+                                        "Useful when too many strategies land on just 3-4 indicators.",
+                                        min=0.0, max=0.5, step=0.01),
     "EXCESS_BONUS_WEIGHT":   ParamMeta("Excess Bonus Weight",  "Scoring & Targets", "float",
-                                        "How much the GA rewards exceeding targets. 0 = strict, "
+                                        # fix 2c: "GA " → "the optimizer "
+                                        "How much the optimizer rewards exceeding targets. 0 = strict, "
                                         "0.1 = mild (recommended), 1.0 = legacy max-everything.",
                                         min=0.0, max=1.0, step=0.05),
     # SCORE_W_* are used in BOTH modes: with target scoring they weight each
@@ -307,6 +328,17 @@ OVERRIDABLE_CONSTANTS: set[str] = set(PARAM_META.keys())
 # These are still fully active in the toolkit; they're just less commonly
 # touched, so hiding them by default cuts visual clutter without removing
 # any capability. Power users open the collapse to access them.
+# Task #31: groups that only apply when another param has a specific value.
+# The frontend reads this to dim/collapse irrelevant accordions when the user
+# switches optimizer. Each entry: group_name -> {"key": ..., "value": ...}.
+# When the gate's key holds the listed value, the group is "active"; otherwise
+# the frontend shows it with reduced opacity and an "Inactive" badge.
+GROUP_GATES: dict[str, dict[str, str]] = {
+    "Genetic Pass 1 (GA)": {"key": "GENE_OPTIMIZER", "value": "ga"},
+    "Genetic Pass 2 (GA)": {"key": "GENE_OPTIMIZER", "value": "ga"},
+}
+
+
 _ADVANCED_KEYS: set[str] = {
     # Data & Files
     "MTF_SCORE_MODE", "HTF_DIV_TF", "OUTPUT_FOLDER",
@@ -316,16 +348,21 @@ _ADVANCED_KEYS: set[str] = {
     "SHAPE_MATCH_THRESHOLD",
     # Trade Simulation
     "MEANINGFUL_SUSTAIN_BARS", "COOLDOWN_BARS",
-    # Genetic Pass 1
+    # Genetic Pass 1 (GA)
     "GENE_N_COLS_MIN", "GENE_N_COLS_MAX", "GENE_REPAIR_ATTEMPTS",
     "GENE_DIVERSITY_THRESHOLD", "GENE_ISLAND_COUNT", "GENE_MIGRATION_INTERVAL",
-    # Genetic Pass 2 — entire group is tuning territory
+    # Optimizer — surrogate tuning is advanced; main toggle stays core
+    "SURROGATE_REAL_FRAC",
+    # Genetic Pass 2 (GA) — entire group is tuning territory
     "TOP_FRACTION_PASS2", "MIN_TRADES_PER_DAY_PASS2",
     "PASS2_GENERATIONS", "PASS2_POPULATION", "PASS2_MUTATE_RATE",
     "PASS2_QUANTILE_LO", "PASS2_QUANTILE_HI",
     # Bidirectional — gating thresholds rarely tuned
     "BIDIR_MIN_WR", "BIDIR_MIN_TRADES", "DISCRIM_MIN_ACCURACY",
     # Scoring — targets are the primary knobs; weights + bonus + wilson are advanced
+    # fix 2a: trades/day target + weight moved to advanced (less frequently tuned)
+    "TARGET_TRADES_PER_DAY", "SCORE_W_TRADES_PER_DAY",
+    "SCORE_W_RULE_COMPLEXITY",  # off by default; tuning knob for over-simple rules
     "EXCESS_BONUS_WEIGHT",
     "SCORE_W_WR", "SCORE_W_PF", "SCORE_W_RR", "SCORE_W_STAB",
     "SCORE_WILSON_CONFIDENCE",
@@ -413,6 +450,9 @@ def list_defaults_with_meta() -> list[dict[str, Any]]:
             entry["step"] = meta.step
         if meta.options:
             entry["options"] = meta.options
+        # Task #31: per-group gating (e.g. GA-only groups hidden when Optuna selected)
+        if meta.group in GROUP_GATES:
+            entry["gated_by"] = GROUP_GATES[meta.group]
         result.append(entry)
     return result
 

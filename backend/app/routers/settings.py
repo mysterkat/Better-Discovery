@@ -28,7 +28,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..jobs.manager import JOBS
-from ..paths import DEFAULT_DISC_OUTPUT, USER_DATA
+from ..paths import DEFAULT_DISC_OUTPUT, DEFAULT_LIBRARY, USER_DATA
 
 router = APIRouter()
 
@@ -169,55 +169,112 @@ def open_folder(req: OpenFolderRequest) -> dict[str, Any]:
     return {"ok": True, "opened": str(folder)}
 
 
+# fix 4a/4b: Known cache types and what they map to on disk.
+# "discovery"       → userdata/discovery/     (pattern-discovery artifacts)
+# "mql"             → userdata/mql/            (MQL export files)
+# "library_reports" → userdata/library/*/mt5_backtest.{htm,csv}
+#                     (Compare-tab attachments — keeps strategies intact)
+#
+# NOT clearable:
+#   userdata/hist_data/        — imported MT5 history (slow to re-fetch)
+#   userdata/settings.json     — user settings
+#   userdata/param_defaults.json — user parameter defaults
+#   userdata/themes/           — custom themes
+#   userdata/library/*/metadata.json, strategy.set, trades.csv — library entries
+_ALL_CACHE_TYPES = frozenset({"discovery", "mql", "library_reports"})
+
+
+def _clear_folder(folder: Path) -> tuple[int, int]:
+    """Recursively delete all contents of a folder. Returns (files, bytes)."""
+    files_removed = 0
+    bytes_removed = 0
+    if not folder.is_dir():
+        return files_removed, bytes_removed
+    for entry in folder.iterdir():
+        try:
+            if entry.is_dir():
+                for sub in entry.rglob("*"):
+                    if sub.is_file():
+                        try:
+                            bytes_removed += sub.stat().st_size
+                            files_removed += 1
+                        except OSError:
+                            pass
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                try:
+                    bytes_removed += entry.stat().st_size
+                except OSError:
+                    pass
+                entry.unlink(missing_ok=True)
+                files_removed += 1
+        except OSError:
+            continue
+    return files_removed, bytes_removed
+
+
+def _clear_library_reports() -> tuple[int, int]:
+    """Remove only MT5 attachment files from library entries; keeps the entries."""
+    files_removed = 0
+    bytes_removed = 0
+    if not DEFAULT_LIBRARY.is_dir():
+        return files_removed, bytes_removed
+    for entry_dir in DEFAULT_LIBRARY.iterdir():
+        if not entry_dir.is_dir():
+            continue
+        for fname in ("mt5_backtest.htm", "mt5_backtest.csv"):
+            fpath = entry_dir / fname
+            if fpath.is_file():
+                try:
+                    bytes_removed += fpath.stat().st_size
+                    fpath.unlink()
+                    files_removed += 1
+                except OSError:
+                    pass
+    return files_removed, bytes_removed
+
+
+class ClearCacheRequest(BaseModel):
+    """fix 4b: optional list of cache types to clear. Empty = clear all."""
+    types: list[str] = []
+
+
 @router.post("/system/clear-cache")
-def clear_cache() -> dict[str, Any]:
-    """Delete generated discovery and MQL artifacts.
+def clear_cache(body: ClearCacheRequest | None = None) -> dict[str, Any]:
+    """fix 4a/4b: Delete selected cache types or all if none specified.
 
-    Removes .set / .mq5 / .csv / .png / .txt / .json files (and per-seed
-    subfolders) from userdata/discovery and userdata/mql. Settings, themes,
-    param defaults, and imported hist_data are NOT touched.
+    Cache types:
+      "discovery"       — discovery artifacts (.set/.csv/.png etc.)
+      "mql"             — MQL export files
+      "library_reports" — MT5 attachments per library entry (htm + csv)
 
-    Returns counts and freed bytes per folder.
+    Raises 400 if an unknown type is requested.
+    Settings, themes, param defaults, imported history, and library strategy
+    metadata are never touched.
     """
-    targets = [DEFAULT_DISC_OUTPUT, USER_DATA / "mql"]
+    requested = set((body.types if body and body.types else []) or _ALL_CACHE_TYPES)
+    unknown = requested - _ALL_CACHE_TYPES
+    if unknown:
+        raise HTTPException(400, f"unknown cache types: {sorted(unknown)}")
+
     summary: dict[str, Any] = {"ok": True, "folders": {}}
     total_files = 0
     total_bytes = 0
 
-    for folder in targets:
-        files_removed = 0
-        bytes_removed = 0
-        if not folder.is_dir():
-            summary["folders"][folder.name] = {"files_removed": 0, "bytes_removed": 0}
-            continue
-        for entry in folder.iterdir():
-            try:
-                if entry.is_dir():
-                    # walk for byte-count then rmtree
-                    for sub in entry.rglob("*"):
-                        if sub.is_file():
-                            try:
-                                bytes_removed += sub.stat().st_size
-                                files_removed += 1
-                            except OSError:
-                                pass
-                    shutil.rmtree(entry, ignore_errors=True)
-                else:
-                    try:
-                        bytes_removed += entry.stat().st_size
-                    except OSError:
-                        pass
-                    entry.unlink(missing_ok=True)
-                    files_removed += 1
-            except OSError:
-                # Best-effort: skip files held by another process.
-                continue
-        summary["folders"][folder.name] = {
-            "files_removed": files_removed,
-            "bytes_removed": bytes_removed,
-        }
-        total_files += files_removed
-        total_bytes += bytes_removed
+    if "discovery" in requested:
+        f, b = _clear_folder(DEFAULT_DISC_OUTPUT)
+        summary["folders"]["discovery"] = {"files_removed": f, "bytes_removed": b}
+        total_files += f; total_bytes += b
+
+    if "mql" in requested:
+        f, b = _clear_folder(USER_DATA / "mql")
+        summary["folders"]["mql"] = {"files_removed": f, "bytes_removed": b}
+        total_files += f; total_bytes += b
+
+    if "library_reports" in requested:
+        f, b = _clear_library_reports()
+        summary["folders"]["library_reports"] = {"files_removed": f, "bytes_removed": b}
+        total_files += f; total_bytes += b
 
     summary["total_files"] = total_files
     summary["total_bytes"] = total_bytes

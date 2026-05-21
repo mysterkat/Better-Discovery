@@ -219,6 +219,24 @@ def library_mt5_csv(pattern_id: str) -> FileResponse:
     return FileResponse(target, media_type="text/csv")
 
 
+@router.delete("/library/{pattern_id}/attachment/{kind}", response_model=LibraryEntry)
+def library_detach(pattern_id: str, kind: str) -> LibraryEntry:
+    """fix 3a: Remove an MT5 attachment (html or csv) without deleting the library entry."""
+    folder = _entry_dir(pattern_id)
+    if not folder.is_dir():
+        raise HTTPException(404, f"library entry not found: {pattern_id}")
+    target_name = _ATTACH_FILES.get(kind)
+    if target_name is None:
+        raise HTTPException(400, f"unknown attach kind: {kind}")
+    target = folder / target_name
+    if target.is_file():
+        target.unlink()
+    entry = _read_entry(folder)
+    if entry is None:
+        raise HTTPException(500, "entry could not be read back after detach")
+    return entry
+
+
 @router.delete("/library/{pattern_id}", response_model=Ok)
 def library_delete(pattern_id: str) -> Ok:
     folder = _entry_dir(pattern_id)

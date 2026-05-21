@@ -206,7 +206,9 @@ function Phase1Panel({ data, regime, extras }: { data: EvalPhaseResult; regime: 
     { label: "Min Days",       value: String(data.min_days) },
     { label: "Pass Rate",      value: pct(data.pass_rate),
       tone: data.pass_rate >= 50 ? "good" : "bad" },
-    { label: "Avg Days",       value: data.avg_days > 0 ? data.avg_days.toFixed(1) + "d" : "N/A" },
+    // fix 1a: median + avg days side-by-side (median P50 is more robust for right-skewed distributions)
+    { label: "Median (P50)",   value: data.days_p50 > 0 ? data.days_p50.toFixed(1) + "d" : "N/A" },
+    { label: "Average",        value: data.avg_days > 0 ? data.avg_days.toFixed(1) + "d" : "N/A" },
   ];
   if (globalV && globalV.kelly_fraction != null) {
     const kv = String(globalV.kelly_verdict ?? "").toLowerCase();
@@ -307,6 +309,9 @@ function Phase2Panel({ data, extras }: { data: EvalPhaseResult; extras: Record<s
             tone: data.pass_rate >= 50 ? "good" : "bad" },
           { label: "Combined",       value: pct(data.combined_pass_rate ?? 0),
             tone: (data.combined_pass_rate ?? 0) >= 20 ? "good" : "alt" },
+          // fix 1a: median + avg days side-by-side for phase 2
+          { label: "Median (P50)",   value: data.days_p50 > 0 ? data.days_p50.toFixed(1) + "d" : "N/A" },
+          { label: "Average",        value: data.avg_days > 0 ? data.avg_days.toFixed(1) + "d" : "N/A" },
           ...(combinedDays != null
             ? [{ label: "P1+P2 Median Days", value: `${combinedDays} days` }]
             : []),
@@ -380,6 +385,12 @@ function FundedPanel({ data, extras }: { data: FundedResult; extras: Record<stri
       tone: data.payout_rate >= 50 ? "good" : "bad" },
     { label: "Breach Rate",     value: pct(data.breach_rate),
       tone: data.breach_rate > 50 ? "bad" : "alt" },
+    // fix 1b: % breach before first payout KPI
+    ...(data.breach_before_payout_rate != null
+      ? [{ label: "Breach before 1st payout",
+           value: pct(Number(data.breach_before_payout_rate)),
+           tone: (Number(data.breach_before_payout_rate) > 50 ? "bad" : "alt") as KpiCell["tone"] }]
+      : []),
     { label: "Avg Earnings",    value: usd(data.avg_total_earnings),
       tone: data.avg_total_earnings > 0 ? "good" : "bad" },
     { label: "Avg Payouts",     value: data.avg_payout_count.toFixed(2) },

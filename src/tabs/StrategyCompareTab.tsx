@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   attachToLibrary,
+  detachFromLibrary,
   deleteLibraryEntry,
   getDiscoveryTradesCsv,
   getMt5HtmlUrl,
@@ -128,35 +129,57 @@ function computeMetricBest(entries: LibraryEntry[]): Record<string, string> {
   return winners;
 }
 
-/** Parse a tiny subset of an MT5 trades CSV: rolling P/L from each row, then
- *  derive trade count, gross profit/loss, max drawdown in account currency.
- *  Tolerates a few common formats — drops rows that don't parse. */
+/** fix 3b: Parse MT5 trades CSV — robust column detection for gross_profit/loss and max_dd.
+ *  MT5 Strategy Tester CSVs typically have a "Profit" column that can contain
+ *  both positive and negative values. gross_loss is the sum of negatives (signed). */
 function summarizeMt5Csv(text: string): Mt5Stats {
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
   if (lines.length === 0) return { trades: 0, gross_profit: 0, gross_loss: 0, max_dd: 0 };
-  // Detect header
-  const header = lines[0].split(/[\t,;]/).map((c) => c.trim().toLowerCase());
-  const profitIdx = header.findIndex((h) =>
-    h === "profit" || h === "p/l" || h === "pl" || h === "net" || h === "result",
+
+  // Detect separator (tab, comma, or semicolon) from the first line
+  const firstLine = lines[0];
+  const sep = firstLine.includes("\t") ? "\t" : firstLine.includes(";") ? ";" : ",";
+
+  // Parse header row — strip BOM, quotes, and normalize to lowercase
+  const header = firstLine.split(sep).map((c) =>
+    c.trim().replace(/^﻿/, "").replace(/^["']|["']$/g, "").toLowerCase(),
   );
-  const dataLines = profitIdx >= 0 ? lines.slice(1) : lines;
-  const idx = profitIdx >= 0 ? profitIdx : -1;
+
+  // Try multiple column names MT5 uses across versions and locales
+  const profitCandidates = ["profit", "p/l", "pl", "net", "result", "gain", "closed p&l"];
+  let profitIdx = -1;
+  for (const cand of profitCandidates) {
+    profitIdx = header.findIndex((h) => h === cand || h.startsWith(cand));
+    if (profitIdx >= 0) break;
+  }
+
+  // If still not found, try last numeric column heuristic
+  const dataLines = lines.slice(1);
+  const idx = profitIdx;
+
   let trades = 0;
   let gp = 0;
   let gl = 0;
   let running = 0;
   let peak = 0;
   let maxDd = 0;
+
   for (const ln of dataLines) {
-    const cols = ln.split(/[\t,;]/);
+    if (!ln.trim()) continue;
+    const cols = ln.split(sep);
     const raw = idx >= 0 ? cols[idx] : cols[cols.length - 1];
     if (!raw) continue;
-    const v = parseFloat(raw.replace(/[ ,$]/g, "").replace(",", "."));
+    // strip currency symbols, spaces, and handle European comma decimal
+    const cleaned = raw.trim().replace(/[^0-9.\-,]/g, "").replace(",", ".");
+    const v = parseFloat(cleaned);
     if (!isFinite(v)) continue;
     trades += 1;
-    if (v > 0) gp += v; else gl += v;
+    // fix 3b: correct split — positive to gross_profit, negative to gross_loss (signed)
+    if (v > 0) gp += v;
+    else if (v < 0) gl += v;  // gl stays negative (signed convention)
     running += v;
     if (running > peak) peak = running;
+    // fix 3b: max_dd = largest peak-to-trough drawdown from running equity
     const dd = peak - running;
     if (dd > maxDd) maxDd = dd;
   }
@@ -346,6 +369,23 @@ export default function StrategyCompareTab() {
     }
   };
 
+  // fix 3a: detach an attachment without removing the library entry
+  const handleDetach = async (id: string, kind: "mt5_html" | "mt5_csv") => {
+    setBusy(id);
+    try {
+      await detachFromLibrary(id, kind);
+      // Also clear the local CSV text cache for this entry
+      if (kind === "mt5_csv") {
+        setMt5CsvText((prev) => { const next = new Map(prev); next.delete(id); return next; });
+      }
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const selectedEntries = useMemo(
     () => library.filter((e) => selected.has(e.pattern_id)),
     [library, selected],
@@ -356,9 +396,10 @@ export default function StrategyCompareTab() {
     [diffMode, selectedEntries],
   );
 
+  // fix 3c: best-in-row highlight always active when ≥2 strategies selected (not tied to diffMode)
   const metricBest = useMemo(
-    () => (diffMode ? computeMetricBest(selectedEntries) : {}),
-    [diffMode, selectedEntries],
+    () => computeMetricBest(selectedEntries),
+    [selectedEntries],
   );
 
   return (
@@ -547,6 +588,8 @@ export default function StrategyCompareTab() {
                     metricBest={metricBest}
                     busy={busy === entry.pattern_id}
                     onAttach={(kind, file) => handleAttach(entry.pattern_id, kind, file)}
+                    onDetach={(kind) => handleDetach(entry.pattern_id, kind)}
+                    onRemove={() => toggleSelect(entry.pattern_id)}
                   />
                 ))}
               </div>
@@ -566,9 +609,11 @@ interface CompareColumnProps {
   metricBest: Record<string, string>;
   busy: boolean;
   onAttach: (kind: "mt5_html" | "mt5_csv", file: File) => void;
+  onDetach: (kind: "mt5_html" | "mt5_csv") => void; // fix 3a: discard attachment
+  onRemove: () => void; // fix 3f: remove from comparison (not delete)
 }
 
-function CompareColumn({ entry, indicatorDiff, metricBest, busy, onAttach }: CompareColumnProps) {
+function CompareColumn({ entry, indicatorDiff, metricBest, busy, onAttach, onDetach, onRemove }: CompareColumnProps) {
   const meta = entry.metadata as PatternSummary;
   const rule = ruleOf(entry);
   const [htmlUrl, setHtmlUrl] = useState<string | null>(null);
@@ -615,8 +660,19 @@ function CompareColumn({ entry, indicatorDiff, metricBest, busy, onAttach }: Com
   return (
     <div className="compare-column">
       <header className="compare-column-header">
-        <div className="compare-column-id" title={entry.pattern_id}>
-          {entry.pattern_id}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div className="compare-column-id" title={entry.pattern_id}>
+            {entry.pattern_id}
+          </div>
+          {/* fix 3f: remove from comparison without deleting from library */}
+          <button
+            className="btn-mini"
+            title="Remove from comparison (stays in library)"
+            onClick={onRemove}
+            style={{ marginLeft: 6, flexShrink: 0 }}
+          >
+            ✕ Remove
+          </button>
         </div>
         <div className="compare-column-subhead">
           {meta?.direction && (
@@ -662,12 +718,23 @@ function CompareColumn({ entry, indicatorDiff, metricBest, busy, onAttach }: Com
             <div className="field-hint" style={{ marginBottom: 6 }}>
               Report attached.
             </div>
-            <button
-              className="btn-mini"
-              onClick={() => setShowReport((s) => !s)}
-            >
-              {showReport ? "Hide report" : "View report"}
-            </button>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
+              <button
+                className="btn-mini"
+                onClick={() => setShowReport((s) => !s)}
+              >
+                {showReport ? "Hide report" : "View report"}
+              </button>
+              {/* fix 3a: discard HTML report without removing from library */}
+              <button
+                className="btn-mini"
+                title="Remove this MT5 report — strategy stays in library"
+                onClick={() => onDetach("mt5_html")}
+                disabled={busy}
+              >
+                ✕ Discard report
+              </button>
+            </div>
             <ContentDropZone
               label="Replace MT5 .htm"
               accept=".htm,.html"
@@ -753,10 +820,13 @@ function ContentDropZone({ label, accept, onFile, disabled, compact }: ContentDr
   return (
     <label
       className={`content-dropzone${hover ? " content-dropzone-hover" : ""}${compact ? " content-dropzone-compact" : ""}${disabled ? " content-dropzone-disabled" : ""}`}
-      onDragOver={(e) => { e.preventDefault(); if (!disabled) setHover(true); }}
+      // fix 3e: onDragEnter + onDragOver must both call preventDefault to allow drop
+      onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); if (!disabled) setHover(true); }}
+      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); if (!disabled) setHover(true); }}
       onDragLeave={() => setHover(false)}
       onDrop={(e) => {
         e.preventDefault();
+        e.stopPropagation();
         setHover(false);
         if (disabled) return;
         const f = e.dataTransfer.files[0];
@@ -941,18 +1011,37 @@ interface EquitySeries {
   cumPL: number[];
 }
 
-/** Parse MT5 trades CSV into a cumulative P/L curve indexed by trade number.
- *  Plots by trade index (not timestamp) so backtests with different lengths
- *  remain comparable on a single axis. */
+/** fix 3d: Parse MT5 trades CSV into a cumulative P/L curve indexed by trade number.
+ *  Uses the same robust column detection as summarizeMt5Csv (3b fix). */
 function parseMt5Equity(text: string): EquitySeries {
-  // Reuse the lenient extractor; the column header in MT5 reports is usually
-  // "Profit" but can vary. Try a few common names.
-  const candidates = ["Profit", "profit", "P/L", "p/l", "PL", "pl", "Net", "net", "Result", "result"];
-  let pl: number[] = [];
-  for (const name of candidates) {
-    const found = extractCsvNumberColumn(text, name);
-    if (found.length > 0) { pl = found; break; }
+  // Use summarizeMt5Csv logic for column detection, then rebuild the P/L series
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length < 2) return { patternId: "", trades: [], cumPL: [] };
+
+  const firstLine = lines[0];
+  const sep = firstLine.includes("\t") ? "\t" : firstLine.includes(";") ? ";" : ",";
+  const header = firstLine.split(sep).map((c) =>
+    c.trim().replace(/^﻿/, "").replace(/^["']|["']$/g, "").toLowerCase(),
+  );
+
+  const profitCandidates = ["profit", "p/l", "pl", "net", "result", "gain", "closed p&l"];
+  let profitIdx = -1;
+  for (const cand of profitCandidates) {
+    profitIdx = header.findIndex((h) => h === cand || h.startsWith(cand));
+    if (profitIdx >= 0) break;
   }
+
+  const pl: number[] = [];
+  for (const ln of lines.slice(1)) {
+    if (!ln.trim()) continue;
+    const cols = ln.split(sep);
+    const raw = profitIdx >= 0 ? cols[profitIdx] : cols[cols.length - 1];
+    if (!raw) continue;
+    const cleaned = raw.trim().replace(/[^0-9.\-,]/g, "").replace(",", ".");
+    const v = parseFloat(cleaned);
+    if (isFinite(v)) pl.push(v);
+  }
+
   if (pl.length === 0) return { patternId: "", trades: [], cumPL: [] };
   const trades = pl.map((_, i) => i + 1);
   let acc = 0;
@@ -1005,11 +1094,19 @@ function EquityOverlay({ selectedEntries, mt5CsvText }: EquityOverlayProps) {
           {series.length < withMt5Count && " — others still loading or have unrecognized columns"}
         </span>
       </div>
+      {/* fix 3d: responsive overlay + reset zoom via Plotly modeBar */}
       <Plot
         data={data}
         layout={layout}
-        config={{ displayModeBar: false, responsive: true }}
+        config={{
+          displayModeBar: true,
+          responsive: true,
+          displaylogo: false,
+          // fix 3d: keep only essential buttons + reset-zoom
+          modeBarButtonsToRemove: ["lasso2d", "select2d", "toggleSpikelines"] as any,
+        }}
         style={{ width: "100%" }}
+        useResizeHandler
       />
     </div>
   );

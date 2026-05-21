@@ -1406,6 +1406,60 @@ kbd {
   font-style: italic;
 }
 
+/* fix 2b: param (?) hover tooltip popup ─────────────────────────────── */
+.param-tooltip-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 5px;
+}
+.param-tooltip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--text2);
+  color: var(--text2);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: help;
+  line-height: 1;
+  flex-shrink: 0;
+  font-style: normal;
+  user-select: none;
+  transition: border-color 0.12s, color 0.12s;
+}
+.param-tooltip-icon:hover {
+  border-color: var(--accent2);
+  color: var(--accent2);
+}
+.param-tooltip-popup {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: normal;
+  width: 260px;
+  max-width: min(260px, 90vw);
+  z-index: 9999;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+  pointer-events: none;
+}
+.param-tooltip-wrap:hover .param-tooltip-popup,
+.param-tooltip-icon:focus + .param-tooltip-popup {
+  display: block;
+}
+
 /* badge showing count of modified params in a group header */
 .pd-modified-badge {
   background: var(--accent);
@@ -1691,8 +1745,16 @@ kbd {
   padding: 8px;
   overflow: hidden;
   min-width: 0;
+  /* fix 1c: contain Plotly chart width within card — prevents long-term p10/p90 overflow */
+  max-width: 100%;
+  box-sizing: border-box;
 }
 .mc-chart-card-full { grid-column: 1 / -1; }
+/* fix 1c: ensure Plotly svg inside cards never overflows its container */
+.mc-chart-card .js-plotly-plot,
+.mc-chart-card .plot-container {
+  max-width: 100%;
+}
 
 .mc-chart-empty {
   padding: 60px 20px;
