@@ -206,6 +206,28 @@ PARAM_META: dict[str, ParamMeta] = {
     "SURROGATE_REAL_FRAC":  ParamMeta("Surrogate Real Frac",   "Optimizer", "float",
                                        "Fraction of optimizer calls that hit the real scorer (rest use GBM).",
                                        min=0.05, max=0.5, step=0.05),
+    # v1.2: Optuna-specific tuning
+    "OPTUNA_SAMPLER":       ParamMeta("Optuna: Sampler",       "Optimizer", "str",
+                                       "tpe = Bayesian (default, good general).  cmaes = Covariance Matrix "
+                                       "Adaptation, often beats TPE on continuous rule landscapes.  "
+                                       "random = pure random baseline (sanity check only).",
+                                       options=["tpe", "cmaes", "random"]),
+    "OPTUNA_TPE_MULTIVARIATE": ParamMeta("Optuna: TPE Multivariate", "Optimizer", "bool",
+                                       "TPE learns joint distributions across parameters instead of fitting "
+                                       "each marginal independently. +15-25% rule quality on correlated bounds."),
+    "OPTUNA_TPE_GROUP":     ParamMeta("Optuna: TPE Group",     "Optimizer", "bool",
+                                       "Groups parameters that always appear together (per-column "
+                                       "{use, lo_pct, w_pct} triples) so TPE treats them as a joint subspace."),
+    "OPTUNA_TPE_N_STARTUP": ParamMeta("Optuna: TPE Warmup Trials", "Optimizer", "int",
+                                       "Random-search trials before TPE's model kicks in.  Higher = more "
+                                       "exploration before exploitation.",
+                                       min=5, max=100, step=5),
+    "OPTUNA_PARALLEL_TRIALS": ParamMeta("Optuna: Parallel Trials", "Optimizer", "int",
+                                       "Threads per study running trials in parallel.  1 = sequential "
+                                       "(default).  Set 2-4 only if you have CPU headroom "
+                                       "(candidates × value < cores) — otherwise CPU oversubscription "
+                                       "hurts.",
+                                       min=1, max=8, step=1),
     # ── Genetic Pass 2 ──────────────────────────────────────────────────────
     "TOP_FRACTION_PASS2":      ParamMeta("Top Fraction",       "Genetic Pass 2", "float",
                                           "Best-scoring fraction carried into pass 2", min=0.05, max=0.5, step=0.05),
@@ -365,8 +387,11 @@ _ADVANCED_KEYS: set[str] = {
     # Genetic Pass 1 (GA)
     "GENE_REPAIR_ATTEMPTS",
     "GENE_DIVERSITY_THRESHOLD", "GENE_ISLAND_COUNT", "GENE_MIGRATION_INTERVAL",
-    # Optimizer — surrogate tuning is advanced; main toggle stays core
+    # Optimizer — surrogate tuning + Optuna internals are advanced;
+    # only the high-level OPTIMIZER selector + SAMPLER stay core.
     "SURROGATE_REAL_FRAC",
+    "OPTUNA_TPE_MULTIVARIATE", "OPTUNA_TPE_GROUP", "OPTUNA_TPE_N_STARTUP",
+    "OPTUNA_PARALLEL_TRIALS",
     # Genetic Pass 2 — entire group is tuning territory (always runs as GA)
     "TOP_FRACTION_PASS2", "MIN_TRADES_PER_DAY_PASS2",
     "PASS2_GENERATIONS", "PASS2_POPULATION", "PASS2_MUTATE_RATE",
