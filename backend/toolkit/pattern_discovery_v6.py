@@ -1977,8 +1977,14 @@ def _genetic_worker(args):
     generations (3× cheaper per eval); pass 2 polishes on the full bar set
     for the final 25% of generations.
     """
-    (cid,member_bi,sl_pct,tp_pct,direction,full_cluster_size,
-     island_id,generations,pop_size,mutate_rate,train_days,seed)=args
+    # v1.4: optional seed_rule appended to args (backward-compat unpack)
+    if len(args) >= 13:
+        (cid,member_bi,sl_pct,tp_pct,direction,full_cluster_size,
+         island_id,generations,pop_size,mutate_rate,train_days,seed,seed_rule)=args
+    else:
+        (cid,member_bi,sl_pct,tp_pct,direction,full_cluster_size,
+         island_id,generations,pop_size,mutate_rate,train_days,seed)=args
+        seed_rule = None
     rng_=np.random.default_rng(seed); arrays=_GEN["arrays"]
     if len(member_bi)<10: return cid,direction,island_id,{},0.0
 
@@ -2006,8 +2012,26 @@ def _genetic_worker(args):
     # #20 — per-worker column mask cache (cleared between full/coarse switch)
     cache: dict = {}
 
-    pop=[_rand_rule(col_stats,GENE_N_COLS_MIN,GENE_N_COLS_MAX,rng_)
-         for _ in range(pop_size)]
+    # v1.4: warm-start from leaf rule if provided.  Clamps each bound to the
+    # cluster's col_stats range; drops cols outside col_stats entirely.
+    # Initial pop = [seed_rule, then pop_size-1 mutations of it].
+    seed_clamped: dict = {}
+    if seed_rule:
+        for col, (lo, hi) in seed_rule.items():
+            if col not in col_stats:
+                continue
+            vmin, vmax = col_stats[col]
+            new_lo = max(lo, vmin) if lo != float("-inf") else vmin
+            new_hi = min(hi, vmax) if hi != float("inf") else vmax
+            if new_lo < new_hi:
+                seed_clamped[col] = (new_lo, new_hi)
+    if seed_clamped and len(seed_clamped) >= GENE_N_COLS_MIN:
+        pop = [seed_clamped]
+        for _ in range(pop_size - 1):
+            pop.append(_mutate_rule(seed_clamped, col_stats, mutate_rate, rng_))
+    else:
+        pop=[_rand_rule(col_stats,GENE_N_COLS_MIN,GENE_N_COLS_MAX,rng_)
+             for _ in range(pop_size)]
     scores=[_score(r, cache=cache) for r in pop]
 
     best_r=pop[int(np.argmax(scores))]; best_s=max(scores)
@@ -2146,10 +2170,15 @@ def _genetic_worker(args):
 def genetic_refine_parallel(df,indices,labels,candidate_keys,
                              price_dists,bidir_info,fwd,
                              generations,pop_size,mutate_rate,
-                             train_days,seed,n_workers):
+                             train_days,seed,n_workers,
+                             leaf_rules=None):
     """
     Run genetic refinement using island model.
     candidate_keys: list of (cid, direction) tuples.
+    leaf_rules: optional dict {cid: {col: (lo, hi)}} of LightGBM leaf-path
+        rules used as warm-start seeds.  When provided, each candidate's
+        initial population is seeded with the leaf rule (clamped to that
+        cluster's col_stats) + mutations of it, instead of random rules.
     """
     t0=time.time()
     use_crowding = bool(globals().get("GENE_USE_CROWDING", False))
@@ -2171,18 +2200,22 @@ def genetic_refine_parallel(df,indices,labels,candidate_keys,
         sl_p=d["sl_pct"] if d else 0.002
         tp_p=d["tp_pct"] if d else 0.003
         full_size=len(cm.get(cid,[]))
+        # v1.4: warm-start rule from LightGBM leaf path (if available)
+        seed_rule = (leaf_rules or {}).get(cid)
         if use_crowding:
             # Single large-population worker per (cid, direction) — DC maintains diversity
             args.append((cid,cm.get(cid,[]),sl_p,tp_p,direction,
                          full_size,0,generations,pop_size*GENE_ISLAND_COUNT,
                          mutate_rate,train_days,
-                         seed+cid*100+{"LONG":0,"SHORT":1}.get(direction,0)))
+                         seed+cid*100+{"LONG":0,"SHORT":1}.get(direction,0),
+                         seed_rule))
         else:
             for island in range(GENE_ISLAND_COUNT):
                 args.append((cid,cm.get(cid,[]),sl_p,tp_p,direction,
                              full_size,island,generations,pop_size,
                              mutate_rate,train_days,
-                             seed+cid*100+island*7+{"LONG":0,"SHORT":1}.get(direction,0)))
+                             seed+cid*100+island*7+{"LONG":0,"SHORT":1}.get(direction,0),
+                             seed_rule))
 
     with mp.Pool(n_workers,initializer=_init_genetic,
                  initargs=(arrays,hi,lo,cl,op,fwd,n,SPREAD_PTS)) as pool:
@@ -2291,9 +2324,15 @@ def _genetic_p2_worker(args):
 
 
 def _optuna_worker(args):
-    """v1.0 #26/#27: Optuna TPE optimizer (+ optional surrogate) for one (cid, direction)."""
-    (cid, member_bi, sl_pct, tp_pct, direction, full_size,
-     n_trials, train_days, seed, use_surrogate) = args
+    """v1.0 #26/#27: Optuna TPE optimizer (+ optional surrogate) for one (cid, direction).
+    v1.4: optional seed_rule appended for LightGBM leaf warm-start."""
+    if len(args) >= 11:
+        (cid, member_bi, sl_pct, tp_pct, direction, full_size,
+         n_trials, train_days, seed, use_surrogate, seed_rule) = args
+    else:
+        (cid, member_bi, sl_pct, tp_pct, direction, full_size,
+         n_trials, train_days, seed, use_surrogate) = args
+        seed_rule = None
 
     import optuna as _optuna
     _optuna.logging.set_verbosity(_optuna.logging.WARNING)
@@ -2408,6 +2447,35 @@ def _optuna_worker(args):
             n_startup_trials=int(globals().get("OPTUNA_TPE_N_STARTUP", 20)),
         )
     study = _optuna.create_study(direction="maximize", sampler=sampler)
+
+    # v1.4: warm-start — enqueue seed_rule as the first trial.  Encode each
+    # of its bounds in Optuna's per-column {use, lo_pct, w_pct} parameter
+    # space, clamped to this cluster's col_stats range.
+    if seed_rule:
+        warm_params: dict = {}
+        for col in sorted_cols:
+            warm_params[f"use_{col}"] = 0
+            warm_params[f"lo_pct_{col}"] = 0.0
+            warm_params[f"w_pct_{col}"] = 0.01
+        for col, (lo, hi) in seed_rule.items():
+            if col not in col_stats:
+                continue
+            vmin, vmax = col_stats[col]
+            span = max(vmax - vmin, 1e-9)
+            new_lo = max(lo, vmin) if lo != float("-inf") else vmin
+            new_hi = min(hi, vmax) if hi != float("inf") else vmax
+            if new_lo >= new_hi:
+                continue
+            lo_pct = max(0.0, min(0.95, (new_lo - vmin) / span))
+            w_pct  = max(0.01, min(1.0 - lo_pct, (new_hi - new_lo) / span))
+            warm_params[f"use_{col}"]   = 1
+            warm_params[f"lo_pct_{col}"] = lo_pct
+            warm_params[f"w_pct_{col}"]  = w_pct
+        try:
+            study.enqueue_trial(warm_params)
+        except Exception:
+            pass  # fall back to pure search if enqueue rejects params
+
     _n_jobs = max(1, int(globals().get("OPTUNA_PARALLEL_TRIALS", 1)))
     study.optimize(objective, n_trials=n_trials, n_jobs=_n_jobs, show_progress_bar=False)
 
@@ -2418,11 +2486,14 @@ def _optuna_worker(args):
 
 def optuna_refine_parallel(df, indices, labels, candidate_keys,
                             price_dists, fwd,
-                            n_trials, train_days, seed, n_workers):
+                            n_trials, train_days, seed, n_workers,
+                            leaf_rules=None):
     """
     v1.0 #26/#27: Optuna TPE optimizer as a drop-in replacement for
     genetic_refine_parallel().  Returns the same {(cid,direction):(rule,score)} dict.
     n_trials ≈ GENETIC_GENERATIONS × GENETIC_POPULATION for a fair comparison.
+    leaf_rules: optional dict {cid: {col: (lo, hi)}} of LightGBM leaf-path
+        rules used as warm-start seeds via study.enqueue_trial().
     """
     t0 = time.time()
     use_surrogate = bool(globals().get("SURROGATE_ENABLED", False))
@@ -2445,10 +2516,12 @@ def optuna_refine_parallel(df, indices, labels, candidate_keys,
         sl_p = d["sl_pct"] if d else 0.002
         tp_p = d["tp_pct"] if d else 0.003
         full_size = len(cm.get(cid, []))
+        # v1.4: LightGBM leaf warm-start (None if KMeans clustering or no leaf rule)
+        seed_rule = (leaf_rules or {}).get(cid)
         args.append((cid, cm.get(cid, []), sl_p, tp_p, direction,
                      full_size, n_trials, train_days,
                      seed + cid * 100 + {"LONG": 0, "SHORT": 1}.get(direction, 0),
-                     use_surrogate))
+                     use_surrogate, seed_rule))
 
     with mp.Pool(n_workers, initializer=_init_genetic,
                  initargs=(arrays, hi, lo_arr, cl, op, fwd, n, SPREAD_PTS)) as pool:
@@ -3226,6 +3299,7 @@ def main():
     _clustering_method = str(globals().get("CLUSTERING_METHOD", "kmeans")).lower()
     _lgbm_model = None
     _lgbm_train_paths: dict = {}
+    _leaf_rules: dict = {}  # v1.4: per-cluster warm-start rule from LightGBM leaf path
     if _clustering_method == "lightgbm":
         try:
             from tree_candidates import cluster_by_lightgbm_leaves
@@ -3247,9 +3321,25 @@ def main():
                     p = tuple(row)
                     if p not in _lgbm_train_paths:
                         _lgbm_train_paths[p] = int(labels_tr[j])
+
+                # v1.4: extract leaf-path rules for warm-start.  Only meaningful
+                # when n_estimators=1 (single tree → leaf_index == cluster id).
+                # For multi-tree ensembles, leaves don't map 1:1 to clusters.
+                if int(globals().get("LIGHTGBM_N_ESTIMATORS", 1)) == 1:
+                    from tree_candidates import extract_leaf_rules
+                    feature_names = [c for c in GENE_COLS if c in df_train.columns]
+                    per_leaf = extract_leaf_rules(_lgbm_model, feature_names)
+                    # Map leaf_index → cluster_id via the train_paths dict
+                    # (single-tree → path is a 1-tuple = leaf_index).
+                    for path_tuple, cluster_id in _lgbm_train_paths.items():
+                        leaf_idx = path_tuple[0] if path_tuple else None
+                        if leaf_idx is not None and leaf_idx in per_leaf:
+                            _leaf_rules[cluster_id] = per_leaf[leaf_idx]
+                    print(f"  Extracted {len(_leaf_rules)} leaf-path rules "
+                          f"for optimizer warm-start.")
             print(f"  Clustering method: lightgbm "
-                  f"({int(globals().get('LIGHTGBM_N_ESTIMATORS', 3))} trees × "
-                  f"{int(globals().get('LIGHTGBM_NUM_LEAVES', 32))} leaves)")
+                  f"({int(globals().get('LIGHTGBM_N_ESTIMATORS', 1))} trees × "
+                  f"{int(globals().get('LIGHTGBM_NUM_LEAVES', 24))} leaves)")
         except ImportError:
             print("  lightgbm not installed — falling back to KMeans.  "
                   "Install with: pip install lightgbm>=4.0")
@@ -3382,13 +3472,15 @@ def main():
             genetic_p1 = optuna_refine_parallel(
                 df_train, idx_tr, labels_tr, candidates,
                 price_dists_tr, FORWARD_BARS,
-                _n_trials, train_days, RANDOM_SEED, nw)
+                _n_trials, train_days, RANDOM_SEED, nw,
+                leaf_rules=_leaf_rules)
         else:
             genetic_p1=genetic_refine_parallel(
                 df_train,idx_tr,labels_tr,candidates,
                 price_dists_tr,bidir_info,FORWARD_BARS,
                 GENETIC_GENERATIONS,GENETIC_POPULATION,
-                GENETIC_MUTATE_RATE,train_days,RANDOM_SEED,nw)
+                GENETIC_MUTATE_RATE,train_days,RANDOM_SEED,nw,
+                leaf_rules=_leaf_rules)
     else:
         genetic_p1={}; print("  No candidates.")
 

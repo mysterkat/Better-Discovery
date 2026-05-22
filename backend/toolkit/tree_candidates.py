@@ -159,6 +159,87 @@ def cluster_by_lightgbm_leaves(
     return labels, n_clusters, model
 
 
+def extract_leaf_rules(
+    model: object,
+    feature_names: list[str],
+) -> dict[int, dict[str, tuple[float, float]]]:
+    """Extract each leaf's path through the tree as a {col: (lo, hi)} rule.
+
+    Walks the tree structure depth-first; for each leaf, the path from root
+    encodes a conjunction of feature splits.  Example path:
+      rsi14 <= 40  AND  atr_pct > 0.005  AND  bb_width <= 0.012
+    -> rule: { rsi14: (-inf, 40), atr_pct: (0.005, +inf), bb_width: (-inf, 0.012) }
+
+    For features that don't appear in the path, the bounds stay at ±inf.
+    These rules are returned PER TREE — caller is responsible for aggregating
+    across trees if `n_estimators > 1`.
+
+    Returns dict[leaf_index → {feature_name: (lo, hi)}].  Leaf indices match
+    LightGBM's `predict(pred_leaf=True)` output.
+    """
+    if model is None:
+        return {}
+
+    booster = model.booster_
+    leaf_rules: dict[int, dict[str, tuple[float, float]]] = {}
+
+    # Walk the first tree (we default to n_estimators=1; multi-tree handled below)
+    dump = booster.dump_model()
+    for tree_meta in dump.get("tree_info", []):
+        tree_idx = tree_meta.get("tree_index", 0)
+        root = tree_meta.get("tree_structure", {})
+        _walk_tree(root, {}, feature_names, leaf_rules, tree_idx)
+
+    return leaf_rules
+
+
+def _walk_tree(
+    node: dict,
+    current_bounds: dict[str, tuple[float, float]],
+    feature_names: list[str],
+    leaf_rules: dict[int, dict[str, tuple[float, float]]],
+    tree_idx: int,
+) -> None:
+    """Depth-first walk; accumulates {col: (lo, hi)} along the path; emits at leaves."""
+    if "leaf_index" in node:
+        # Leaf: record the accumulated bounds, keyed by (tree_idx, leaf_index)
+        # caller can flatten if needed.  For single-tree default the leaf_index
+        # alone uniquely identifies the cluster.
+        leaf_rules[node["leaf_index"]] = {
+            k: v for k, v in current_bounds.items()
+            if not (v[0] == float("-inf") and v[1] == float("inf"))
+        }
+        return
+
+    split_feature = node.get("split_feature")
+    threshold = node.get("threshold")
+    if split_feature is None or threshold is None:
+        return
+
+    # split_feature is an int index into the original feature_names list
+    if isinstance(split_feature, int) and 0 <= split_feature < len(feature_names):
+        feat_name = feature_names[split_feature]
+    else:
+        feat_name = str(split_feature)
+
+    # LightGBM split rule: left child = (x <= threshold); right = (x > threshold)
+    # decision_type defaults to "<=" for numerical features.
+    left = node.get("left_child", {})
+    right = node.get("right_child", {})
+
+    # LEFT branch: feat <= threshold → upper bound tightens
+    left_bounds = dict(current_bounds)
+    lo, hi = left_bounds.get(feat_name, (float("-inf"), float("inf")))
+    left_bounds[feat_name] = (lo, min(hi, threshold))
+    _walk_tree(left, left_bounds, feature_names, leaf_rules, tree_idx)
+
+    # RIGHT branch: feat > threshold → lower bound tightens
+    right_bounds = dict(current_bounds)
+    lo, hi = right_bounds.get(feat_name, (float("-inf"), float("inf")))
+    right_bounds[feat_name] = (max(lo, threshold), hi)
+    _walk_tree(right, right_bounds, feature_names, leaf_rules, tree_idx)
+
+
 def assign_test_bars_to_leaves(
     model: object, X_te: np.ndarray, train_labels_by_path: dict
 ) -> np.ndarray:
