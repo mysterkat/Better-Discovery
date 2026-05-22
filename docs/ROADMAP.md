@@ -1,7 +1,8 @@
 # BETTER DISCOVERY — Roadmap
 
-> Living document. Updated 2026-05-21 (v0.7.2 shipped — Strategy Library + Compare tab).
+> Living document. Updated 2026-05-22 (v1.4.0 shipped — LightGBM leaf-rule warm-start completes the optimizer overhaul arc).
 > Items grouped by target version. Effort is rough; ranking inside each version is by priority.
+> ✅ markers indicate items that have shipped.
 
 ---
 
@@ -91,16 +92,14 @@ This release closes the gap between what Pattern Discovery predicts a strategy w
 
 ## v0.9.0 — Genetic algorithm performance overhaul
 
-Target: **10-15× speedup** on Pattern Discovery runs without quality loss.
+Target: **10-15× speedup** on Pattern Discovery runs without quality loss. **All shipped.**
 
 | # | Item | Effort | Notes |
 |---|---|---|---|
-| 20 | **Cache rule-match masks across mutations** | 1 day | When GA mutates one column's range, only re-evaluate that column. Huge win on multi-column rules |
-| 21 | **Replace pandas DataFrame in `_score_genetic` with NumPy histogram** | 4 hrs | Pandas overhead dominates; raw NumPy is 5-10× faster for the hot loop |
-| 22 | **Vectorize trade sim across matched bars** using NumPy `searchsorted` for SL/TP hit detection | 1.5 days | Currently iterates bar-by-bar; vectorized = order-of-magnitude faster |
-| 23 | **Coarse pass 1 (every-3rd bar) → full pass 2 polish** | half day | Pass-1 GA explores cheaply, pass-2 refines on full data |
-
-**v0.9.0 total effort:** ~3.5 days. All independent — can be done in parallel by separate Claude sessions on worktrees.
+| 20 | ✅ **Cache rule-match masks across mutations** | 1 day | When GA mutates one column's range, only re-evaluate that column. Huge win on multi-column rules. **Shipped v0.9.0.** |
+| 21 | ✅ **Replace pandas DataFrame in `_score_genetic` with NumPy histogram** | 4 hrs | Pandas overhead dominates; raw NumPy is 5-10× faster for the hot loop. **Shipped v0.9.0.** |
+| 22 | ✅ **Vectorize trade sim across matched bars** using NumPy `searchsorted` for SL/TP hit detection | 1.5 days | Currently iterates bar-by-bar; vectorized = order-of-magnitude faster. **Shipped v0.9.0.** |
+| 23 | ✅ **Coarse pass 1 (every-3rd bar) → full pass 2 polish** | half day | Pass-1 GA explores cheaply, pass-2 refines on full data. **Shipped v0.9.0.** |
 
 ---
 
@@ -108,8 +107,8 @@ Target: **10-15× speedup** on Pattern Discovery runs without quality loss.
 
 | # | Item | Effort | Notes |
 |---|---|---|---|
-| 24 | Drop island model in pass 1, replace with single 200-pop crowding selection. A/B test against current. | 2 days | May or may not be better; needs head-to-head benchmark |
-| 25 | Vectorize `run_eval_phase` (Phase 1/2 MC loops) — same treatment as `run_mc_longterm` got in v0.5.0 | 1 day | Opportunistic perf win |
+| 24 | ✅ Drop island model in pass 1, replace with single 200-pop crowding selection. A/B test against current. | 2 days | **Shipped v0.9.0** as `GENE_USE_CROWDING=True` (default). Island model preserved as opt-out. |
+| 25 | ✅ Vectorize `run_eval_phase` (Phase 1/2 MC loops) — same treatment as `run_mc_longterm` got in v0.5.0 | 1 day | **Shipped v0.9.0.** |
 
 ---
 
@@ -117,8 +116,49 @@ Target: **10-15× speedup** on Pattern Discovery runs without quality loss.
 
 | # | Item | Effort | Notes |
 |---|---|---|---|
-| 26 | **Optuna / TPE sampler** instead of GA. Head-to-head vs GA on same dataset | 2-3 days | Bayesian optimization may outperform GA on this objective shape |
-| 27 | **Surrogate fitness model** — fast NN/GBM predicts rule fitness; GA queries it 90% of the time, real eval 10%. Could 10-20× speed on top of v0.9.0 wins | 3 days | High R&D risk, high reward |
+| 26 | ✅ **Optuna / TPE sampler** instead of GA. Head-to-head vs GA on same dataset | 2-3 days | Bayesian optimization may outperform GA on this objective shape. **Shipped v1.0.0-dev.** |
+| 27 | ✅ **Surrogate fitness model** — fast NN/GBM predicts rule fitness; GA queries it 90% of the time, real eval 10%. Could 10-20× speed on top of v0.9.0 wins | 3 days | High R&D risk, high reward. **Shipped v1.0.0-dev** (opt-in via `SURROGATE_ENABLED`). |
+
+---
+
+## Shipped — v1.1 through v1.4 (optimizer overhaul)
+
+After initial benchmarks showed Optuna underperforming GA on both wall time (530s vs 300s) AND quality (no patterns passing filters), four waves of optimizer work landed:
+
+- **v1.1.x** — Stability fixes that unblocked benchmarking: backend `fd` limit raised to 8192 (`msvcrt._setmaxstdio` via ctypes); MCP `wait_for_job` reuses one `httpx.Client` for entire poll loop (1800 sockets → 1); `/discovery/set-file` and `clear-cache` honor custom `OUTPUT_FOLDER`; cache-clear stops silently lying about deletion failures.
+- **v1.2.0** — Optuna tuning suite: `multivariate=True` + `group=True` on TPE (joint-distribution sampling, +15-25% quality on correlated bounds); CMA-ES alternative sampler; `OPTUNA_TPE_N_STARTUP=20` warmup; `OPTUNA_PARALLEL_TRIALS` for thread-based intra-study parallelism.
+- **v1.3.0** — LightGBM tree-based clustering (`CLUSTERING_METHOD=lightgbm`): replaces statistical KMeans with profit-aware leaf partitioning. Each leaf is a feature-conjunction rule whose member bars share predicted forward returns. Optimizer never wastes work on unprofitable clusters.
+- **v1.4.0** — Leaf-rule warm-start: extracts the LightGBM leaf's path through the tree as a `{col: (lo, hi)}` rule. GA seeds initial population with `[seed_rule, mutate(seed_rule) × N-1]`; Optuna uses `study.enqueue_trial()` to evaluate the leaf rule as the first trial. Optimizer now polishes a known-good rule instead of searching from scratch.
+
+**Recommended benchmark protocol going forward:** four-config grid `(GA | Optuna) × (KMeans | LightGBM)`. v1.4.0 hypothesis: LightGBM rows substantially beat KMeans rows on quality; Optuna+LightGBM closes the wall-time gap with GA because warm-start cuts convergence time.
+
+---
+
+## v1.5 — Optimizer polish (post-benchmark)
+
+Run the v1.4.0 benchmark first. If quality plateaus, these are the next-best low-risk wins on top. All independent; ~half day combined.
+
+| # | Item | Effort | Notes |
+|---|---|---|---|
+| 46 | **Multi-tree leaf warm-start.** v1.4.0 only warm-starts when `LIGHTGBM_N_ESTIMATORS=1`. For multi-tree ensembles each cluster's path is a tuple of leaves — conjunction those rules into one richer seed. | 3 hrs | Unlocks the warm-start benefit when users want more granular clusters (n_estimators > 1). +5-10% on the lightgbm path. |
+| 47 | **Pass-2 leaf-aware narrowing.** Pass 2 currently narrows quantile ranges blindly (`PASS2_QUANTILE_LO/HI`). Narrow to the leaf's actual bound range instead — Pass 2 converges in fewer generations because the search space is much smaller. | 2 hrs | Faster pass 2 + better convergence; only active when lightgbm clustering is on. |
+| 48 | **Early stopping for GA + Optuna.** Both currently run for a fixed budget. Add "stop if no improvement for N gens/trials." When warm-start finds a near-optimum quickly, you'd save 30-50% of optimizer wall time. | 1 hr | Cleanest unshipped speed win. Default `EARLY_STOP_PATIENCE=0` (off) for backward compatibility. |
+| 49 | **Cross-cluster HOF sharing.** If cluster A's best rule scores well on cluster B's bars too, add it to B's hall-of-fame. Helps discover patterns that generalize across leaves. | 2 hrs | Modest quality bump; mostly useful when many clusters share underlying market structure. |
+
+---
+
+## v1.6 / Large-dataset items — pay off as bar count grows
+
+These are higher-effort and have meaningful tradeoffs, but become increasingly valuable as datasets grow. Document them now so they're ready when you start running on weekly-resolution multi-year datasets.
+
+| # | Item | Effort | When it matters | Notes |
+|---|---|---|---|---|
+| 50 | **Walk-forward validation in the optimization loop.** Replace the fixed train/test split with a rolling 5-fold walk-forward. Rules scored by their *cross-fold consistency* generalize much better to live MT5 trading. | 1-2 days | Most valuable on datasets spanning **multiple market regimes** (≥18 months of multi-TF data). Less impactful on short datasets where there isn't much regime variation. | 2-3× compute cost per run, but the rules that survive are dramatically more robust. Biggest unaddressed "real-world quality" lever. |
+| 51 | **Custom fitness function with regime weighting + recency boost.** Current target-driven scoring weights all bars equally. Add (a) recency boost so newer bars matter more, (b) per-regime consistency term so rules that work in only one regime get penalised. | half day to wire + benchmark | Pays off on **large datasets where regime composition varies** (e.g. half bull + half ranging). On uniform datasets the term collapses to constant and adds no value. | Changes WHICH rules win, not just search efficiency — requires its own benchmark to verify new winners actually do better in MT5. |
+| 52 | **Pre-filter candidates with the surrogate.** Train a fast classifier on `(rule_features → composite_score)` from past runs, predict scores for new candidates BEFORE optimizing, only optimize promising ones. Skips compute on cluster/direction combos that historical data says won't work. | 1 day | Becomes valuable once you have **>10 past discovery runs** in the library — needs training data. Especially helpful for parameter sweeps where you're re-running with small tweaks. | The surrogate from v1.0.0-dev was per-run; this would be cross-run with persistent state in `userdata/`. |
+| 53 | **Quantile-bucket feature pre-computation.** Replace per-call `(vals >= lb) & (vals <= hb)` float comparisons with int8 quantile-bucket lookups. Pre-compute the bucket index once per bar at discovery start. Inner-loop comparison becomes integer-only. | half day | On **large datasets (>500k bars)** the float-compare loop starts to dominate. At <100k bars it's negligible. | Estimated 1.5-2× on the GA+Optuna fitness path at scale. Adds a one-time precompute step (~5s for 500k bars). |
+| 54 | **Persistent column-mask cache with LRU eviction.** Move the per-worker mask cache to module-level with size-bounded LRU. Survives across all candidates in a run, not just one worker. | 4 hrs | Helps **multi-cluster runs (>30 clusters)** where many rules share column bounds. Marginal benefit at small cluster counts. | Doesn't help Optuna directly (TPE has no parent-child reuse pattern); GA benefits scale with cluster count. |
+| 55 | **Adaptive multi-tree warm-start fusion.** When `LIGHTGBM_N_ESTIMATORS>1`, instead of just conjuncting all tree-leaf rules, weight by each tree's contribution to the leaf's prediction. Tighter, more confident bounds. | 1 day | Companion to #46. Becomes useful as users tune up `N_ESTIMATORS` for finer cluster counts on large datasets. | Modest quality bump on top of #46. |
 
 ---
 
