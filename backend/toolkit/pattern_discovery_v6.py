@@ -49,6 +49,42 @@ Requirements:
 """
 from __future__ import annotations
 import sys, warnings, random, time, os, textwrap, re
+
+
+# v1.4.2 — raise per-process CRT stdio handle limit BEFORE any worker spawn.
+#
+# Why this lives here and not just in backend/app/main.py:
+#   The FastAPI parent calls _setmaxstdio(8192) at import time (v1.1.5), but
+#   on Windows every mp.Pool worker is spawned as a FRESH Python interpreter
+#   (multiprocessing spawn-mode default).  Workers re-import this module and
+#   inherit NONE of the parent's CRT state — they start at the default 512
+#   handle limit.
+#
+#   Each worker opens many fds: matplotlib figures, csv writers, pickled
+#   shared-memory arrays, intermediate result files.  With MULTI_SEED_COUNT
+#   > 1 the accumulated open-file count crosses 512 mid-discovery and the
+#   worker crashes with `OSError [Errno 24] Too many open files`.
+#
+#   Putting the bump in this module ensures it runs once per worker process
+#   at spawn time, BEFORE any of the heavy ops touch the fd table.
+#
+#   Best-effort: missing ctypes / non-Windows / older CRT all fall through
+#   silently.  The fix only matters on Windows; POSIX rlimits are handled
+#   separately by backend/app/main.py.
+def _raise_worker_fd_limit() -> None:
+    try:
+        if sys.platform.startswith("win"):
+            import ctypes
+            ucrt = ctypes.CDLL("ucrtbase")
+            ucrt._setmaxstdio.restype = ctypes.c_int
+            ucrt._setmaxstdio.argtypes = [ctypes.c_int]
+            ucrt._setmaxstdio(8192)
+    except Exception:
+        pass
+
+
+_raise_worker_fd_limit()
+
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 warnings.filterwarnings("ignore")
