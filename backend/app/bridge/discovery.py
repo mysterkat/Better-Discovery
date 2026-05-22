@@ -228,6 +228,31 @@ PARAM_META: dict[str, ParamMeta] = {
                                        "(candidates × value < cores) — otherwise CPU oversubscription "
                                        "hurts.",
                                        min=1, max=8, step=1),
+    # v1.3 candidate-generation method (sits in Regime & Features so it's
+    # near the existing clustering knobs N_CLUSTERS / REGIME_MODE)
+    "CLUSTERING_METHOD":    ParamMeta("Clustering Method",     "Regime & Features", "str",
+                                       "kmeans = statistical bar groupings (default).  "
+                                       "lightgbm = train a tree ensemble on (features → forward best move) "
+                                       "and use the leaf partition as clusters.  Each leaf is by "
+                                       "construction a profit-aware indicator-conjunction rule. "
+                                       "Requires: pip install lightgbm>=4.0",
+                                       options=["kmeans", "lightgbm"]),
+    "LIGHTGBM_N_ESTIMATORS": ParamMeta("LightGBM: Trees",     "Regime & Features", "int",
+                                       "Tree count in the ensemble.  Final cluster count = unique "
+                                       "leaf-path combinations across all trees.  1-2 = fewer "
+                                       "high-quality clusters; 5+ = many small ones.",
+                                       min=1, max=10, step=1),
+    "LIGHTGBM_NUM_LEAVES":  ParamMeta("LightGBM: Leaves/Tree", "Regime & Features", "int",
+                                       "Max leaves per tree.  Higher = finer partition, more clusters.",
+                                       min=8, max=128, step=8),
+    "LIGHTGBM_MIN_SAMPLES_LEAF": ParamMeta("LightGBM: Min Bars/Leaf", "Regime & Features", "int",
+                                       "Minimum bars required to form a leaf.  Analogous to KMeans's "
+                                       "minimum cluster size.",
+                                       min=10, max=200, step=10),
+    "LIGHTGBM_LEARNING_RATE": ParamMeta("LightGBM: Learning Rate", "Regime & Features", "float",
+                                       "Shrinkage applied to each tree's contribution.  Lower = more "
+                                       "trees needed but better-behaved leaves.",
+                                       min=0.01, max=0.3, step=0.01),
     # ── Genetic Pass 2 ──────────────────────────────────────────────────────
     "TOP_FRACTION_PASS2":      ParamMeta("Top Fraction",       "Genetic Pass 2", "float",
                                           "Best-scoring fraction carried into pass 2", min=0.05, max=0.5, step=0.05),
@@ -392,6 +417,9 @@ _ADVANCED_KEYS: set[str] = {
     "SURROGATE_REAL_FRAC",
     "OPTUNA_TPE_MULTIVARIATE", "OPTUNA_TPE_GROUP", "OPTUNA_TPE_N_STARTUP",
     "OPTUNA_PARALLEL_TRIALS",
+    # LightGBM clustering internals — main toggle (CLUSTERING_METHOD) stays core
+    "LIGHTGBM_N_ESTIMATORS", "LIGHTGBM_NUM_LEAVES",
+    "LIGHTGBM_MIN_SAMPLES_LEAF", "LIGHTGBM_LEARNING_RATE",
     # Genetic Pass 2 — entire group is tuning territory (always runs as GA)
     "TOP_FRACTION_PASS2", "MIN_TRADES_PER_DAY_PASS2",
     "PASS2_GENERATIONS", "PASS2_POPULATION", "PASS2_MUTATE_RATE",

@@ -209,6 +209,26 @@ OPTUNA_TPE_N_STARTUP     = 20
 # cores, raising this oversubscribes the CPU.
 OPTUNA_PARALLEL_TRIALS   = 1
 
+# v1.3 candidate-generation method.
+# "kmeans"   — statistical clustering on standardised features (default,
+#              the historical behaviour).  Finds bar groupings, then the
+#              optimizer post-hoc tests whether each group is tradeable.
+# "lightgbm" — train a GBM regressor on (features → signed best forward
+#              move) and use the trees' LEAF PARTITION as cluster labels.
+#              Each leaf is, by construction, a feature-conjunction rule
+#              whose member bars share similar predicted forward returns.
+#              Replaces clustering with profit-aware partitioning; the
+#              optimizer then polishes the bounds.  Requires lightgbm.
+CLUSTERING_METHOD        = "kmeans"
+# Default ensemble = 1 tree so the cluster count is bounded by num_leaves
+# (comparable to KMeans's N_CLUSTERS).  Raising n_estimators multiplies
+# cluster count combinatorially — 3 trees × 32 leaves can yield 100-200
+# clusters in practice, which is too granular for the downstream pipeline.
+LIGHTGBM_N_ESTIMATORS    = 1
+LIGHTGBM_NUM_LEAVES      = 24      # max leaves per tree (≈ KMeans N_CLUSTERS)
+LIGHTGBM_MIN_SAMPLES_LEAF = 30     # minimum bars per leaf
+LIGHTGBM_LEARNING_RATE   = 0.05    # tree shrinkage
+
 # Pass 2
 TOP_FRACTION_PASS2       = 0.25
 MIN_TRADES_PER_DAY_PASS2 = 0.5
@@ -3201,19 +3221,57 @@ def main():
 
     # ── Cluster ───────────────────────────────────────────────────────────────
     _stage("Cluster")
-    if REGIME_MODE:
+    # v1.3: optional LightGBM tree-leaf clustering.  Replaces statistical
+    # KMeans with profit-aware partitioning (each cluster = a leaf rule).
+    _clustering_method = str(globals().get("CLUSTERING_METHOD", "kmeans")).lower()
+    _lgbm_model = None
+    _lgbm_train_paths: dict = {}
+    if _clustering_method == "lightgbm":
         try:
-            labels_tr,n_cl=cluster_multi_algo(
-                X_tr,idx_tr,df_train,N_CLUSTERS//5,RANDOM_SEED)
+            from tree_candidates import cluster_by_lightgbm_leaves
+            labels_tr, n_cl, _lgbm_model = cluster_by_lightgbm_leaves(
+                X_tr, idx_tr, df_train,
+                forward_bars=FORWARD_BARS,
+                num_leaves=int(globals().get("LIGHTGBM_NUM_LEAVES", 32)),
+                n_estimators=int(globals().get("LIGHTGBM_N_ESTIMATORS", 3)),
+                min_samples_leaf=int(globals().get("LIGHTGBM_MIN_SAMPLES_LEAF", 30)),
+                random_seed=RANDOM_SEED,
+                learning_rate=float(globals().get("LIGHTGBM_LEARNING_RATE", 0.05)),
+            )
+            # Build path->id map for test-set assignment below.
+            if _lgbm_model is not None:
+                leaf_idx_tr = _lgbm_model.predict(X_tr, pred_leaf=True)
+                if leaf_idx_tr.ndim == 1:
+                    leaf_idx_tr = leaf_idx_tr.reshape(-1, 1)
+                for j, row in enumerate(leaf_idx_tr):
+                    p = tuple(row)
+                    if p not in _lgbm_train_paths:
+                        _lgbm_train_paths[p] = int(labels_tr[j])
+            print(f"  Clustering method: lightgbm "
+                  f"({int(globals().get('LIGHTGBM_N_ESTIMATORS', 3))} trees × "
+                  f"{int(globals().get('LIGHTGBM_NUM_LEAVES', 32))} leaves)")
+        except ImportError:
+            print("  lightgbm not installed — falling back to KMeans.  "
+                  "Install with: pip install lightgbm>=4.0")
+            _clustering_method = "kmeans"
         except Exception as ex:
-            print(f"  Multi-algo clustering failed ({ex}), falling back to K-Means")
-            labels_tr,n_cl=cluster_per_regime_kmeans(
-                X_tr,idx_tr,df_train,N_CLUSTERS//5,RANDOM_SEED)
-    else:
-        sc=StandardScaler(); Xs=sc.fit_transform(X_tr)
-        km=MiniBatchKMeans(n_clusters=N_CLUSTERS,random_state=RANDOM_SEED,
-                           n_init=10,max_iter=300,batch_size=min(10000,len(X_tr)))
-        labels_tr=km.fit_predict(Xs); n_cl=N_CLUSTERS
+            print(f"  LightGBM clustering failed ({ex}), falling back to KMeans")
+            _clustering_method = "kmeans"
+
+    if _clustering_method != "lightgbm":
+        if REGIME_MODE:
+            try:
+                labels_tr,n_cl=cluster_multi_algo(
+                    X_tr,idx_tr,df_train,N_CLUSTERS//5,RANDOM_SEED)
+            except Exception as ex:
+                print(f"  Multi-algo clustering failed ({ex}), falling back to K-Means")
+                labels_tr,n_cl=cluster_per_regime_kmeans(
+                    X_tr,idx_tr,df_train,N_CLUSTERS//5,RANDOM_SEED)
+        else:
+            sc=StandardScaler(); Xs=sc.fit_transform(X_tr)
+            km=MiniBatchKMeans(n_clusters=N_CLUSTERS,random_state=RANDOM_SEED,
+                               n_init=10,max_iter=300,batch_size=min(10000,len(X_tr)))
+            labels_tr=km.fit_predict(Xs); n_cl=N_CLUSTERS
 
     print(f"  Total clusters: {n_cl}")
     for cid in range(n_cl):
@@ -3228,28 +3286,31 @@ def main():
     else:
         print("  Skipped.")
 
-    # Assign test bars using full feature vector (fix 1.4)
-    # Compute train cluster centroids in the full feature space
-    print("  Assigning test bars via full feature vector ...")
-    sc_tr=StandardScaler(); X_tr_scaled=sc_tr.fit_transform(X_tr)
-    # Compute centroid per cluster in scaled feature space
-    feat_centroids_tr={}
-    for cid in range(n_cl):
-        mask=labels_tr==cid
-        if mask.sum()>0:
-            feat_centroids_tr[cid]=X_tr_scaled[mask].mean(axis=0)
-    # Scale test features with TRAINING scaler (not re-fitted)
-    X_te_scaled=sc_tr.transform(X_te)
-    # Assign each test bar to nearest centroid by Euclidean distance
-    # Assign each test bar to nearest centroid — fully vectorised (v5 speedup)
-    labels_te=np.zeros(len(idx_te),dtype=np.int32)
-    centroid_matrix=np.vstack([feat_centroids_tr[c]
-                                for c in range(n_cl)
-                                if c in feat_centroids_tr])
-    valid_cids=[c for c in range(n_cl) if c in feat_centroids_tr]
-    # cdist is much faster than a Python loop for large test sets
-    dists_all = cdist(X_te_scaled, centroid_matrix, metric="euclidean")
-    labels_te = np.array(valid_cids, dtype=np.int32)[np.argmin(dists_all, axis=1)]
+    # Assign test bars to clusters.  LightGBM path uses the trained model's
+    # leaf-path prediction; KMeans path uses centroid-nearest-neighbour.
+    print("  Assigning test bars ...")
+    if _clustering_method == "lightgbm" and _lgbm_model is not None:
+        from tree_candidates import assign_test_bars_to_leaves
+        labels_te = assign_test_bars_to_leaves(_lgbm_model, X_te, _lgbm_train_paths)
+    else:
+        sc_tr=StandardScaler(); X_tr_scaled=sc_tr.fit_transform(X_tr)
+        # Compute centroid per cluster in scaled feature space
+        feat_centroids_tr={}
+        for cid in range(n_cl):
+            mask=labels_tr==cid
+            if mask.sum()>0:
+                feat_centroids_tr[cid]=X_tr_scaled[mask].mean(axis=0)
+        # Scale test features with TRAINING scaler (not re-fitted)
+        X_te_scaled=sc_tr.transform(X_te)
+        # Assign each test bar to nearest centroid — fully vectorised (v5 speedup)
+        labels_te=np.zeros(len(idx_te),dtype=np.int32)
+        centroid_matrix=np.vstack([feat_centroids_tr[c]
+                                    for c in range(n_cl)
+                                    if c in feat_centroids_tr])
+        valid_cids=[c for c in range(n_cl) if c in feat_centroids_tr]
+        # cdist is much faster than a Python loop for large test sets
+        dists_all = cdist(X_te_scaled, centroid_matrix, metric="euclidean")
+        labels_te = np.array(valid_cids, dtype=np.int32)[np.argmin(dists_all, axis=1)]
 
     # ── Price distributions ───────────────────────────────────────────────────
     _stage("Price Distributions")

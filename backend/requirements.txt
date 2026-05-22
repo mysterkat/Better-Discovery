@@ -26,3 +26,8 @@ yfinance>=0.2.40
 # discovery). Required when GENE_OPTIMIZER="optuna" in the Discovery tab.
 # Without it, the optuna path raises a friendly error pointing here.
 optuna>=4.0
+
+# v1.3.0: LightGBM tree-based candidate generation (alternative to KMeans
+# clustering). Required when CLUSTERING_METHOD="lightgbm" in the Discovery
+# tab. Without it, the lightgbm path logs a warning and falls back to KMeans.
+lightgbm>=4.0
