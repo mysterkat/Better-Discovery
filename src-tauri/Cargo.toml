@@ -1,6 +1,6 @@
 [package]
 name = "better-discovery"
-version = "1.1.4"
+version = "1.1.5"
 description = "BETTER DISCOVERY desktop shell"
 edition = "2021"
 rust-version = "1.77"
