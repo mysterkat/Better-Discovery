@@ -25,7 +25,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from ..paths import DEFAULT_DISC_OUTPUT, DEFAULT_LIBRARY
+from ..paths import DEFAULT_DISC_OUTPUT, DEFAULT_LIBRARY, USER_DATA
 from ..schemas.common import Ok
 from ..schemas.library import (
     LibraryAttachRequest,
@@ -75,10 +75,42 @@ def _resolve_trades_csv(set_file: Path, metadata: dict) -> Optional[Path]:
 
 
 def _within_disc_output(p: Path) -> bool:
+    """v1.4.1: accept paths under any of three roots (mirrors the fix shipped
+    in v1.1.3 for /discovery/set-file):
+      1. DEFAULT_DISC_OUTPUT — the app's default
+      2. USER_DATA          — the broader app-writable area
+      3. The toolkit module's current OUTPUT_FOLDER — handles user overrides
+         that point anywhere on disk (folder-picker can pick anywhere)
+
+    Previously this hardcoded DEFAULT_DISC_OUTPUT with a brittle startswith,
+    which broke the library_save tests (they create a temp userdata via a
+    fixture) and broke any production save when the user customised
+    OUTPUT_FOLDER for benchmark runs."""
     try:
-        return str(p.resolve()).startswith(str(DEFAULT_DISC_OUTPUT.resolve()))
+        resolved = p.resolve()
     except OSError:
         return False
+
+    allowed_roots: list[Path] = [
+        DEFAULT_DISC_OUTPUT.resolve(),
+        USER_DATA.resolve(),
+    ]
+    # Pull the toolkit module's current OUTPUT_FOLDER (latest override seen).
+    try:
+        from ..bridge import discovery as _disc_bridge
+        mod_out = getattr(_disc_bridge._get_module(), "OUTPUT_FOLDER", None)
+        if mod_out:
+            allowed_roots.append(Path(str(mod_out)).resolve())
+    except Exception:
+        pass
+
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def _read_entry(folder: Path) -> Optional[LibraryEntry]:

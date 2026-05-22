@@ -26,7 +26,18 @@ def client(tmp_path_factory):
     ud = tmp_path_factory.mktemp("userdata")
     os.environ["BD_USERDATA"] = str(ud)
 
-    # Import AFTER setting the env-var so paths.py resolves to tmp_path.
+    # CRITICAL: if another test file (e.g. test_smoke.py) already imported
+    # app.main, paths.USER_DATA has been cached to the dev userdata folder
+    # before BD_USERDATA was set.  Force-reload the path module + bridges so
+    # USER_DATA gets re-resolved to our tmp dir.  Without this, library_save
+    # rejects paths under our tmp /discovery/ tree as "outside output".
+    import importlib  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    for mod_name in list(sys.modules):
+        if mod_name.startswith("app.") or mod_name == "app":
+            del sys.modules[mod_name]
+
+    # Now reimport with the env var in effect.
     from app.main import app  # noqa: PLC0415
     return TestClient(app)
 
@@ -70,8 +81,9 @@ def test_save_to_library(client, disc_set_file):
     })
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["pattern_id"] == PATTERN_ID
-    assert body["already_existed"] is False
+    # v0.8.0 schema: response is { entry: LibraryEntry, duplicate: bool }
+    assert body["entry"]["pattern_id"] == PATTERN_ID
+    assert body["duplicate"] is False
 
 
 def test_save_idempotent(client, disc_set_file):
@@ -81,7 +93,7 @@ def test_save_idempotent(client, disc_set_file):
         "metadata": METADATA,
     })
     assert resp.status_code == 200
-    assert resp.json()["already_existed"] is True
+    assert resp.json()["duplicate"] is True
 
 
 def test_list_contains_saved(client, disc_set_file):
@@ -106,10 +118,11 @@ def test_mt5_csv_missing_returns_404(client, disc_set_file):
 def test_attach_mt5_csv(client, disc_set_file):
     payload = "time,profit\n2024-01-10,50.0\n"
     encoded = base64.b64encode(payload.encode()).decode()
+    # v0.8.0 schema: { pattern_id, kind, content_b64 }
     resp = client.post("/library/attach", json={
         "pattern_id": PATTERN_ID,
-        "file_kind": "mt5_csv",
-        "file_bytes_b64": encoded,
+        "kind": "mt5_csv",
+        "content_b64": encoded,
     })
     assert resp.status_code == 200
 
