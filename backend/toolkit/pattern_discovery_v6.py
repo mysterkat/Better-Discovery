@@ -210,40 +210,13 @@ GENE_MIGRATION_INTERVAL  = 10
 # Set to False to revert to island model (for A/B benchmarking).
 GENE_USE_CROWDING        = True
 
-# v1.0 optimizer selection — "ga" | "optuna"
-# "optuna" uses TPE (Bayesian) search instead of the evolutionary GA.
-# Requires: pip install optuna
-GENE_OPTIMIZER           = "ga"
-
-# v1.0 surrogate fitness model — wraps whichever optimizer is active.
+# v1.0 surrogate fitness model — wraps the GA optimizer.
 # After SURROGATE_MIN_SAMPLES real evals the GBM predicts fitness;
 # only SURROGATE_REAL_FRAC of subsequent calls hit the real scorer.
 SURROGATE_ENABLED        = False
 SURROGATE_REAL_FRAC      = 0.10   # fraction of evals using real fitness
 SURROGATE_MIN_SAMPLES    = 40     # real evals before first surrogate fit
 SURROGATE_RETRAIN_EVERY  = 20     # retrain after every N new real evals
-
-# v1.2 Optuna tuning — sampler selection + TPE-specific upgrades.
-# "tpe"    — Tree-structured Parzen Estimator (default).  With OPTUNA_TPE_MULTIVARIATE
-#            on, TPE learns joint distributions across parameters instead of fitting
-#            each marginal independently; +15-25% rule quality on correlated bounds.
-# "cmaes"  — Covariance Matrix Adaptation Evolution Strategy.  Purpose-built for
-#            continuous correlated optimization; often beats TPE on rule landscapes.
-# "random" — Pure random search baseline.  For sanity checks only.
-OPTUNA_SAMPLER           = "tpe"
-OPTUNA_TPE_MULTIVARIATE  = True
-# When True, TPE groups parameters that always appear together (the per-column
-# {use, lo_pct, w_pct} triples) so the sampler treats them as a joint subspace.
-OPTUNA_TPE_GROUP         = True
-# Warmup trials before TPE starts using its model.  Default 10 is fine for small
-# studies but rule optimization benefits from broader exploration first.
-OPTUNA_TPE_N_STARTUP     = 20
-# Parallel trials per study (via Optuna's `n_jobs` — uses threads, releases GIL
-# during numpy heavy lifting).  1 = sequential (current behaviour).  Set 2-4
-# only if you have CPU headroom (n_candidates × OPTUNA_PARALLEL_TRIALS < n_cores).
-# Caution: with `optuna_refine_parallel`'s outer mp.Pool already saturating
-# cores, raising this oversubscribes the CPU.
-OPTUNA_PARALLEL_TRIALS   = 1
 
 # v1.3 candidate-generation method.
 # "kmeans"   — statistical clustering on standardised features (default,
@@ -2359,223 +2332,6 @@ def _genetic_p2_worker(args):
     return (cid,direction),best_r,best_s
 
 
-def _optuna_worker(args):
-    """v1.0 #26/#27: Optuna TPE optimizer (+ optional surrogate) for one (cid, direction).
-    v1.4: optional seed_rule appended for LightGBM leaf warm-start."""
-    if len(args) >= 11:
-        (cid, member_bi, sl_pct, tp_pct, direction, full_size,
-         n_trials, train_days, seed, use_surrogate, seed_rule) = args
-    else:
-        (cid, member_bi, sl_pct, tp_pct, direction, full_size,
-         n_trials, train_days, seed, use_surrogate) = args
-        seed_rule = None
-
-    import optuna as _optuna
-    _optuna.logging.set_verbosity(_optuna.logging.WARNING)
-
-    arrays_ = _GEN["arrays"]
-    if len(member_bi) < 10:
-        return cid, direction, 0, {}, 0.0
-
-    member_arr = np.asarray(member_bi, dtype=np.int32)
-    col_stats: dict = {}
-    for col in GENE_COLS:
-        if col not in arrays_: continue
-        vals = arrays_[col][member_arr]
-        col_stats[col] = (float(np.percentile(vals, 5)), float(np.percentile(vals, 95)))
-
-    sorted_cols = sorted(col_stats.keys())
-    rng_ = np.random.default_rng(seed)
-
-    # ── Surrogate state ───────────────────────────────────────────────────────
-    surr_X: list = []
-    surr_y: list = []
-    surrogate = None
-    real_eval_count = [0]
-    real_since_retrain = [0]
-
-    def _rule_to_vec(rule: dict) -> list:
-        vec = []
-        for col in sorted_cols:
-            vmin, vmax = col_stats[col]
-            span = vmax - vmin if vmax > vmin else 1.0
-            if col in rule:
-                lo, hi = rule[col]
-                vec.extend([1.0, (lo - vmin) / span, (hi - vmin) / span])
-            else:
-                vec.extend([0.0, 0.0, 0.0])
-        return vec
-
-    def _real_score(rule: dict) -> float:
-        s = _score_genetic(member_bi, rule, sl_pct, tp_pct, direction, full_size, train_days)
-        real_eval_count[0] += 1
-        real_since_retrain[0] += 1
-        if use_surrogate:
-            surr_X.append(_rule_to_vec(rule))
-            surr_y.append(s)
-            n_real = len(surr_y)
-            if (n_real >= SURROGATE_MIN_SAMPLES and
-                    real_since_retrain[0] >= SURROGATE_RETRAIN_EVERY):
-                nonlocal surrogate
-                from sklearn.ensemble import GradientBoostingRegressor
-                surrogate = GradientBoostingRegressor(
-                    n_estimators=80, max_depth=3, learning_rate=0.1,
-                    random_state=int(seed) % (2 ** 31))
-                surrogate.fit(surr_X, surr_y)
-                real_since_retrain[0] = 0
-        return s
-
-    def _eval(rule: dict) -> float:
-        if (use_surrogate and surrogate is not None and
-                rng_.random() > SURROGATE_REAL_FRAC):
-            pred = float(surrogate.predict([_rule_to_vec(rule)])[0])
-            return max(0.0, pred)
-        return _real_score(rule)
-
-    # ── Objective ─────────────────────────────────────────────────────────────
-    def objective(trial: "_optuna.Trial") -> float:
-        rule: dict = {}
-        for col in sorted_cols:
-            use = trial.suggest_categorical(f"use_{col}", [0, 1])
-            if not use:
-                continue
-            vmin, vmax = col_stats[col]
-            lo_pct = trial.suggest_float(f"lo_pct_{col}", 0.0, 0.95)
-            w_pct  = trial.suggest_float(f"w_pct_{col}",  0.01, 1.0 - lo_pct)
-            lo = vmin + lo_pct * (vmax - vmin)
-            hi = vmin + (lo_pct + w_pct) * (vmax - vmin)
-            if lo < hi:
-                rule[col] = (lo, hi)
-        if len(rule) < GENE_N_COLS_MIN:
-            return 0.0
-        if len(rule) > GENE_N_COLS_MAX:
-            keep = list(rule.keys())[:GENE_N_COLS_MAX]
-            rule = {k: rule[k] for k in keep}
-        return _eval(rule)
-
-    # ── Reconstruct best rule from trial params ───────────────────────────────
-    def _params_to_rule(params: dict) -> dict:
-        rule: dict = {}
-        for col in sorted_cols:
-            if not params.get(f"use_{col}", 0):
-                continue
-            vmin, vmax = col_stats[col]
-            lo_pct = params.get(f"lo_pct_{col}", 0.0)
-            w_pct  = params.get(f"w_pct_{col}", 0.1)
-            lo = vmin + lo_pct * (vmax - vmin)
-            hi = vmin + (lo_pct + w_pct) * (vmax - vmin)
-            if lo < hi:
-                rule[col] = (lo, hi)
-        return rule
-
-    # v1.2: sampler selection + TPE multivariate/group tuning.
-    _sampler_kind = str(globals().get("OPTUNA_SAMPLER", "tpe")).lower()
-    _seed = int(seed) % (2 ** 31)
-    if _sampler_kind == "cmaes":
-        sampler = _optuna.samplers.CmaEsSampler(seed=_seed)
-    elif _sampler_kind == "random":
-        sampler = _optuna.samplers.RandomSampler(seed=_seed)
-    else:
-        sampler = _optuna.samplers.TPESampler(
-            seed=_seed,
-            multivariate=bool(globals().get("OPTUNA_TPE_MULTIVARIATE", True)),
-            group=bool(globals().get("OPTUNA_TPE_GROUP", True)),
-            n_startup_trials=int(globals().get("OPTUNA_TPE_N_STARTUP", 20)),
-        )
-    study = _optuna.create_study(direction="maximize", sampler=sampler)
-
-    # v1.4: warm-start — enqueue seed_rule as the first trial.  Encode each
-    # of its bounds in Optuna's per-column {use, lo_pct, w_pct} parameter
-    # space, clamped to this cluster's col_stats range.
-    if seed_rule:
-        warm_params: dict = {}
-        for col in sorted_cols:
-            warm_params[f"use_{col}"] = 0
-            warm_params[f"lo_pct_{col}"] = 0.0
-            warm_params[f"w_pct_{col}"] = 0.01
-        for col, (lo, hi) in seed_rule.items():
-            if col not in col_stats:
-                continue
-            vmin, vmax = col_stats[col]
-            span = max(vmax - vmin, 1e-9)
-            new_lo = max(lo, vmin) if lo != float("-inf") else vmin
-            new_hi = min(hi, vmax) if hi != float("inf") else vmax
-            if new_lo >= new_hi:
-                continue
-            lo_pct = max(0.0, min(0.95, (new_lo - vmin) / span))
-            w_pct  = max(0.01, min(1.0 - lo_pct, (new_hi - new_lo) / span))
-            warm_params[f"use_{col}"]   = 1
-            warm_params[f"lo_pct_{col}"] = lo_pct
-            warm_params[f"w_pct_{col}"]  = w_pct
-        try:
-            study.enqueue_trial(warm_params)
-        except Exception:
-            pass  # fall back to pure search if enqueue rejects params
-
-    _n_jobs = max(1, int(globals().get("OPTUNA_PARALLEL_TRIALS", 1)))
-    study.optimize(objective, n_trials=n_trials, n_jobs=_n_jobs, show_progress_bar=False)
-
-    best_rule = _params_to_rule(study.best_trial.params)
-    best_score = float(study.best_value)
-    return cid, direction, 0, best_rule, best_score
-
-
-def optuna_refine_parallel(df, indices, labels, candidate_keys,
-                            price_dists, fwd,
-                            n_trials, train_days, seed, n_workers,
-                            leaf_rules=None):
-    """
-    v1.0 #26/#27: Optuna TPE optimizer as a drop-in replacement for
-    genetic_refine_parallel().  Returns the same {(cid,direction):(rule,score)} dict.
-    n_trials ≈ GENETIC_GENERATIONS × GENETIC_POPULATION for a fair comparison.
-    leaf_rules: optional dict {cid: {col: (lo, hi)}} of LightGBM leaf-path
-        rules used as warm-start seeds via study.enqueue_trial().
-    """
-    t0 = time.time()
-    use_surrogate = bool(globals().get("SURROGATE_ENABLED", False))
-    mode = "TPE + surrogate" if use_surrogate else "TPE"
-    print(f"  Optuna {mode}: {len(candidate_keys)} rules × {n_trials} trials "
-          f"on {n_workers} cores ...")
-
-    arrays = {col: df[col].values.copy() for col in GENE_COLS if col in df.columns}
-    hi = df["high"].values.copy(); lo_arr = df["low"].values.copy()
-    cl = df["close"].values.copy(); op = df["open"].values.copy(); n = len(df)
-    cm: dict = {}
-    for pos, bi in enumerate(indices):
-        cid = int(labels[pos])
-        if cid not in cm: cm[cid] = []
-        cm[cid].append(bi)
-
-    args = []
-    for cid, direction in candidate_keys:
-        d = price_dists.get(cid)
-        sl_p = d["sl_pct"] if d else 0.002
-        tp_p = d["tp_pct"] if d else 0.003
-        full_size = len(cm.get(cid, []))
-        # v1.4: LightGBM leaf warm-start (None if KMeans clustering or no leaf rule)
-        seed_rule = (leaf_rules or {}).get(cid)
-        args.append((cid, cm.get(cid, []), sl_p, tp_p, direction,
-                     full_size, n_trials, train_days,
-                     seed + cid * 100 + {"LONG": 0, "SHORT": 1}.get(direction, 0),
-                     use_surrogate, seed_rule))
-
-    with mp.Pool(n_workers, initializer=_init_genetic,
-                 initargs=(arrays, hi, lo_arr, cl, op, fwd, n, SPREAD_PTS)) as pool:
-        results = []; t0g = time.time()
-        for i, r in enumerate(pool.imap_unordered(_optuna_worker, args)):
-            results.append(r)
-            _pbar(i + 1, len(args), "optimizing", t0=t0g)
-
-    best: dict = {}
-    for cid, direction, _island, rule, score in results:
-        key = (cid, direction)
-        if key not in best or score > best[key][1]:
-            best[key] = (rule, score)
-
-    print(f"  Optuna done  [{_elapsed(t0)}]")
-    return best
-
-
 def _bt_refined_worker(args):
     """Module-level backtest worker for backtest_refined (Windows pickling)."""
     key,fbi,sl_p,tp_p,dirn=args
@@ -3486,37 +3242,15 @@ def main():
     print(f"  {len(candidates)} candidates for genetic pass 1 "
           f"(min {min_trades_p1} trades)")
 
-    # ── Genetic / Optuna pass 1 ───────────────────────────────────────────────
-    _optimizer = str(globals().get("GENE_OPTIMIZER", "ga")).lower()
-    # v1.1.2: pre-flight check so we fail BEFORE running clustering/backtest
-    # if the user picked Optuna without installing it.
-    if _optimizer == "optuna":
-        try:
-            import optuna  # noqa: F401
-        except ImportError:
-            raise RuntimeError(
-                "GENE_OPTIMIZER='optuna' but the optuna package is not installed.\n"
-                "  Install with:  pip install optuna>=4.0\n"
-                "  Or switch the Optimizer dropdown back to 'ga' in the Discovery tab.\n"
-                "  (optuna was added to backend/requirements.txt in v1.1.2 — "
-                "re-run your backend's pip install -r requirements.txt to pick it up.)"
-            )
-    _stage(f"{'Optuna' if _optimizer == 'optuna' else 'Genetic'} Pass 1")
+    # ── Genetic pass 1 ────────────────────────────────────────────────────────
+    _stage("Genetic Pass 1")
     if candidates:
-        if _optimizer == "optuna":
-            _n_trials = GENETIC_GENERATIONS * GENETIC_POPULATION  # equiv budget
-            genetic_p1 = optuna_refine_parallel(
-                df_train, idx_tr, labels_tr, candidates,
-                price_dists_tr, FORWARD_BARS,
-                _n_trials, train_days, RANDOM_SEED, nw,
-                leaf_rules=_leaf_rules)
-        else:
-            genetic_p1=genetic_refine_parallel(
-                df_train,idx_tr,labels_tr,candidates,
-                price_dists_tr,bidir_info,FORWARD_BARS,
-                GENETIC_GENERATIONS,GENETIC_POPULATION,
-                GENETIC_MUTATE_RATE,train_days,RANDOM_SEED,nw,
-                leaf_rules=_leaf_rules)
+        genetic_p1=genetic_refine_parallel(
+            df_train,idx_tr,labels_tr,candidates,
+            price_dists_tr,bidir_info,FORWARD_BARS,
+            GENETIC_GENERATIONS,GENETIC_POPULATION,
+            GENETIC_MUTATE_RATE,train_days,RANDOM_SEED,nw,
+            leaf_rules=_leaf_rules)
     else:
         genetic_p1={}; print("  No candidates.")
 

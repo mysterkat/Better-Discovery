@@ -1,8 +1,23 @@
 # BETTER DISCOVERY — Roadmap
 
-> Living document. Updated 2026-05-22 (v1.4.0 shipped — LightGBM leaf-rule warm-start completes the optimizer overhaul arc).
+> Living document. Updated 2026-05-23 (v2.0.0 shipped — Optuna removed; GA is the sole optimizer. First final, no patches planned).
 > Items grouped by target version. Effort is rough; ranking inside each version is by priority.
 > ✅ markers indicate items that have shipped.
+
+---
+
+## Shipped — v2.0.0
+
+Final working release. **Optuna removed entirely; the Genetic Algorithm is now the sole optimizer.**
+
+After the full four-wave optimizer overhaul (v1.1–v1.4) and head-to-head benchmarking, Optuna lost to the GA on **both** axes — even after tuning both sides:
+
+- **Wall time:** ~530s (Optuna) vs ~300s (GA) on the same dataset.
+- **Quality:** Optuna runs produced **no patterns passing the quality filters**; the GA reliably did.
+
+So the Optuna path (TPE/CMA-ES samplers, multivariate/group tuning, parallel-trial knobs, `study.enqueue_trial()` warm-start) and its `optuna>=4.0` dependency were dropped. The shared scaffolding the GA also relies on stays intact: the NumPy fitness scorer (`_score_genetic`), rule-match mask cache, LightGBM leaf-rule warm-start (`leaf_rules`), the surrogate model (`SURROGATE_*`), and LightGBM clustering (`CLUSTERING_METHOD`). The `GENE_OPTIMIZER` selector and all `OPTUNA_*` params were removed from the Discovery tab; the "Search Budget" group is now plain GA generations/population.
+
+Historical Optuna entries below (v1.0–v1.4) are kept as-is for the record.
 
 ---
 
@@ -142,7 +157,7 @@ Run the v1.4.0 benchmark first. If quality plateaus, these are the next-best low
 |---|---|---|---|
 | 46 | **Multi-tree leaf warm-start.** v1.4.0 only warm-starts when `LIGHTGBM_N_ESTIMATORS=1`. For multi-tree ensembles each cluster's path is a tuple of leaves — conjunction those rules into one richer seed. | 3 hrs | Unlocks the warm-start benefit when users want more granular clusters (n_estimators > 1). +5-10% on the lightgbm path. |
 | 47 | **Pass-2 leaf-aware narrowing.** Pass 2 currently narrows quantile ranges blindly (`PASS2_QUANTILE_LO/HI`). Narrow to the leaf's actual bound range instead — Pass 2 converges in fewer generations because the search space is much smaller. | 2 hrs | Faster pass 2 + better convergence; only active when lightgbm clustering is on. |
-| 48 | **Early stopping for GA + Optuna.** Both currently run for a fixed budget. Add "stop if no improvement for N gens/trials." When warm-start finds a near-optimum quickly, you'd save 30-50% of optimizer wall time. | 1 hr | Cleanest unshipped speed win. Default `EARLY_STOP_PATIENCE=0` (off) for backward compatibility. |
+| 48 | **Early stopping for the GA.** It currently runs for a fixed budget. Add "stop if no improvement for N generations." When warm-start finds a near-optimum quickly, you'd save 30-50% of optimizer wall time. | 1 hr | Cleanest unshipped speed win. Default `EARLY_STOP_PATIENCE=0` (off) for backward compatibility. |
 | 49 | **Cross-cluster HOF sharing.** If cluster A's best rule scores well on cluster B's bars too, add it to B's hall-of-fame. Helps discover patterns that generalize across leaves. | 2 hrs | Modest quality bump; mostly useful when many clusters share underlying market structure. |
 
 ---
@@ -156,8 +171,8 @@ These are higher-effort and have meaningful tradeoffs, but become increasingly v
 | 50 | **Walk-forward validation in the optimization loop.** Replace the fixed train/test split with a rolling 5-fold walk-forward. Rules scored by their *cross-fold consistency* generalize much better to live MT5 trading. | 1-2 days | Most valuable on datasets spanning **multiple market regimes** (≥18 months of multi-TF data). Less impactful on short datasets where there isn't much regime variation. | 2-3× compute cost per run, but the rules that survive are dramatically more robust. Biggest unaddressed "real-world quality" lever. |
 | 51 | **Custom fitness function with regime weighting + recency boost.** Current target-driven scoring weights all bars equally. Add (a) recency boost so newer bars matter more, (b) per-regime consistency term so rules that work in only one regime get penalised. | half day to wire + benchmark | Pays off on **large datasets where regime composition varies** (e.g. half bull + half ranging). On uniform datasets the term collapses to constant and adds no value. | Changes WHICH rules win, not just search efficiency — requires its own benchmark to verify new winners actually do better in MT5. |
 | 52 | **Pre-filter candidates with the surrogate.** Train a fast classifier on `(rule_features → composite_score)` from past runs, predict scores for new candidates BEFORE optimizing, only optimize promising ones. Skips compute on cluster/direction combos that historical data says won't work. | 1 day | Becomes valuable once you have **>10 past discovery runs** in the library — needs training data. Especially helpful for parameter sweeps where you're re-running with small tweaks. | The surrogate from v1.0.0-dev was per-run; this would be cross-run with persistent state in `userdata/`. |
-| 53 | **Quantile-bucket feature pre-computation.** Replace per-call `(vals >= lb) & (vals <= hb)` float comparisons with int8 quantile-bucket lookups. Pre-compute the bucket index once per bar at discovery start. Inner-loop comparison becomes integer-only. | half day | On **large datasets (>500k bars)** the float-compare loop starts to dominate. At <100k bars it's negligible. | Estimated 1.5-2× on the GA+Optuna fitness path at scale. Adds a one-time precompute step (~5s for 500k bars). |
-| 54 | **Persistent column-mask cache with LRU eviction.** Move the per-worker mask cache to module-level with size-bounded LRU. Survives across all candidates in a run, not just one worker. | 4 hrs | Helps **multi-cluster runs (>30 clusters)** where many rules share column bounds. Marginal benefit at small cluster counts. | Doesn't help Optuna directly (TPE has no parent-child reuse pattern); GA benefits scale with cluster count. |
+| 53 | **Quantile-bucket feature pre-computation.** Replace per-call `(vals >= lb) & (vals <= hb)` float comparisons with int8 quantile-bucket lookups. Pre-compute the bucket index once per bar at discovery start. Inner-loop comparison becomes integer-only. | half day | On **large datasets (>500k bars)** the float-compare loop starts to dominate. At <100k bars it's negligible. | Estimated 1.5-2× on the GA fitness path at scale. Adds a one-time precompute step (~5s for 500k bars). |
+| 54 | **Persistent column-mask cache with LRU eviction.** Move the per-worker mask cache to module-level with size-bounded LRU. Survives across all candidates in a run, not just one worker. | 4 hrs | Helps **multi-cluster runs (>30 clusters)** where many rules share column bounds. Marginal benefit at small cluster counts. | GA benefits scale with cluster count. |
 | 55 | **Adaptive multi-tree warm-start fusion.** When `LIGHTGBM_N_ESTIMATORS>1`, instead of just conjuncting all tree-leaf rules, weight by each tree's contribution to the leaf's prediction. Tighter, more confident bounds. | 1 day | Companion to #46. Becomes useful as users tune up `N_ESTIMATORS` for finer cluster counts on large datasets. | Modest quality bump on top of #46. |
 
 ---

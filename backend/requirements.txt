@@ -22,11 +22,6 @@ lxml>=5.0
 # a noisy "yfinance not installed" warning at runtime.
 yfinance>=0.2.40
 
-# v1.0.0-dev: Optuna TPE optimizer (alternative to the GA in pattern
-# discovery). Required when GENE_OPTIMIZER="optuna" in the Discovery tab.
-# Without it, the optuna path raises a friendly error pointing here.
-optuna>=4.0
-
 # v1.3.0: LightGBM tree-based candidate generation (alternative to KMeans
 # clustering). Required when CLUSTERING_METHOD="lightgbm" in the Discovery
 # tab. Without it, the lightgbm path logs a warning and falls back to KMeans.

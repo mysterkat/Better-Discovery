@@ -22,9 +22,9 @@ export interface ParamDef {
    *  "advanced" = hidden behind a per-group "Show advanced (N)" collapse.
    *  Defaults to "core" when the backend omits the field (older builds). */
   tier?: "core" | "advanced";
-  /** Task #31: when present, this param's entire group is only active when
-   *  the gating param equals the given value. The frontend dims/collapses
-   *  the group otherwise (e.g. GA groups when Optuna is selected). */
+  /** When present, this param's entire group is only active when the gating
+   *  param equals the given value. The frontend dims/collapses the group
+   *  otherwise. */
   gated_by?: { key: string; value: string };
 }
 
