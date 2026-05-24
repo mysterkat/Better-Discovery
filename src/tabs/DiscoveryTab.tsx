@@ -386,6 +386,23 @@ export default function DiscoveryTab() {
       setValue(p.key, String(s));
     };
 
+    // FILTER_EDGE_K drives the WR/PF quality floors, which the backend derives
+    // as floor = breakeven + k*(target - breakeven). Mirror that formula here so
+    // the user sees the implied floors update live as they change k or a target.
+    // Breakevens (50% WR, 1.0 PF) match v6's WR_BREAKEVEN / PF_BREAKEVEN anchors.
+    const num = (key: string) => parseFloat((currentValueOf(key) ?? "").replace(",", "."));
+    let edgeFloorHint: string | null = null;
+    if (p.key === "FILTER_EDGE_K") {
+      const k = num("FILTER_EDGE_K");
+      const twr = num("TARGET_WR_PCT");
+      const tpf = num("TARGET_PF");
+      if ([k, twr, tpf].every(Number.isFinite)) {
+        const wrFloor = 50 + k * (twr - 50);
+        const pfFloor = 1 + k * (tpf - 1);
+        edgeFloorHint = `→ implied floors: WR ${wrFloor.toFixed(1)}%, PF ${pfFloor.toFixed(2)}`;
+      }
+    }
+
     return (
       <div key={p.key} className="field">
         <label className="field-label">
@@ -427,6 +444,11 @@ export default function DiscoveryTab() {
         {hint && (
           <span className="field-hint">
             {hint ? `(${hint})` : ""}
+          </span>
+        )}
+        {edgeFloorHint && (
+          <span className="field-hint" style={{ fontWeight: 600 }}>
+            {edgeFloorHint}
           </span>
         )}
       </div>
