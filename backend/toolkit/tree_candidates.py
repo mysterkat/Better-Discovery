@@ -23,7 +23,7 @@ Why this should work better:
     optimisation step needed to discover the rule (the optimiser then
     just polishes the bounds).
 
-The downstream pipeline (price distributions, backtest, GA/Optuna refine,
+The downstream pipeline (price distributions, backtest, GA refine,
 quality filters) treats `labels` agnostically — swapping clustering for
 leaves requires no other changes.
 """

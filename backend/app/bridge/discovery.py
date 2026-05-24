@@ -162,22 +162,20 @@ PARAM_META: dict[str, ParamMeta] = {
                                        "Favourable excursion quantile for take-profit", min=0.3, max=0.99, step=0.01),
     "MIN_DIST_RR":          ParamMeta("Min R:R Distance",      "SL / TP", "float",
                                        "Minimum risk-reward ratio", min=0.1, max=3.0, step=0.05),
-    # ── Search Budget (v1.1.1 — shared by GA and Optuna) ────────────────────
-    # n_trials for Optuna = GENETIC_GENERATIONS × GENETIC_POPULATION, so these
-    # four params apply regardless of optimizer choice and must stay active.
-    "GENETIC_GENERATIONS":  ParamMeta("Generations / Trial Multiplier",
+    # ── Search Budget ───────────────────────────────────────────────────────
+    "GENETIC_GENERATIONS":  ParamMeta("Generations",
                                        "Search Budget", "int",
-                                       "GA: evolution generations.  Optuna: trials = generations × population.",
+                                       "GA evolution generations.",
                                        min=5, max=100, step=5),
-    "GENETIC_POPULATION":   ParamMeta("Population / Trial Multiplier",
+    "GENETIC_POPULATION":   ParamMeta("Population",
                                        "Search Budget", "int",
-                                       "GA: individuals per generation.  Optuna: trials = generations × population.",
+                                       "GA individuals per generation.",
                                        min=20, max=200, step=10),
     "GENE_N_COLS_MIN":      ParamMeta("Min Rule Columns",      "Search Budget", "int",
-                                       "Minimum conditions in a rule (enforced by both GA and Optuna).",
+                                       "Minimum conditions in a rule.",
                                        min=1, max=10, step=1),
     "GENE_N_COLS_MAX":      ParamMeta("Max Rule Columns",      "Search Budget", "int",
-                                       "Maximum conditions in a rule (enforced by both GA and Optuna).",
+                                       "Maximum conditions in a rule.",
                                        min=2, max=15, step=1),
     # ── Genetic Pass 1 (GA-specific knobs only) ─────────────────────────────
     "GENETIC_MUTATE_RATE":  ParamMeta("Mutation Rate",         "Genetic Pass 1 (GA)", "float",
@@ -193,41 +191,14 @@ PARAM_META: dict[str, ParamMeta] = {
     "GENE_USE_CROWDING":    ParamMeta("Deterministic Crowding","Genetic Pass 1 (GA)", "bool",
                                        "Replace island model with DC replacement (v0.9.x #24). "
                                        "Maintains diversity without migration; set False to revert to island model."),
-    # ── Optimizer (Task #31 — moved out of "Genetic Pass 1" so it's clearly
-    #   a cross-cutting selector, not a GA-specific knob) ─────────────────
-    "GENE_OPTIMIZER":       ParamMeta("Optimizer",             "Optimizer", "str",
-                                       "ga = evolutionary GA (default); optuna = Bayesian TPE search. "
-                                       "Switching this hides the GA-specific accordions below.",
-                                       options=["ga", "optuna"]),
+    # ── Optimizer ───────────────────────────────────────────────────────────
     "SURROGATE_ENABLED":    ParamMeta("Surrogate Model",       "Optimizer", "bool",
                                        "Train a GBM on scored rules to predict fitness cheaply. "
                                        "After SURROGATE_MIN_SAMPLES real evals, ~90% of calls use the predictor. "
-                                       "Wraps either optimizer."),
+                                       "Wraps the GA optimizer."),
     "SURROGATE_REAL_FRAC":  ParamMeta("Surrogate Real Frac",   "Optimizer", "float",
                                        "Fraction of optimizer calls that hit the real scorer (rest use GBM).",
                                        min=0.05, max=0.5, step=0.05),
-    # v1.2: Optuna-specific tuning
-    "OPTUNA_SAMPLER":       ParamMeta("Optuna: Sampler",       "Optimizer", "str",
-                                       "tpe = Bayesian (default, good general).  cmaes = Covariance Matrix "
-                                       "Adaptation, often beats TPE on continuous rule landscapes.  "
-                                       "random = pure random baseline (sanity check only).",
-                                       options=["tpe", "cmaes", "random"]),
-    "OPTUNA_TPE_MULTIVARIATE": ParamMeta("Optuna: TPE Multivariate", "Optimizer", "bool",
-                                       "TPE learns joint distributions across parameters instead of fitting "
-                                       "each marginal independently. +15-25% rule quality on correlated bounds."),
-    "OPTUNA_TPE_GROUP":     ParamMeta("Optuna: TPE Group",     "Optimizer", "bool",
-                                       "Groups parameters that always appear together (per-column "
-                                       "{use, lo_pct, w_pct} triples) so TPE treats them as a joint subspace."),
-    "OPTUNA_TPE_N_STARTUP": ParamMeta("Optuna: TPE Warmup Trials", "Optimizer", "int",
-                                       "Random-search trials before TPE's model kicks in.  Higher = more "
-                                       "exploration before exploitation.",
-                                       min=5, max=100, step=5),
-    "OPTUNA_PARALLEL_TRIALS": ParamMeta("Optuna: Parallel Trials", "Optimizer", "int",
-                                       "Threads per study running trials in parallel.  1 = sequential "
-                                       "(default).  Set 2-4 only if you have CPU headroom "
-                                       "(candidates × value < cores) — otherwise CPU oversubscription "
-                                       "hurts.",
-                                       min=1, max=8, step=1),
     # v1.3 candidate-generation method (sits in Regime & Features so it's
     # near the existing clustering knobs N_CLUSTERS / REGIME_MODE)
     "CLUSTERING_METHOD":    ParamMeta("Clustering Method",     "Regime & Features", "str",
@@ -283,8 +254,7 @@ PARAM_META: dict[str, ParamMeta] = {
     # Above target → tiny log bonus capped by EXCESS_BONUS_WEIGHT so the GA
     # won't sacrifice one objective to push another past its target.
     "ENABLE_TARGET_SCORING": ParamMeta("Target-Driven Scoring", "Scoring & Targets", "bool",
-                                        # fix 2c: "GA" → "the optimizer" (Optuna now shares scorer)
-                                        "When on (recommended), the optimizer evolves toward your target values "
+                                        "When on (recommended), the GA evolves toward your target values "
                                         "instead of blindly maximising. Turn off to use legacy v0.5 behaviour."),
     "TARGET_WR_PCT":         ParamMeta("Target: Win Rate %",   "Scoring & Targets", "float",
                                         # fix 2c: "GA " → "the optimizer "
@@ -385,17 +355,11 @@ OVERRIDABLE_CONSTANTS: set[str] = set(PARAM_META.keys())
 # touched, so hiding them by default cuts visual clutter without removing
 # any capability. Power users open the collapse to access them.
 # Task #31: groups that only apply when another param has a specific value.
-# The frontend reads this to dim/collapse irrelevant accordions when the user
-# switches optimizer. Each entry: group_name -> {"key": ..., "value": ...}.
-# When the gate's key holds the listed value, the group is "active"; otherwise
-# the frontend shows it with reduced opacity and an "Inactive" badge.
-GROUP_GATES: dict[str, dict[str, str]] = {
-    # v1.1.1: only the GA-specific knobs in Pass 1 are gated.
-    # Search Budget (Generations/Population/MinCols/MaxCols) is shared with
-    # Optuna and stays active.  Pass 2 always runs as GA (no Optuna pass-2
-    # exists yet) so its params apply regardless of pass-1 optimizer.
-    "Genetic Pass 1 (GA)": {"key": "GENE_OPTIMIZER", "value": "ga"},
-}
+# Maps group_name -> {"key": ..., "value": ...}. When the gate's key holds the
+# listed value the group is "active"; otherwise the frontend shows it with
+# reduced opacity and an "Inactive" badge. GA is the only optimizer, so no
+# groups are currently gated.
+GROUP_GATES: dict[str, dict[str, str]] = {}
 
 
 _ADVANCED_KEYS: set[str] = {
@@ -412,11 +376,8 @@ _ADVANCED_KEYS: set[str] = {
     # Genetic Pass 1 (GA)
     "GENE_REPAIR_ATTEMPTS",
     "GENE_DIVERSITY_THRESHOLD", "GENE_ISLAND_COUNT", "GENE_MIGRATION_INTERVAL",
-    # Optimizer — surrogate tuning + Optuna internals are advanced;
-    # only the high-level OPTIMIZER selector + SAMPLER stay core.
+    # Optimizer — surrogate tuning is advanced; the high-level toggle stays core.
     "SURROGATE_REAL_FRAC",
-    "OPTUNA_TPE_MULTIVARIATE", "OPTUNA_TPE_GROUP", "OPTUNA_TPE_N_STARTUP",
-    "OPTUNA_PARALLEL_TRIALS",
     # LightGBM clustering internals — main toggle (CLUSTERING_METHOD) stays core
     "LIGHTGBM_N_ESTIMATORS", "LIGHTGBM_NUM_LEAVES",
     "LIGHTGBM_MIN_SAMPLES_LEAF", "LIGHTGBM_LEARNING_RATE",
@@ -517,7 +478,7 @@ def list_defaults_with_meta() -> list[dict[str, Any]]:
             entry["step"] = meta.step
         if meta.options:
             entry["options"] = meta.options
-        # Task #31: per-group gating (e.g. GA-only groups hidden when Optuna selected)
+        # Per-group gating: dim/collapse groups whose gate key isn't satisfied.
         if meta.group in GROUP_GATES:
             entry["gated_by"] = GROUP_GATES[meta.group]
         result.append(entry)
