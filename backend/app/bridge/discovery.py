@@ -162,6 +162,20 @@ PARAM_META: dict[str, ParamMeta] = {
                                        "Favourable excursion quantile for take-profit", min=0.3, max=0.99, step=0.01),
     "MIN_DIST_RR":          ParamMeta("Min R:R Distance",      "SL / TP", "float",
                                        "Minimum risk-reward ratio", min=0.1, max=3.0, step=0.05),
+    "EVOLVE_SLTP":          ParamMeta("Evolve SL/TP",          "SL / TP", "bool",
+                                       "When on, the GA co-optimizes each rule's stop and target "
+                                       "(independently) as multipliers of the cluster's quantile-derived "
+                                       "baseline, bounded by the min/max below. Off (default) = fixed "
+                                       "SL/TP from the quantiles. Use for benchmarking entry-only vs "
+                                       "joint entry+SL/TP evolution."),
+    "SLTP_EVOLVE_MIN":      ParamMeta("SL/TP Evolve Min x",    "SL / TP", "float",
+                                       "Lower bound for the evolved SL/TP multiplier (x the quantile "
+                                       "baseline). Only used when Evolve SL/TP is on.",
+                                       min=0.1, max=1.0, step=0.05),
+    "SLTP_EVOLVE_MAX":      ParamMeta("SL/TP Evolve Max x",    "SL / TP", "float",
+                                       "Upper bound for the evolved SL/TP multiplier (x the quantile "
+                                       "baseline). Only used when Evolve SL/TP is on.",
+                                       min=1.0, max=5.0, step=0.25),
     # ── Search Budget ───────────────────────────────────────────────────────
     "GENETIC_GENERATIONS":  ParamMeta("Generations",
                                        "Search Budget", "int",
@@ -371,6 +385,8 @@ _ADVANCED_KEYS: set[str] = {
     "SHAPE_MATCH_THRESHOLD",
     # Trade Simulation
     "MEANINGFUL_SUSTAIN_BARS", "COOLDOWN_BARS",
+    # SL / TP — evolution bounds are advanced; the Evolve SL/TP toggle stays core
+    "SLTP_EVOLVE_MIN", "SLTP_EVOLVE_MAX",
     # Search Budget — power-user bounds on rule complexity
     "GENE_N_COLS_MIN", "GENE_N_COLS_MAX",
     # Genetic Pass 1 (GA)

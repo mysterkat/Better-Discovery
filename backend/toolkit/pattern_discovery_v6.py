@@ -194,6 +194,14 @@ SL_PCT_QUANTILE = 0.85
 TP_PCT_QUANTILE = 0.60
 MIN_DIST_RR     = 0.30
 
+# v2.1: optional SL/TP evolution.  When True the GA co-optimizes each rule's
+# stop and target as independent multipliers of the cluster's quantile-derived
+# baseline, bounded by [SLTP_EVOLVE_MIN, SLTP_EVOLVE_MAX].  Default off → runs
+# are identical to fixed-SL/TP behaviour (multiplier pinned at 1.0).
+EVOLVE_SLTP     = False
+SLTP_EVOLVE_MIN = 0.5
+SLTP_EVOLVE_MAX = 2.0
+
 # Genetic
 GENETIC_GENERATIONS      = 20
 GENETIC_POPULATION       = 70
@@ -1995,7 +2003,7 @@ def _genetic_worker(args):
          island_id,generations,pop_size,mutate_rate,train_days,seed)=args
         seed_rule = None
     rng_=np.random.default_rng(seed); arrays=_GEN["arrays"]
-    if len(member_bi)<10: return cid,direction,island_id,{},0.0
+    if len(member_bi)<10: return cid,direction,island_id,{},0.0,1.0,1.0
 
     member_arr_full = np.asarray(member_bi, dtype=np.int32)
     col_stats={}
@@ -2012,11 +2020,47 @@ def _genetic_worker(args):
     pass1_gens = max(1, int(generations * 0.75))
     pass2_gens = generations - pass1_gens
 
-    def _score(rule, use_full=False, cache=None):
+    # v2.1: SL/TP evolution.  An individual is (rule, sl_mult, tp_mult).  The
+    # multipliers scale the cluster baseline sl_pct/tp_pct.  When EVOLVE_SLTP is
+    # off they stay pinned at 1.0, so scoring is identical to fixed-SL/TP runs.
+    evolve_sltp = bool(globals().get("EVOLVE_SLTP", False))
+    _m_lo = float(globals().get("SLTP_EVOLVE_MIN", 0.5))
+    _m_hi = float(globals().get("SLTP_EVOLVE_MAX", 2.0))
+
+    def _clip_m(m):
+        return float(min(max(m, _m_lo), _m_hi))
+
+    def _jit_m(m):
+        # log-normal jitter keeps the multiplier positive and symmetric in ratio
+        if not evolve_sltp:
+            return 1.0
+        return _clip_m(m * float(np.exp(rng_.normal(0.0, 0.15))))
+
+    def _clone(ind):
+        return (dict(ind[0]), ind[1], ind[2])
+
+    def _score_ind(ind, use_full=False, cache=None):
+        # mask cache is keyed on (col, lo, hi) only, so it stays valid across
+        # different sl/tp multipliers — sl/tp affect the trade sim, not matches.
+        rule, slm, tpm = ind
         bi = member_arr_full if use_full else member_arr_coarse
         cs = full_cluster_size if use_full else coarse_cluster_size
-        return _score_genetic(bi, rule, sl_pct, tp_pct, direction, cs,
-                              train_days, _cache=cache)
+        return _score_genetic(bi, rule, sl_pct * slm, tp_pct * tpm, direction,
+                              cs, train_days, _cache=cache)
+
+    def _mut_ind(ind, mrate):
+        return (_mutate_rule(ind[0], col_stats, mrate, rng_),
+                _jit_m(ind[1]), _jit_m(ind[2]))
+
+    def _cx_ind(a, b):
+        # rule via column crossover; each multiplier inherited from a random parent
+        slm = a[1] if rng_.random() < 0.5 else b[1]
+        tpm = a[2] if rng_.random() < 0.5 else b[2]
+        return (_cross_rules(a[0], b[0], rng_), slm, tpm)
+
+    def _rand_ind():
+        return (_rand_rule(col_stats, GENE_N_COLS_MIN, GENE_N_COLS_MAX, rng_),
+                1.0, 1.0)
 
     # #20 — per-worker column mask cache (cleared between full/coarse switch)
     cache: dict = {}
@@ -2035,20 +2079,20 @@ def _genetic_worker(args):
             if new_lo < new_hi:
                 seed_clamped[col] = (new_lo, new_hi)
     if seed_clamped and len(seed_clamped) >= GENE_N_COLS_MIN:
-        pop = [seed_clamped]
+        base_ind = (seed_clamped, 1.0, 1.0)
+        pop = [base_ind]
         for _ in range(pop_size - 1):
-            pop.append(_mutate_rule(seed_clamped, col_stats, mutate_rate, rng_))
+            pop.append(_mut_ind(base_ind, mutate_rate))
     else:
-        pop=[_rand_rule(col_stats,GENE_N_COLS_MIN,GENE_N_COLS_MAX,rng_)
-             for _ in range(pop_size)]
-    scores=[_score(r, cache=cache) for r in pop]
+        pop=[_rand_ind() for _ in range(pop_size)]
+    scores=[_score_ind(r, cache=cache) for r in pop]
 
-    best_r=pop[int(np.argmax(scores))]; best_s=max(scores)
+    best_ind=_clone(pop[int(np.argmax(scores))]); best_s=max(scores)
     no_improve=0; cur_mutate=mutate_rate
-    hof = [(best_s, dict(best_r))]
+    hof = [(best_s, _clone(best_ind))]
 
     def _run_generations(n_gens, use_full):
-        nonlocal pop, scores, best_r, best_s, no_improve, cur_mutate, hof, cache
+        nonlocal pop, scores, best_ind, best_s, no_improve, cur_mutate, hof, cache
         if use_full:
             cache = {}  # stale coarse masks are invalid on full member set
         for gen in range(n_gens):
@@ -2061,50 +2105,50 @@ def _genetic_worker(args):
                 n_refresh=max(1,pop_size//5)
                 worst_idx=sorted(range(len(scores)),key=lambda i:scores[i])[:n_refresh]
                 for idx in worst_idx:
-                    pop[idx]=_rand_rule(col_stats,GENE_N_COLS_MIN,GENE_N_COLS_MAX,rng_)
-                    scores[idx]=_score(pop[idx], use_full, cache)
+                    pop[idx]=_rand_ind()
+                    scores[idx]=_score_ind(pop[idx], use_full, cache)
 
             new_pop=[]
             top2=sorted(range(len(scores)),key=lambda i:scores[i],reverse=True)[:2]
-            for idx in top2: new_pop.append(dict(pop[idx]))
+            for idx in top2: new_pop.append(_clone(pop[idx]))
             if gen % 5 == 0 and hof:
-                _, hof_rule = max(hof, key=lambda x: x[0])
-                new_pop.append(dict(hof_rule))
+                _, hof_ind = max(hof, key=lambda x: x[0])
+                new_pop.append(_clone(hof_ind))
 
             while len(new_pop)<pop_size:
                 p1=_tournament_select(pop,scores,k=3,rng_=rng_)
                 p2=_tournament_select(pop,scores,k=3,rng_=rng_)
-                child=_mutate_rule(_cross_rules(p1,p2,rng_),
-                                   col_stats,cur_mutate,rng_)
-                if not child: continue
-                child_score=_score(child, use_full, cache)
+                child=_mut_ind(_cx_ind(p1,p2),cur_mutate)
+                if not child[0]: continue
+                child_score=_score_ind(child, use_full, cache)
                 if child_score==0.0:
                     for _ in range(GENE_REPAIR_ATTEMPTS):
                         repaired=_diagnose_and_repair(
-                            child,col_stats,
+                            child[0],col_stats,
                             member_arr_full if use_full else member_arr_coarse,
-                            sl_pct,tp_pct,direction,
+                            sl_pct*child[1],tp_pct*child[2],direction,
                             full_cluster_size if use_full else coarse_cluster_size,
                             train_days,rng_)
                         if repaired:
-                            rs=_score(repaired, use_full, cache)
+                            cand=(repaired, child[1], child[2])
+                            rs=_score_ind(cand, use_full, cache)
                             if rs>0:
-                                child=repaired; child_score=rs; break
+                                child=cand; child_score=rs; break
                 new_pop.append(child)
                 if child_score > 0:
-                    hof.append((child_score, dict(child)))
+                    hof.append((child_score, _clone(child)))
                     hof.sort(key=lambda x: x[0], reverse=True)
                     hof = hof[:10]
                 if child_score>best_s:
-                    best_s=child_score; best_r=dict(child)
+                    best_s=child_score; best_ind=_clone(child)
                     no_improve=max(0,no_improve-2)
 
             pop=new_pop[:pop_size]
-            scores=[_score(r, use_full, cache) for r in pop]
+            scores=[_score_ind(r, use_full, cache) for r in pop]
             gen_best=max(scores)
             if gen_best>best_s:
-                best_s=gen_best; best_r=pop[int(np.argmax(scores))]
-                hof.append((best_s, dict(best_r)))
+                best_s=gen_best; best_ind=_clone(pop[int(np.argmax(scores))])
+                hof.append((best_s, _clone(best_ind)))
                 hof.sort(key=lambda x: x[0], reverse=True)
                 hof = hof[:10]
                 no_improve=max(0,no_improve-2)
@@ -2113,7 +2157,7 @@ def _genetic_worker(args):
 
     def _run_generations_crowding(n_gens, use_full):
         """Deterministic Crowding replacement: children compete with most-similar parent."""
-        nonlocal pop, scores, best_r, best_s, no_improve, cur_mutate, hof, cache
+        nonlocal pop, scores, best_ind, best_s, no_improve, cur_mutate, hof, cache
         if use_full:
             cache = {}
         for gen in range(n_gens):
@@ -2127,15 +2171,15 @@ def _genetic_worker(args):
                 i2 = int(rng_.integers(0, pop_size))
                 while i2 == i1:
                     i2 = int(rng_.integers(0, pop_size))
-                p1_r, p2_r = pop[i1], pop[i2]
-                c1 = _mutate_rule(_cross_rules(p1_r, p2_r, rng_), col_stats, cur_mutate, rng_)
-                c2 = _mutate_rule(_cross_rules(p2_r, p1_r, rng_), col_stats, cur_mutate, rng_)
-                if not c1 or not c2:
+                p1_i, p2_i = pop[i1], pop[i2]
+                c1 = _mut_ind(_cx_ind(p1_i, p2_i), cur_mutate)
+                c2 = _mut_ind(_cx_ind(p2_i, p1_i), cur_mutate)
+                if not c1[0] or not c2[0]:
                     continue
-                s1 = _score(c1, use_full, cache)
-                s2 = _score(c2, use_full, cache)
-                d11 = _rule_distance(c1, p1_r); d12 = _rule_distance(c1, p2_r)
-                d21 = _rule_distance(c2, p1_r); d22 = _rule_distance(c2, p2_r)
+                s1 = _score_ind(c1, use_full, cache)
+                s2 = _score_ind(c2, use_full, cache)
+                d11 = _rule_distance(c1[0], p1_i[0]); d12 = _rule_distance(c1[0], p2_i[0])
+                d21 = _rule_distance(c2[0], p1_i[0]); d22 = _rule_distance(c2[0], p2_i[0])
                 if d11 + d22 <= d12 + d21:
                     if s1 > scores[i1]: pop[i1] = c1; scores[i1] = s1
                     if s2 > scores[i2]: pop[i2] = c2; scores[i2] = s2
@@ -2145,16 +2189,16 @@ def _genetic_worker(args):
 
                 for cs, ss in ((s1, c1), (s2, c2)):
                     if cs > 0:
-                        hof.append((cs, dict(ss)))
+                        hof.append((cs, _clone(ss)))
                     if cs > best_s:
-                        best_s = cs; best_r = dict(ss)
+                        best_s = cs; best_ind = _clone(ss)
 
             hof.sort(key=lambda x: x[0], reverse=True)
             hof = hof[:10]
             gen_best = max(scores)
             if gen_best > best_s:
-                best_s = gen_best; best_r = dict(pop[int(np.argmax(scores))])
-                hof.append((best_s, dict(best_r)))
+                best_s = gen_best; best_ind = _clone(pop[int(np.argmax(scores))])
+                hof.append((best_s, _clone(best_ind)))
                 hof.sort(key=lambda x: x[0], reverse=True)
                 hof = hof[:10]
                 no_improve = max(0, no_improve - 2)
@@ -2170,11 +2214,11 @@ def _genetic_worker(args):
         _run_generations(pass2_gens, use_full=True)    # full-data polish
 
     if hof:
-        hof_best_s, hof_best_r = max(hof, key=lambda x: x[0])
+        hof_best_s, hof_best_ind = max(hof, key=lambda x: x[0])
         if hof_best_s > best_s:
-            best_s, best_r = hof_best_s, hof_best_r
+            best_s, best_ind = hof_best_s, hof_best_ind
 
-    return cid,direction,island_id,best_r,best_s
+    return cid,direction,island_id,best_ind[0],best_s,best_ind[1],best_ind[2]
 
 def genetic_refine_parallel(df,indices,labels,candidate_keys,
                              price_dists,bidir_info,fwd,
@@ -2235,19 +2279,34 @@ def genetic_refine_parallel(df,indices,labels,candidate_keys,
 
     # Migration: for each (cid,direction) keep the best rule across islands
     # but also allow the best from other islands to influence
-    best={}
-    for cid,direction,island_id,rule,score in island_results:
+    evolve_sltp = bool(globals().get("EVOLVE_SLTP", False))
+    best={}; evolved_sltp={}
+    for cid,direction,island_id,rule,score,slm,tpm in island_results:
         key=(cid,direction)
         if key not in best or score>best[key][1]:
             best[key]=(rule,score)
+            if evolve_sltp:
+                d=price_dists.get(cid)
+                base_sl=d["sl_pct"] if d else 0.002
+                base_tp=d["tp_pct"] if d else 0.003
+                evolved_sltp[key]=(base_sl*slm, base_tp*tpm)
 
     print(f"  Genetic pass 1 done  [{_elapsed(t0)}]")
-    return best  # {(cid,direction): (rule, score)}
+    # evolved_sltp is {(cid,direction): (sl_pct, tp_pct)} — empty unless
+    # EVOLVE_SLTP is on; downstream falls back to the cluster baseline.
+    return best, evolved_sltp  # {(cid,direction): (rule, score)}, sl/tp overrides
 
 def genetic_pass2_parallel(df,indices,labels,top_keys,genetic_p1,
                             price_dists,fwd,generations,pop_size,
-                            mutate_rate,train_days,seed,n_workers):
-    """Pass 2: tighter search starting warm from pass 1 best rules."""
+                            mutate_rate,train_days,seed,n_workers,
+                            sltp_overrides=None):
+    """Pass 2: tighter search starting warm from pass 1 best rules.
+
+    sltp_overrides: optional {(cid,direction): (sl_pct, tp_pct)} from SL/TP
+    evolution.  Pass 2 refines the entry rule against these fixed evolved
+    stops rather than re-evolving them, so the pass-1 choice carries through.
+    """
+    sltp_overrides = sltp_overrides or {}
     t0=time.time()
     print(f"  Genetic pass 2: {len(top_keys)} rules on {n_workers} cores ...")
     arrays={col:df[col].values.copy() for col in GENE_COLS if col in df.columns}
@@ -2261,9 +2320,13 @@ def genetic_pass2_parallel(df,indices,labels,top_keys,genetic_p1,
 
     args=[]
     for cid,direction in top_keys:
-        d=price_dists.get(cid)
-        sl_p=d["sl_pct"] if d else 0.002
-        tp_p=d["tp_pct"] if d else 0.003
+        ov=sltp_overrides.get((cid,direction))
+        if ov:
+            sl_p,tp_p=ov
+        else:
+            d=price_dists.get(cid)
+            sl_p=d["sl_pct"] if d else 0.002
+            tp_p=d["tp_pct"] if d else 0.003
         p1_rule=genetic_p1.get((cid,direction),({},0.0))[0]
         full_size=len(cm.get(cid,[]))
         args.append((cid,cm.get(cid,[]),sl_p,tp_p,direction,full_size,
@@ -2343,8 +2406,14 @@ def _bt_refined_worker(args):
 # POST-GENETIC BACKTEST
 # ─────────────────────────────────────────────────────────────────────────────
 def backtest_refined(df, indices, labels, genetic_rules, price_dists,
-                     fwd, n_workers, trading_days):
-    """Backtest only bars matching each genetic rule."""
+                     fwd, n_workers, trading_days, sltp_overrides=None):
+    """Backtest only bars matching each genetic rule.
+
+    sltp_overrides: optional {(cid,direction): (sl_pct, tp_pct)} from SL/TP
+    evolution.  When a key is present its evolved stop/target override the
+    cluster's quantile baseline (for the sim and the reported metrics).
+    """
+    sltp_overrides = sltp_overrides or {}
     hi = df["high"].values.copy(); lo = df["low"].values.copy()
     cl = df["close"].values.copy(); op = df["open"].values.copy(); n = len(df)
     sess = (df["session"].values.copy() if "session" in df.columns
@@ -2362,9 +2431,13 @@ def backtest_refined(df, indices, labels, genetic_rules, price_dists,
 
     filtered_args = []
     for (cid, direction), (rule, score) in genetic_rules.items():
-        d = price_dists.get(cid)
-        sl_p = d["sl_pct"] if d else 0.002
-        tp_p = d["tp_pct"] if d else 0.003
+        ov = sltp_overrides.get((cid, direction))
+        if ov:
+            sl_p, tp_p = ov
+        else:
+            d = price_dists.get(cid)
+            sl_p = d["sl_pct"] if d else 0.002
+            tp_p = d["tp_pct"] if d else 0.003
         filtered_bi = [bi for bi in cm.get(cid, [])
                        if all(not (c in col_arrays) or
                               (lb <= float(col_arrays[c][bi]) <= hb)
@@ -2412,11 +2485,18 @@ def backtest_refined(df, indices, labels, genetic_rules, price_dists,
         m["filtered_signals"] = filt_size
         m["signal_retention"] = round(filt_size / max(orig_size, 1) * 100, 1)
         d = price_dists.get(cid) or {}
-        m["sl_pct"] = d.get("sl_pct", 0.002)
-        m["tp_pct"] = d.get("tp_pct", 0.003)
-        m["sl_pct_label"] = d.get("sl_pct_label", "?")
-        m["tp_pct_label"] = d.get("tp_pct_label", "?")
-        m["implied_rr"] = d.get("implied_rr", 0.0)
+        ov = sltp_overrides.get(key) if isinstance(key, tuple) else None
+        if ov:
+            m["sl_pct"], m["tp_pct"] = float(ov[0]), float(ov[1])
+            m["sl_pct_label"] = "evolved"
+            m["tp_pct_label"] = "evolved"
+            m["implied_rr"] = round(ov[1] / ov[0], 3) if ov[0] > 0 else 0.0
+        else:
+            m["sl_pct"] = d.get("sl_pct", 0.002)
+            m["tp_pct"] = d.get("tp_pct", 0.003)
+            m["sl_pct_label"] = d.get("sl_pct_label", "?")
+            m["tp_pct_label"] = d.get("tp_pct_label", "?")
+            m["implied_rr"] = d.get("implied_rr", 0.0)
         m["direction"] = key[1] if isinstance(key, tuple) else "LONG"
         m["trades"] = tdf
         results[key] = m
@@ -3245,20 +3325,20 @@ def main():
     # ── Genetic pass 1 ────────────────────────────────────────────────────────
     _stage("Genetic Pass 1")
     if candidates:
-        genetic_p1=genetic_refine_parallel(
+        genetic_p1,sltp_p1=genetic_refine_parallel(
             df_train,idx_tr,labels_tr,candidates,
             price_dists_tr,bidir_info,FORWARD_BARS,
             GENETIC_GENERATIONS,GENETIC_POPULATION,
             GENETIC_MUTATE_RATE,train_days,RANDOM_SEED,nw,
             leaf_rules=_leaf_rules)
     else:
-        genetic_p1={}; print("  No candidates.")
+        genetic_p1={}; sltp_p1={}; print("  No candidates.")
 
     # ── Post-P1 backtest ──────────────────────────────────────────────────────
     _stage("Post-P1 Backtest")
     bt_p1=backtest_refined(
         df_train,idx_tr,labels_tr,genetic_p1,
-        price_dists_tr,FORWARD_BARS,nw,train_days)
+        price_dists_tr,FORWARD_BARS,nw,train_days,sltp_overrides=sltp_p1)
     print(f"  Pass 1 refined results:")
     for key,r in sorted(bt_p1.items(),
                         key=lambda x:x[1].get("composite_score",0),reverse=True):
@@ -3297,7 +3377,8 @@ def main():
             df_train,idx_tr,labels_tr,top_keys,genetic_p1,
             price_dists_tr,FORWARD_BARS,
             PASS2_GENERATIONS,PASS2_POPULATION,
-            PASS2_MUTATE_RATE,train_days,RANDOM_SEED,nw)
+            PASS2_MUTATE_RATE,train_days,RANDOM_SEED,nw,
+            sltp_overrides=sltp_p1)
         # merge: pass2 replaces pass1 if better
         genetic_final=dict(genetic_p1)
         for key,(rule,score) in genetic_p2.items():
@@ -3314,7 +3395,7 @@ def main():
     _stage("Post-P2 Backtest")
     bt_final=backtest_refined(
         df_train,idx_tr,labels_tr,genetic_final,
-        price_dists_tr,FORWARD_BARS,nw,train_days)
+        price_dists_tr,FORWARD_BARS,nw,train_days,sltp_overrides=sltp_p1)
     print(f"  Final refined results:")
     for key,r in sorted(bt_final.items(),
                         key=lambda x:x[1].get("composite_score",0),reverse=True):
@@ -3329,7 +3410,7 @@ def main():
     bt_test=backtest_refined(
         df_test,idx_te,labels_te,
         {k:v for k,v in genetic_final.items() if isinstance(k[0],int)},
-        price_dists_te,FORWARD_BARS,nw,test_days)
+        price_dists_te,FORWARD_BARS,nw,test_days,sltp_overrides=sltp_p1)
 
     # ── Quality analysis ──────────────────────────────────────────────────────
     _stage("Quality Analysis")
