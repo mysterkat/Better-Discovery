@@ -326,10 +326,13 @@ PARAM_META: dict[str, ParamMeta] = {
     # ── Quality Filters ─────────────────────────────────────────────────────
     "MIN_FREQ_PER_DAY":      ParamMeta("Min Freq/Day",         "Quality Filters", "float",
                                         "Min pattern occurrences per trading day", min=0.05, max=5.0, step=0.05),
-    "MIN_WIN_RATE":          ParamMeta("Min Win Rate %",       "Quality Filters", "float",
-                                        "Minimum win-rate % to keep a pattern", min=30.0, max=70.0, step=0.5),
-    "MIN_PROFIT_FACTOR":     ParamMeta("Min Profit Factor",    "Quality Filters", "float",
-                                        "Minimum gross profit / gross loss", min=1.0, max=3.0, step=0.05),
+    "FILTER_EDGE_K":         ParamMeta("Quality-Floor k",      "Quality Filters", "float",
+                                        "Strictness of the WR and PF floors, which are derived from their "
+                                        "targets instead of set by hand: floor = breakeven + k×(target "
+                                        "− breakeven), with breakeven = 50% WR / 1.0 PF (the no-edge "
+                                        "points). 0 = floor at breakeven, 1 = floor at target. At 0.30 with "
+                                        "default targets: WR floor 51.5, PF floor 1.15.",
+                                        min=0.0, max=1.0, step=0.05),
     "MAX_DRAWDOWN_R":        ParamMeta("Max Drawdown (R)",     "Quality Filters", "float",
                                         "Max drawdown in R-multiples", min=2.0, max=50.0, step=0.5),
     "MAX_CONSEC_LOSSES":     ParamMeta("Max Consec. Losses",   "Quality Filters", "int",
