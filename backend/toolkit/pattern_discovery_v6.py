@@ -311,8 +311,15 @@ SCORE_W_TRADES_PER_DAY = 0.15   # weight for trades/day target component
 
 # Quality filters
 MIN_FREQ_PER_DAY        = 0.3
-MIN_WIN_RATE            = 48.0
-MIN_PROFIT_FACTOR       = 1.15
+# WR and PF floors are derived from their targets rather than set by hand:
+#   floor = breakeven + FILTER_EDGE_K * (target - breakeven)
+# Breakeven is each metric's no-edge point (50% WR, 1.0 PF), so the floor
+# demands a fixed fraction of the edge the target aims for. One knob keeps the
+# floors coherent across the two scales and auto-tracks the targets. See
+# _wr_floor()/_pf_floor(). At k=0.30: WR 51.5, PF 1.15.
+FILTER_EDGE_K           = 0.30
+WR_BREAKEVEN            = 50.0
+PF_BREAKEVEN            = 1.0
 MAX_DRAWDOWN_R          = 15.0
 MAX_CONSEC_LOSSES       = 8
 MIN_TIME_CONSISTENCY    = 0.30
@@ -330,6 +337,22 @@ MC_MAX_DAYS       = 60
 # =============================================================================
 #  INTERNALS
 # =============================================================================
+
+def _edge_floor(target: float, breakeven: float, k: float) -> float:
+    """Floor = breakeven + k*(target - breakeven): demand fraction k of the
+    edge above the no-edge point. Read globals at call-time so UI overrides of
+    the targets / k (via setattr or _app_override.json) take effect."""
+    return breakeven + k * (target - breakeven)
+
+def _wr_floor() -> float:
+    k  = float(globals().get("FILTER_EDGE_K",  0.30))
+    be = float(globals().get("WR_BREAKEVEN",  50.0))
+    return _edge_floor(float(globals().get("TARGET_WR_PCT", 55.0)), be, k)
+
+def _pf_floor() -> float:
+    k  = float(globals().get("FILTER_EDGE_K", 0.30))
+    be = float(globals().get("PF_BREAKEVEN",   1.0))
+    return _edge_floor(float(globals().get("TARGET_PF", 1.5)), be, k)
 
 BG    = "#0d1117"; PANEL = "#161b22"; GRID  = "#21262d"
 UP    = "#26a69a"; DOWN  = "#ef5350"; TEXT  = "#e6edf3"; MUTED = "#8b949e"
@@ -3318,7 +3341,7 @@ def main():
     min_trades_p1=int(train_days*MIN_TRADES_PER_DAY_PASS2*0.5)
     candidates=[(cid,dirn) for (cid,dirn),r in bt_initial.items()
                 if r.get("total_trades",0)>=min_trades_p1
-                and r.get("win_rate_",0)>=MIN_WIN_RATE*0.85]
+                and r.get("win_rate_",0)>=_wr_floor()*0.85]
     print(f"  {len(candidates)} candidates for genetic pass 1 "
           f"(min {min_trades_p1} trades)")
 
@@ -3447,11 +3470,12 @@ def main():
         print(f"\n  C{cid:>2d} {direction} checking filters:")
         trd_df=tr.get("trades",pd.DataFrame())
         consistency=time_consistency_score(trd_df)
+        min_wr = _wr_floor(); min_pf = _pf_floor()
         checks=[
             ("implied_rr",       d_tr.get("implied_rr",0),     MIN_DIST_RR,         "min"),
-            ("win_rate_%",        tr.get("win_rate_",0),         MIN_WIN_RATE,         "min"),
-            ("wilson_wr",         tr.get("wilson_wr",0),         MIN_WIN_RATE*0.9,     "min"),
-            ("profit_factor",     tr.get("profit_factor",0),     MIN_PROFIT_FACTOR,    "min"),
+            ("win_rate_%",        tr.get("win_rate_",0),         min_wr,              "min"),
+            ("wilson_wr",         tr.get("wilson_wr",0),         min_wr*0.9,          "min"),
+            ("profit_factor",     tr.get("profit_factor",0),     min_pf,              "min"),
             ("composite_score",   tr.get("composite_score",0),   0.25,                 "min"),
             ("max_drawdown_r",    tr.get("max_drawdown_r",99),   MAX_DRAWDOWN_R,       "max"),
             ("max_consec_losses", tr.get("max_consec_losses",99),MAX_CONSEC_LOSSES,    "max"),
