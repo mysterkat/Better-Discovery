@@ -113,6 +113,12 @@ input bool   UseTrailing         = false;
 input double TrailingStart       = 1.0;
 input double TrailingStep        = 0.5;
 
+//--- Max hold — force-close a position after this many fully-closed bars if
+//    neither SL nor TP has been hit. Mirrors the discovery simulator's
+//    MAX_HOLD_BARS so live trades exit on the same schedule the .set was
+//    scored under. 0 = disabled (hold until SL/TP only).
+input int    MaxHoldBars         = 0;
+
 //--- Session filter (UTC hours)
 input bool   TradeAsian          = true;
 input bool   TradeLondon         = true;
@@ -294,6 +300,7 @@ int               g_nSignals = 0;
 int    g_cooldownBar     = -1;
 double g_slDist          = 0.0;
 ulong  g_openTicket      = 0;
+datetime g_entryBarTime  = 0;     // open time of the bar we entered on (MaxHoldBars)
 double g_dailyLossR      = 0.0;   // accumulated loss today in R units
 datetime g_dailyResetTime = 0;    // UTC midnight of current trading day
 
@@ -682,9 +689,10 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
      }
 
    //--- Set cooldown from transaction (immediate, not waiting for next tick)
-   g_cooldownBar = Bars(_Symbol, PERIOD_CURRENT) - 1;
-   g_openTicket  = 0;
-   g_slDist      = 0.0;
+   g_cooldownBar  = Bars(_Symbol, PERIOD_CURRENT) - 1;
+   g_openTicket   = 0;
+   g_slDist       = 0.0;
+   g_entryBarTime = 0;
 
    PrintFormat("Position closed | P&L=%.2f | DailyLossR=%.2f | CooldownBar=%d",
                dealProfit, g_dailyLossR, g_cooldownBar);
@@ -1406,8 +1414,9 @@ void OpenLong()
    double tp  = NormalisePrice(ask * (1.0 + TP_Pct));
    if(trade.Buy(Lots, _Symbol, ask, sl, tp, "PD_EA R:" + IntegerToString((int)GetRegime(1))))
      {
-      g_openTicket = trade.ResultOrder();
-      g_slDist     = ask - sl;
+      g_openTicket   = trade.ResultOrder();
+      g_slDist       = ask - sl;
+      g_entryBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
       PrintFormat("LONG opened | Ask=%.5f SL=%.5f TP=%.5f Lots=%.2f Ticket=%I64u",
                   ask, sl, tp, Lots, g_openTicket);
      }
@@ -1422,8 +1431,9 @@ void OpenShort()
    double tp  = NormalisePrice(bid * (1.0 - TP_Pct));
    if(trade.Sell(Lots, _Symbol, bid, sl, tp, "PD_EA R:" + IntegerToString((int)GetRegime(1))))
      {
-      g_openTicket = trade.ResultOrder();
-      g_slDist     = sl - bid;
+      g_openTicket   = trade.ResultOrder();
+      g_slDist       = sl - bid;
+      g_entryBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
       PrintFormat("SHORT opened | Bid=%.5f SL=%.5f TP=%.5f Lots=%.2f Ticket=%I64u",
                   bid, sl, tp, Lots, g_openTicket);
      }
@@ -1443,13 +1453,38 @@ void ManageOpenPosition()
       // but set it here as fallback if transaction wasn't caught
       if(g_openTicket != 0)
         {
-         g_cooldownBar = Bars(_Symbol, PERIOD_CURRENT) - 1;
-         g_openTicket  = 0;
-         g_slDist      = 0.0;
+         g_cooldownBar  = Bars(_Symbol, PERIOD_CURRENT) - 1;
+         g_openTicket   = 0;
+         g_slDist       = 0.0;
+         g_entryBarTime = 0;
         }
       return;
      }
    if(pos.Magic() != (ulong)MagicNumber) return;
+
+   //--- Max-hold timeout: force-close once the position has been open for
+   //    MaxHoldBars fully-formed bars without hitting SL/TP. Mirrors the
+   //    discovery simulator's MAX_HOLD_BARS so live exits stay on schedule.
+   if(MaxHoldBars > 0 && g_entryBarTime > 0)
+     {
+      int barsHeld = iBarShift(_Symbol, PERIOD_CURRENT, g_entryBarTime, false);
+      if(barsHeld >= MaxHoldBars)
+        {
+         PrintFormat("MaxHold reached: %d bars held >= %d — closing position %I64u at market.",
+                     barsHeld, MaxHoldBars, g_openTicket);
+         if(trade.PositionClose(g_openTicket))
+           {
+            g_cooldownBar  = Bars(_Symbol, PERIOD_CURRENT) - 1;
+            g_openTicket   = 0;
+            g_slDist       = 0.0;
+            g_entryBarTime = 0;
+           }
+         else
+            PrintFormat("MaxHold close failed | Error=%d Retcode=%d",
+                        GetLastError(), trade.ResultRetcode());
+         return;
+        }
+     }
 
    double currentSL  = pos.StopLoss();
    double openPrice  = pos.PriceOpen();

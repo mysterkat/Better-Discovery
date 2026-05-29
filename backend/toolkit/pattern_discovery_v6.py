@@ -1520,24 +1520,37 @@ def _bt_worker_dir(args):
         sl_v_eff = sl_v - exit_spread if long else sl_v + exit_spread
         risk = abs(entry_ws - sl_v); reward = abs(tp_v - entry_ws)
         if risk == 0: continue
+        # Book every outcome as an R-multiple (price move ÷ risk) so wins and
+        # losses share the SAME unit. A clean TP hit = +reward/risk R; a clean
+        # SL hit = -1.0 R; a max-hold timeout = realised (close-entry) move ÷
+        # risk, signed. Storing the raw price distance for wins while charging
+        # losses a flat -1.0 R silently inflated profit factor by ~(price/risk)×
+        # (e.g. PF 19 on gold instead of the true ~1.2).
+        win_r  = reward / risk     # R booked on a clean TP hit
+        loss_r = -1.0              # R booked on a clean SL hit
         ht = hs = False; bars_held = 0
         for j in range(bi + 1, min(bi + max_hold + 1, n)):
             h_ = hi[j]; lo_ = lo[j]; bars_held += 1
+            # Pessimistic intrabar resolution: when one bar's range spans BOTH
+            # the stop and the target, assume the STOP filled first. Tick order
+            # is unknowable from OHLC, and assuming the favourable fill biases
+            # win-rate high vs a tick-accurate MT5 run.
             if long:
-                if h_ >= tp_v_eff: ht = True; break
                 if lo_ <= sl_v_eff: hs = True; break
+                if h_ >= tp_v_eff: ht = True; break
             else:
-                if lo_ <= tp_v_eff: ht = True; break
                 if h_ >= sl_v_eff: hs = True; break
+                if lo_ <= tp_v_eff: ht = True; break
         if not ht and not hs:
             exit_p = cl[min(bi + max_hold, n - 1)]
             exit_p_eff = exit_p - exit_spread if long else exit_p + exit_spread
             pnl = exit_p_eff - entry_ws if long else entry_ws - exit_p_eff
             if pnl > 0:
                 ht = True
-                reward = pnl / risk
+                win_r = pnl / risk
             else:
                 hs = True
+                loss_r = pnl / risk   # partial loss at timeout, not a full -1R stop
 
         # ── snapshot signal-bar context ──────────────────────────────────────
         snap = (
@@ -1552,12 +1565,12 @@ def _bt_worker_dir(args):
 
         if ht:
             last_sig = bi
-            trades.append((bi, "WIN", round(reward, 2), round(entry_ws, 2),
+            trades.append((bi, "WIN", round(win_r, 2), round(entry_ws, 2),
                            round(sl_v, 2), round(tp_v, 2),
                            direction, bars_held) + snap)
         elif hs:
             last_sig = bi
-            trades.append((bi, "LOSS", -1.0, round(entry_ws, 2),
+            trades.append((bi, "LOSS", round(loss_r, 2), round(entry_ws, 2),
                            round(sl_v, 2), round(tp_v, 2),
                            direction, bars_held) + snap)
     return cid, direction, trades
@@ -1570,8 +1583,11 @@ def _calc_metrics(trades,member_count,trading_days,trades_df=None):
             wins+=1; gw+=abs(rr); rr_list.append(rr)
             equity.append(equity[-1]+rr); consec=0
         elif res=="LOSS":
-            losses+=1; gl+=1.0; rr_list.append(-1.0)
-            equity.append(equity[-1]-1.0)
+            # rr is the stored R-multiple (negative): -1.0 for a clean stop,
+            # a smaller magnitude for a timeout exit. Use it for both gross
+            # loss and equity so PF/drawdown stay in true R units.
+            losses+=1; gl+=abs(rr); rr_list.append(rr)
+            equity.append(equity[-1]+rr)
             consec+=1; max_consec=max(max_consec,consec)
         curr=equity[-1]
         if curr>peak: peak=curr
@@ -2929,15 +2945,23 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
     ]
 
     # Position sizing and risk
+    # CooldownBars and MaxHoldBars are emitted from the SAME constants the
+    # backtest simulator used (COOLDOWN_BARS / MAX_HOLD_BARS) so the live EA
+    # spaces and times-out trades exactly like the discovery run that produced
+    # these metrics. Hardcoding different values here silently de-syncs the EA
+    # from the .set's reported results.
     lines += [
         "",
         "; Position sizing",
         "Lots=0.10",
-        "CooldownBars=3",
+        f"CooldownBars={int(COOLDOWN_BARS)}",
         "BreakevenAtR=0.0",
         "UseTrailing=false",
         "TrailingStart=1.0",
         "TrailingStep=0.5",
+        "; Force-close a position after this many bars if neither SL nor TP hit",
+        "; (matches the simulator's MAX_HOLD_BARS). 0 = hold until SL/TP only.",
+        f"MaxHoldBars={int(MAX_HOLD_BARS)}",
     ]
 
     # Session filter — derive from session condition in rule if present

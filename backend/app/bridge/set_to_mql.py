@@ -81,7 +81,7 @@ _DEFAULTS: dict[str, Any] = {
     "DirectionMode": 1,
     "SL_Pct": 0.005220, "TP_Pct": 0.003630, "Lots": 0.10,
     "CooldownBars": 3, "BreakevenAtR": 0.0, "UseTrailing": "false",
-    "TrailingStart": 1.0, "TrailingStep": 0.5,
+    "TrailingStart": 1.0, "TrailingStep": 0.5, "MaxHoldBars": 0,
     "TradeAsian": "true", "TradeLondon": "true", "TradeNY": "true",
     "TradeOverlap": "true", "TradeOff": "true",
     "Discrim_Col": 1, "Discrim_Thresh": 0.012000, "Discrim_Dir": 1,
@@ -361,6 +361,7 @@ def _build_input_block(parsed: dict[str, Any]) -> str:
     ln(f"input bool   UseTrailing         = {merged['UseTrailing']};")
     ln(f"input double TrailingStart       = {_fmt_num(merged['TrailingStart'])};")
     ln(f"input double TrailingStep        = {_fmt_num(merged['TrailingStep'])};")
+    ln(f"input int    {padded('MaxHoldBars')}= {merged['MaxHoldBars']};   // Force-close after N bars (0=hold to SL/TP only); matches sim MAX_HOLD_BARS")
     ln("")
 
     # ── Session filter ────────────────────────────────────────────────────────
