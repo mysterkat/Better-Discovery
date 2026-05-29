@@ -169,7 +169,7 @@ INDICATOR_WARMUP_BARS = 250
 # Multi-seed batch: set to 1 to run once (original behaviour).
 # Set to e.g. 8 to run 8 different seeds automatically and collect all
 # unique patterns across runs into a combined report.
-MULTI_SEED_COUNT = 6
+MULTI_SEED_COUNT = 8   # FTMO: wider seed sweep → more robust pattern set
 MULTI_SEED_BASE  = RANDOM_SEED   # seeds = BASE, BASE+1, BASE+2, …
 
 WINDOW_SIZE = 5
@@ -178,7 +178,7 @@ N_CLUSTERS  = 5   # per algorithm per regime
 REGIME_MODE           = False
 USE_SHAPE_MATCHING    = True
 SHAPE_MATCH_THRESHOLD = 0.75
-USE_SOFT_FILTER       = True   # v5: marginal patterns get ⚠ tag instead of drop
+USE_SOFT_FILTER       = False  # FTMO: hard-drop marginal patterns (no ⚠ pass-through)
 USE_EXTRA_FEATURES    = True   # v5: stoch, candle patterns, SD zones, rolling Sharpe
 
 FORWARD_BARS            = 24
@@ -188,9 +188,9 @@ SPREAD_PTS              = 0.30
 REALISTIC_ENTRY         = True
 MAX_HOLD_BARS           = 32
 ALLOWED_SESSIONS        = []
-COOLDOWN_BARS           = 2
+COOLDOWN_BARS           = 4    # FTMO: longer cooldown → fewer clustered losses
 
-SL_PCT_QUANTILE = 0.85
+SL_PCT_QUANTILE = 0.70   # FTMO: tighter stops → smaller worst-case excursions
 TP_PCT_QUANTILE = 0.60
 MIN_DIST_RR     = 0.30
 
@@ -276,7 +276,7 @@ FORCE_DIRECTION      = "auto"
 SCORE_W_WR              = 0.30
 SCORE_W_PF              = 0.30
 SCORE_W_RR              = 0.25
-SCORE_W_STAB            = 0.15
+SCORE_W_STAB            = 0.25   # FTMO: weight consistency higher in GA fitness
 SCORE_WILSON_CONFIDENCE = 0.85
 
 # Rule-complexity bonus (Bug #32 — "force more indicators").
@@ -303,7 +303,7 @@ ENABLE_TARGET_SCORING   = True
 TARGET_WR_PCT           = 55.0   # win-rate goal (%)
 TARGET_PF               = 1.5    # profit-factor goal
 TARGET_RR               = 1.3    # R:R goal (avg payout / risk)
-TARGET_STABILITY        = 0.65   # time-consistency × distribution goal (0..1)
+TARGET_STABILITY        = 0.75   # FTMO: demand higher time-consistency (0..1)
 TARGET_TRADES_PER_DAY   = 1.0    # trades-per-day goal
 EXCESS_BONUS_WEIGHT     = 0.1
 
@@ -316,13 +316,13 @@ MIN_FREQ_PER_DAY        = 0.3
 # Breakeven is each metric's no-edge point (50% WR, 1.0 PF), so the floor
 # demands a fixed fraction of the edge the target aims for. One knob keeps the
 # floors coherent across the two scales and auto-tracks the targets. See
-# _wr_floor()/_pf_floor(). At k=0.30: WR 51.5, PF 1.15.
-FILTER_EDGE_K           = 0.30
+# _wr_floor()/_pf_floor(). FTMO: at k=0.45: WR 52.25, PF 1.225.
+FILTER_EDGE_K           = 0.45   # FTMO: stricter edge floors (was 0.30)
 WR_BREAKEVEN            = 50.0
 PF_BREAKEVEN            = 1.0
-MAX_DRAWDOWN_R          = 15.0
-MAX_CONSEC_LOSSES       = 8
-MIN_TIME_CONSISTENCY    = 0.30
+MAX_DRAWDOWN_R          = 10.0   # FTMO: cap path drawdown (was 15.0)
+MAX_CONSEC_LOSSES       = 5      # FTMO: reject streaky patterns (was 8)
+MIN_TIME_CONSISTENCY    = 0.45   # FTMO: demand steadier P&L over time (was 0.30)
 MIN_TEST_TRADES_PER_DAY = 0.3
 CORRELATION_THRESHOLD   = 0.70
 RECENT_BARS             = 8000
