@@ -187,12 +187,24 @@ MEANINGFUL_SUSTAIN_BARS = 4     # and hold for this many bars
 SPREAD_PTS              = 0.30
 REALISTIC_ENTRY         = True
 MAX_HOLD_BARS           = 32
+# Per-trade trading costs, expressed in R (risk multiples) so they subtract
+# directly from booked outcomes. COMMISSION_R = round-turn commission charged
+# once per trade; SWAP_R_PER_BAR = financing/swap charged per bar held.
+# Both default 0.0 → behaviour unchanged until a non-zero value is set.
+COMMISSION_R            = 0.0
+SWAP_R_PER_BAR          = 0.0
 ALLOWED_SESSIONS        = []
 COOLDOWN_BARS           = 4    # FTMO: longer cooldown → fewer clustered losses
 
 SL_PCT_QUANTILE = 0.70   # FTMO: tighter stops → smaller worst-case excursions
 TP_PCT_QUANTILE = 0.60
 MIN_DIST_RR     = 0.30
+
+# REPORT-ONLY (no filtering). The EA fires on the exported feature box (a superset
+# of the discovery shape-cluster), so live trade count is inflated vs the cluster.
+# signal_retention = total_trades / member_count surfaces that ratio. This cap is
+# diagnostic only; None = never used to drop/select patterns.
+MAX_BOX_INFLATION = None
 
 # v2.1: optional SL/TP evolution.  When True the GA co-optimizes each rule's
 # stop and target as independent multipliers of the cluster's quantile-derived
@@ -1236,7 +1248,14 @@ def write_combined_report(all_results, out_dir):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ranked = sorted(all_results, key=lambda r: r.get("composite_score", 0), reverse=True)
+    # OOS-bias fix (D): rank by out-of-sample (test_pf, test_wr); fall back to
+    # TRAIN composite_score only when no test split exists (test_pf missing/0).
+    ranked = sorted(
+        all_results,
+        key=lambda r: (1, r.get("test_pf", 0), r.get("test_wr", 0))
+        if r.get("test_pf", 0) else (0, r.get("composite_score", 0), 0),
+        reverse=True,
+    )
     kept = []
     for candidate in ranked:
         rule_c = candidate.get("genetic_rule", {})
@@ -1504,12 +1523,15 @@ def _bt_worker_dir(args):
     realistic = e["realistic"]; max_hold = e["max_hold"]
     allowed = e["allowed"]; cooldown = e["cooldown"]
     long = (direction == "LONG")
-    trades = []; last_sig = -cooldown - 1
+    # Serialize like the live EA: no new entry while a position is open, and
+    # cooldown is anchored on the prior trade's CLOSE (exit) bar, not the signal
+    # bar. last_exit is the bar index at which the previous position closed.
+    trades = []; last_exit = -cooldown - 1
 
     for bi in member_bi:
         if bi + 1 >= n: continue
         if allowed and int(sess[bi]) not in allowed: continue
-        if bi - last_sig < cooldown: continue
+        if bi - last_exit < cooldown: continue
         entry = op[bi + 1] if realistic and bi + 1 < n else cl[bi]
         if entry == 0: continue
         entry_ws = entry + spread if long else entry - spread
@@ -1563,13 +1585,19 @@ def _bt_worker_dir(args):
             int(e["snap_mtf"][bi]),
         )
 
+        # Charge trading costs in R: one round-turn commission per trade plus
+        # per-bar swap over the holding period. Subtracting from booked R (both
+        # WIN and LOSS) before recording flows the cost into PF/equity/DD.
+        cost_r = COMMISSION_R + SWAP_R_PER_BAR * bars_held
+        win_r  -= cost_r
+        loss_r -= cost_r
         if ht:
-            last_sig = bi
+            last_exit = bi + bars_held
             trades.append((bi, "WIN", round(win_r, 2), round(entry_ws, 2),
                            round(sl_v, 2), round(tp_v, 2),
                            direction, bars_held) + snap)
         elif hs:
-            last_sig = bi
+            last_exit = bi + bars_held
             trades.append((bi, "LOSS", round(loss_r, 2), round(entry_ws, 2),
                            round(sl_v, 2), round(tp_v, 2),
                            direction, bars_held) + snap)
@@ -1612,6 +1640,12 @@ def _calc_metrics(trades,member_count,trading_days,trades_df=None):
                 max_consec_losses=max_consec,
                 equity=equity,
                 member_count=member_count,
+                # REPORT-ONLY: post-rule trades / raw shape-cluster size. <1 means
+                # the genetic rule fired on fewer bars than the cluster; the EA's
+                # exported feature box is a superset, so live count inflates above
+                # this. TODO(follow-up): true box-vs-cluster recall = evaluate the
+                # exported box over the cluster regime mask (documented, not done).
+                signal_retention=round(total/member_count,3) if member_count else 0,
                 per_day=round(total/max(trading_days,1),2),
                 composite_score=round(composite,4))
 
@@ -2846,6 +2880,8 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
         f"; Pattern {pattern_no} — Cluster {cid} [{direction}] [{bidir_mode}]",
         f"; Train: WR={r.get('win_rate_',0)}%  Wilson={r.get('wilson_wr',0)}%"
         f"  PF={r.get('profit_factor',0)}  Score={r.get('composite_score',0)}",
+        f"; SignalRetention={r.get('signal_retention',0)} (report-only:"
+        f" post-rule trades / shape-cluster size; EA box is a superset → live inflates)",
         f"; Test:  WR={r.get('test_wr',0)}%  PF={r.get('test_pf',0)}"
         f"  Trades={r.get('test_trades',0)}",
         f"; SL={sl_pct*100:.3f}%  TP={tp_pct*100:.3f}%"
@@ -2962,6 +2998,11 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
         "; Force-close a position after this many bars if neither SL nor TP hit",
         "; (matches the simulator's MAX_HOLD_BARS). 0 = hold until SL/TP only.",
         f"MaxHoldBars={int(MAX_HOLD_BARS)}",
+        "; Trading costs in R (risk multiples), matching the simulator's",
+        "; COMMISSION_R / SWAP_R_PER_BAR. Commission = round-turn per trade;",
+        "; Swap = per bar held. 0.0 = no cost charged.",
+        f"Commission_R={float(COMMISSION_R):.6f}",
+        f"Swap_R_PerBar={float(SWAP_R_PER_BAR):.6f}",
     ]
 
     # Session filter — derive from session condition in rule if present
@@ -3452,12 +3493,13 @@ def main():
 
     # ── Validate on test ──────────────────────────────────────────────────────
     _stage("Validate (test)")
-    price_dists_te=compute_price_distributions(
-        df_test,idx_te,labels_te,n_cl,FORWARD_BARS)
+    # OOS-bias fix (E): do NOT re-fit SL/TP on test data. Reuse the TRAIN-fitted
+    # exit levels (price_dists_tr) as the quantile baseline so the OOS stage is a
+    # true hold-out (sltp_p1 overrides are already train-derived).
     bt_test=backtest_refined(
         df_test,idx_te,labels_te,
         {k:v for k,v in genetic_final.items() if isinstance(k[0],int)},
-        price_dists_te,FORWARD_BARS,nw,test_days,sltp_overrides=sltp_p1)
+        price_dists_tr,FORWARD_BARS,nw,test_days,sltp_overrides=sltp_p1)
 
     # ── Quality analysis ──────────────────────────────────────────────────────
     _stage("Quality Analysis")
@@ -3568,7 +3610,13 @@ def main():
             "test_trades_df": te.get("trades", pd.DataFrame()),
         })
 
-    final_results.sort(key=lambda r:r.get("composite_score",0),reverse=True)
+    # OOS-bias fix (D): prefer out-of-sample (test_pf, test_wr); fall back to
+    # TRAIN composite_score only when no test split exists (test_pf missing/0).
+    final_results.sort(
+        key=lambda r: (1, r.get("test_pf", 0), r.get("test_wr", 0))
+        if r.get("test_pf", 0) else (0, r.get("composite_score", 0), 0),
+        reverse=True,
+    )
     print(f"\n  {len(final_results)} patterns passed all filters")
 
     # ── Export ────────────────────────────────────────────────────────────────
@@ -3612,7 +3660,7 @@ def main():
               + ("  ⚠ MARGINAL" if r.get("marginal") else ""))
         print(f"  Train: WR={r['win_rate_']}% Wilson={r['wilson_wr']}% "
               f"PF={r['profit_factor']} Score={r['composite_score']} "
-              f"{r['per_day']}/day")
+              f"{r['per_day']}/day retain={r.get('signal_retention',0)} (report-only)")
         print(f"  Test:  WR={r['test_wr']}% PF={r['test_pf']} "
               f"({r['test_trades']} trades) Score={r['test_score']}")
         print(f"  {desc}")
@@ -3704,7 +3752,8 @@ def main():
             f"  CLUSTER {cid} [{direction}] [{r['bidir_mode']}]"
             + ("  ⚠ MARGINAL" if r.get("marginal") else ""),
             f"  Train: WR={r['win_rate_']}% Wilson={r['wilson_wr']}% "
-            f"PF={r['profit_factor']} Score={r['composite_score']} {r['per_day']}/day",
+            f"PF={r['profit_factor']} Score={r['composite_score']} {r['per_day']}/day "
+            f"retain={r.get('signal_retention',0)} (report-only)",
             f"  Test:  WR={r['test_wr']}% PF={r['test_pf']} "
             f"trades={r['test_trades']} "
             f"({round(r['test_trades']/max(test_days,1),2)}/day) "
