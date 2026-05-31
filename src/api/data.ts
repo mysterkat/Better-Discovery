@@ -129,6 +129,8 @@ export interface Mt5InstallResult {
 
 export interface Mt5ApplySetupRequest {
   symbol: string;
+  /** Optional multi-instrument basket; charts open for the (symbol × tf) cross-product. */
+  symbols?: string[];
   timeframes: string[];
   /** Subset of {BD_PinBar, BD_MacdNorm, …} — undefined = all 12 */
   indicators?: string[];

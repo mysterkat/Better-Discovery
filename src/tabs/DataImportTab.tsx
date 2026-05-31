@@ -135,8 +135,10 @@ export default function DataImportTab() {
     setApplying(true);
     try {
       const tfs = rows.map((r) => `${r.prefix.toUpperCase()}${r.time_value}`);
+      const allSyms = symbol.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
       const r = await applyMt5Setup({
-        symbol: (symbol.split(/[\s,]+/)[0] || symbol).trim().toUpperCase(),
+        symbol: allSyms[0] || symbol,
+        symbols: allSyms.length > 1 ? allSyms : undefined,
         timeframes: tfs,
         wait_for_ack_s: 10.0,
       });

@@ -31,6 +31,10 @@ from ..schemas.discovery import DataImportRequest, MT5FetchRequest, MT5FetchMany
 # ── v0.7.0: MT5 indicator install + chart auto-setup payloads ────────────────
 class MT5ApplySetupRequest(BaseModel):
     symbol: str = Field(..., min_length=1, max_length=32)
+    # Multi-instrument basket; when present, charts open for the
+    # (symbol × timeframe) cross-product. `symbol` is kept as a legacy
+    # fallback (always set to symbols[0] by the UI).
+    symbols: list[str] | None = None
     timeframes: list[str] = Field(..., min_length=1)
     indicators: list[str] | None = None
     htf_for_div: str = "M15"
@@ -145,6 +149,7 @@ def mt5_apply_setup(req: MT5ApplySetupRequest) -> dict[str, Any]:
     try:
         cfg = mt5_setup_bridge.apply_chart_setup(
             symbol=req.symbol,
+            symbols=req.symbols,
             timeframes=req.timeframes,
             indicators=req.indicators,
             htf_for_div=req.htf_for_div,

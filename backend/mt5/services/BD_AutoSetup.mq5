@@ -14,11 +14,15 @@
 //|  ------------------------------                                  |
 //|  {                                                               |
 //|    "version": <int, monotonically increasing>,                    |
-//|    "symbol":  "XAUUSD",                                          |
+//|    "symbols": ["XAUUSD", "XAGUSD", "DXY"],   // multi-instrument |
+//|    "symbol":  "XAUUSD",                       // legacy fallback |
 //|    "timeframes": ["M5", "M15", "H1"],                             |
 //|    "indicators": ["BD_PinBar", "BD_RollingSharpe", ...],          |
 //|    "htf_for_div": "M15"                                          |
 //|  }                                                               |
+//|  "symbols" takes precedence over "symbol"; charts are opened per |
+//|  (symbol, timeframe) cross-product. SymbolSelect() is called per  |
+//|  symbol so Market Watch picks it up before ChartOpen.             |
 //|                                                                  |
 //|  ACK FILE bd_setup_ack.json                                      |
 //|  --------------------------                                      |
@@ -35,7 +39,7 @@
 //|  ("AutoTrading" button). Leave it running — the host app drives.  |
 //+------------------------------------------------------------------+
 #property copyright "BETTER DISCOVERY v0.7"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 input int    InpPollIntervalMs = 1000;   // How often to re-stat the JSON file
@@ -107,27 +111,49 @@ void ProcessConfig()
       return;
      }
 
-   string symbol = JsonStr(text, "symbol", _Symbol);
+   // Multi-symbol support: prefer "symbols":[...] (multi-instrument basket),
+   // fall back to legacy "symbol":"..." so older bd_setup.json still works.
+   string symbolsCsv = JsonStrArrayJoin(text, "symbols", ",", "");
+   string symbolSingle = JsonStr(text, "symbol", _Symbol);
    string tfs    = JsonStrArrayJoin(text, "timeframes", ",", "M5");
    string inds   = JsonStrArrayJoin(text, "indicators", ",", "");
    string htfDiv = JsonStr(text, "htf_for_div", "M15");
 
-   PrintFormat("BD_AutoSetup: applying version=%d symbol=%s tfs=[%s] htfDiv=%s",
-               version, symbol, tfs, htfDiv);
+   string symList[];
+   int nSym = (symbolsCsv == "") ? 0 : StringSplit(symbolsCsv, ',', symList);
+   if(nSym == 0)
+     {
+      ArrayResize(symList, 1);
+      symList[0] = symbolSingle;
+      nSym = 1;
+     }
+
+   PrintFormat("BD_AutoSetup: applying version=%d symbols=[%s] tfs=[%s] htfDiv=%s",
+               version, (symbolsCsv == "" ? symbolSingle : symbolsCsv), tfs, htfDiv);
 
    string opened = "";
    string errors = "";
-   string parts[];
-   int n = StringSplit(tfs, ',', parts);
-   for(int i = 0; i < n; i++)
+   string tfParts[];
+   int nTf = StringSplit(tfs, ',', tfParts);
+   for(int sIdx = 0; sIdx < nSym; sIdx++)
      {
-      ENUM_TIMEFRAMES tf = StrToTimeframe(parts[i]);
-      if(tf == PERIOD_CURRENT) { errors += StringFormat("\"unknown TF '%s'\",", parts[i]); continue; }
-      long chartId = OpenOrFocus(symbol, tf);
-      if(chartId == 0) { errors += StringFormat("\"failed to open %s/%s\",", symbol, parts[i]); continue; }
-      AttachIndicators(chartId, htfDiv, inds);
-      opened += StringFormat("{\"symbol\":\"%s\",\"timeframe\":\"%s\",\"chart_id\":%I64d,\"ok\":true},",
-                             symbol, parts[i], chartId);
+      string symbol = symList[sIdx];
+      // Ensure the symbol exists in Market Watch — required before ChartOpen.
+      if(!SymbolSelect(symbol, true))
+        {
+         errors += StringFormat("\"unknown symbol '%s'\",", symbol);
+         continue;
+        }
+      for(int i = 0; i < nTf; i++)
+        {
+         ENUM_TIMEFRAMES tf = StrToTimeframe(tfParts[i]);
+         if(tf == PERIOD_CURRENT) { errors += StringFormat("\"unknown TF '%s'\",", tfParts[i]); continue; }
+         long chartId = OpenOrFocus(symbol, tf);
+         if(chartId == 0) { errors += StringFormat("\"failed to open %s/%s\",", symbol, tfParts[i]); continue; }
+         AttachIndicators(chartId, htfDiv, inds);
+         opened += StringFormat("{\"symbol\":\"%s\",\"timeframe\":\"%s\",\"chart_id\":%I64d,\"ok\":true},",
+                                symbol, tfParts[i], chartId);
+        }
      }
 
    WriteAck(version, opened, errors);

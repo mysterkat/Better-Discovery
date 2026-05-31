@@ -258,14 +258,20 @@ def apply_chart_setup(
     timeframes: list[str],
     indicators: list[str] | None = None,
     htf_for_div: str = "M15",
+    symbols: list[str] | None = None,
 ) -> dict[str, Any]:
     """Write ``bd_setup.json`` so the in-MT5 helper EA opens charts.
 
     Args:
-        symbol:        Broker-side ticker, e.g. ``"XAUUSD"``.
+        symbol:        Broker-side ticker (single-symbol legacy path).
         timeframes:    Labels like ``["M5", "M15", "H1"]``.
         indicators:    Optional whitelist — defaults to all 12.
         htf_for_div:   Timeframe label passed to ``BD_HtfDiv`` (default M15).
+        symbols:       Optional multi-symbol basket, e.g.
+                       ``["XAUUSD", "XAGUSD", "DXY"]``. When supplied, the
+                       helper EA opens charts for the (symbol × timeframe)
+                       cross-product. ``symbol`` is still emitted as a fallback
+                       so older AutoSetup builds at least open the first symbol.
 
     Returns dict containing the version we wrote (used by ``wait_for_ack``).
     """
@@ -278,13 +284,18 @@ def apply_chart_setup(
         except Exception:
             prev = 0
     new_version = prev + 1
-    payload = {
+    sym_list = [s.strip().upper() for s in (symbols or []) if s and s.strip()]
+    payload: dict[str, Any] = {
         "version":     new_version,
-        "symbol":      symbol,
+        # Legacy single-symbol field — kept so older BD_AutoSetup.ex5 still
+        # opens at least the first symbol. The new EA reads "symbols" first.
+        "symbol":      (sym_list[0] if sym_list else symbol),
         "timeframes":  list(timeframes),
         "indicators":  list(indicators or _INDICATOR_STEMS),
         "htf_for_div": htf_for_div,
     }
+    if sym_list:
+        payload["symbols"] = sym_list
     cfg_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return {"version": new_version, "config_path": str(cfg_file)}
 

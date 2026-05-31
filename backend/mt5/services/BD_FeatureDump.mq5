@@ -27,7 +27,7 @@
 //|  4. Copy bd_feature_dump.csv to your validation folder.           |
 //+------------------------------------------------------------------+
 #property copyright "BETTER DISCOVERY v0.7"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 input int    InpBars     = 5000;          // Bars of history to dump
@@ -37,6 +37,15 @@ input ENUM_TIMEFRAMES InpMtfTF1 = PERIOD_M15;
 input ENUM_TIMEFRAMES InpMtfTF2 = PERIOD_H1;
 input ENUM_TIMEFRAMES InpMtfTF3 = PERIOD_CURRENT;
 input ENUM_TIMEFRAMES InpMtfTF4 = PERIOD_CURRENT;
+// v1.10 — Research feature parity. Turn ON when Python's USE_RESEARCH_FEATURES
+// is enabled so the dump contains the same columns. Default OFF so the
+// historical 32-column validation schema stays byte-identical.
+input bool   InpDumpTimeFeatures = false; // Append features_ext "time" block
+// NOTE: features_ext "structure" (swings/BOS/FVG/sweeps) and "normalize"
+// (rolling z-score / rank) blocks are NOT dumped here yet — they require
+// non-trivial multi-bar logic + rule-table changes in PatternDiscoveryEA.
+// Rules using those features therefore cannot be validated bar-for-bar OR
+// live-traded yet; see docs/DISCOVERY_FIDELITY_AUDIT.md.
 
 const string IND_DIR = "BetterDiscovery";
 
@@ -139,20 +148,98 @@ double Buf(int handle, int buffer, int s)
    return v[0];
   }
 
+// ───────────────────────────────────────────────────────────────────────────
+// features_ext.add_time_features parity
+// ───────────────────────────────────────────────────────────────────────────
+// Must mirror features_ext.py exactly:
+//   - SERVER_UTC_OFFSET = 2  (hardcoded in features_ext; if the broker is
+//     not UTC+2 the time features will drift but the column shape is correct)
+//   - Sessions (broker-server hour):
+//       0=ASIAN (02-07), 1=LONDON (07-12), 2=NY (12-17), 3=OVERLAP (17-21),
+//       4=OFF (the implicit baseline, no one-hot column)
+// MT5's iTime() is already in broker server time, but features_ext treats
+// CSV timestamps as UTC and adds +2, so we add 0 here when broker IS UTC+2.
+// If your broker is UTC+3 the +2 model will be off by 1; document, don't fix.
+const int SESSION_ASIAN   = 0;
+const int SESSION_LONDON  = 1;
+const int SESSION_NY      = 2;
+const int SESSION_OVERLAP = 3;
+const int SESSION_OFF     = 4;
+
+int SessionId(int hour)
+  {
+   if(hour >= 2  && hour < 7)  return SESSION_ASIAN;
+   if(hour >= 7  && hour < 12) return SESSION_LONDON;
+   if(hour >= 12 && hour < 17) return SESSION_NY;
+   if(hour >= 17 && hour < 21) return SESSION_OVERLAP;
+   return SESSION_OFF;
+  }
+
+// Track the start time of the current contiguous session block so we can
+// emit minutes_since_session_open. Reset on each Dump() call.
+datetime g_blockStart = 0;
+int      g_lastSession = -1;
+
+string AppendTimeFeatures(datetime t)
+  {
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   int hour = dt.hour;        // broker server hour (see header note above)
+   int dow  = dt.day_of_week; // MT5: 0=Sun..6=Sat ; Python: 0=Mon..6=Sun
+   // Convert MT5 dow (Sun=0..Sat=6) to Python dow (Mon=0..Sun=6) so the
+   // dow_sin/dow_cos values match features_ext exactly.
+   int dow_py = (dow + 6) % 7;
+
+   int sess = SessionId(hour);
+   if(sess != g_lastSession)
+     {
+      g_blockStart = t;
+      g_lastSession = sess;
+     }
+   double mins_since_open = (double)(t - g_blockStart) / 60.0;
+
+   double hour_sin = MathSin(2.0 * M_PI * hour / 24.0);
+   double hour_cos = MathCos(2.0 * M_PI * hour / 24.0);
+   double dow_sin  = MathSin(2.0 * M_PI * dow_py / 7.0);
+   double dow_cos  = MathCos(2.0 * M_PI * dow_py / 7.0);
+
+   return StringFormat(
+      ",%d,%d,%d,%d,%d,%d,%d,%.3f,%.6f,%.6f,%.6f,%.6f",
+      hour, dow_py, sess,
+      (sess == SESSION_ASIAN)   ? 1 : 0,
+      (sess == SESSION_LONDON)  ? 1 : 0,
+      (sess == SESSION_NY)      ? 1 : 0,
+      (sess == SESSION_OVERLAP) ? 1 : 0,
+      mins_since_open,
+      hour_sin, hour_cos, dow_sin, dow_cos);
+  }
+
 bool Dump()
   {
    int f = FileOpen(InpOutFile, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
    if(f == INVALID_HANDLE)
      { PrintFormat("FileOpen failed: %d", GetLastError()); return false; }
 
-   // CSV header
-   FileWriteString(f,
+   // Reset session-block tracker so minutes_since_session_open is computed
+   // from a clean state regardless of any prior partial dump.
+   g_blockStart = 0;
+   g_lastSession = -1;
+
+   // CSV header — base 32 columns, optionally followed by the 11 time columns
+   // from features_ext.add_time_features (column ORDER matches Python exactly).
+   string header =
        "time,open,high,low,close,"
        "rsi14,macd_norm,atr_pct,bb_width,trend,mtf_bull_score,"
        "body_pct,rng_atr,vol_ratio,vol_body_conf,regime,vol_price_div,bb_expanding,"
        "prev_sess_bias,poc_dist,bull,uwk_pct,lwk_pct,"
        "stoch_k,stoch_d,pin_bar,inside_bar,outside_bar,htf_div,"
-       "rolling_sharpe,sd_zone,vwap_dist\n");
+       "rolling_sharpe,sd_zone,vwap_dist";
+   if(InpDumpTimeFeatures)
+      header += ",hour_of_day,day_of_week,session,sess_asian,sess_london,"
+                "sess_ny,sess_overlap,minutes_since_session_open,"
+                "hour_sin,hour_cos,dow_sin,dow_cos";
+   header += "\n";
+   FileWriteString(f, header);
 
    int n = MathMin(InpBars, Bars(_Symbol, _Period) - 220);
    // shift = n .. 1 (skip live bar 0)
@@ -219,7 +306,7 @@ bool Dump()
          "%.6f,%.6f,%.6f,%.6f,%.0f,%.0f,%.0f,"
          "%.0f,%.6f,%.0f,%.6f,%.6f,"
          "%.4f,%.4f,%.6f,%.0f,%.0f,%.0f,"
-         "%.6f,%.0f,%.6f\n",
+         "%.6f,%.0f,%.6f",
          TimeToString(t, TIME_DATE | TIME_MINUTES | TIME_SECONDS),
          o, h, l, c,
          rsi14, mn, atr_pct, bb_width, trend, mtfb,
@@ -227,7 +314,9 @@ bool Dump()
          psb, pocd, bull, uwk_pct, lwk_pct,
          stk, std_, pin, inside, outside, hd,
          rs, sdz, vwd);
-      FileWriteString(f, line);
+      if(InpDumpTimeFeatures)
+         line += AppendTimeFeatures(t);
+      FileWriteString(f, line + "\n");
      }
    FileClose(f);
    return true;
