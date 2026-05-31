@@ -229,6 +229,11 @@ USE_EXT_FEATURES        = set()    # e.g. {'structure','time','normalize'}
 USE_TRIPLE_BARRIER      = False
 USE_BETA_NEUTRAL_LABELS = False
 FORWARD_BARS_SWEEP      = []       # e.g. [12, 24, 48]
+# UI-friendly toggles (bool → JSON-serialisable, so spawn-pool workers inherit
+# them via _app_override.json; sets/lists do not serialise). These let the app
+# drive the research bundle without the UI needing set/list field types.
+USE_RESEARCH_FEATURES   = False    # True => ext-feature bundle {'time','structure','normalize'}
+USE_FORWARD_SWEEP       = False    # True => sweep [12,24,48,96] when FORWARD_BARS_SWEEP is empty
 #
 # ── RESEARCH PROFILE (copy-paste to enable the full edge bundle) ─────────────
 # To turn on the experimental research stack, set the four flags like so
@@ -696,6 +701,20 @@ def add_v5_features(df):
 # the worker MUST receive the list explicitly, never read USE_EXT_FEATURES).
 _EXT_FEATURE_COLS_CACHE = None   # None = not computed yet; list once resolved
 
+def _resolved_ext_enable():
+    """Resolve the active extended-feature set.
+
+    Explicit USE_EXT_FEATURES wins (power users / file edits). Otherwise the
+    UI-friendly USE_RESEARCH_FEATURES bool turns on a curated bundle. Read at
+    call time so UI overrides AND spawn workers (which inherit the bool via
+    _app_override.json) both resolve identically. Returns a set (may be empty)."""
+    explicit = set(globals().get("USE_EXT_FEATURES", set()) or set())
+    if explicit:
+        return explicit
+    if bool(globals().get("USE_RESEARCH_FEATURES", False)):
+        return {"time", "structure", "normalize"}
+    return set()
+
 def _ext_feature_cols():
     """Return the ordered list of column names add_all_ext_features adds for the
     currently-enabled USE_EXT_FEATURES set (read at call time so UI overrides
@@ -706,7 +725,7 @@ def _ext_feature_cols():
     the first successful resolution.
     """
     global _EXT_FEATURE_COLS_CACHE
-    enable=set(globals().get("USE_EXT_FEATURES", set()) or set())
+    enable=_resolved_ext_enable()
     if not enable:
         return []
     if _EXT_FEATURE_COLS_CACHE is not None:
@@ -740,7 +759,7 @@ def _maybe_add_ext_features(df):
     """Append features_ext columns to `df` when USE_EXT_FEATURES is non-empty.
     Lazy-imports features_ext; on ImportError prints a note and returns df
     unchanged (current behaviour). No-op when the flag set is empty."""
-    enable=set(globals().get("USE_EXT_FEATURES", set()) or set())
+    enable=_resolved_ext_enable()
     if not enable:
         return df
     try:
@@ -1337,6 +1356,8 @@ def select_forward_horizon(df, indices, labels, n_cl, candidates):
     (FORWARD_BARS, None) when the sweep is disabled.
     """
     cands=[int(c) for c in (candidates or []) if int(c) >= 1]
+    if not cands and bool(globals().get("USE_FORWARD_SWEEP", False)):
+        cands=[12, 24, 48, 96]   # UI-friendly default sweep
     if not cands:
         return int(globals().get("FORWARD_BARS", 24)), None
     table=[]
@@ -1424,6 +1445,14 @@ def analyze_bidirectionality(df,indices,labels,n_cl,price_dists,fwd):
             mode = "LONG_ONLY"; discrim = None
         elif _force == "short_only":
             mode = "SHORT_ONLY"; discrim = None
+        elif _force == "bidirectional":
+            # Forced bidirectional: trade BOTH sides, decided per-bar by the
+            # discriminator, even if neither side cleared the natural BIDIR
+            # thresholds. Pair with USE_BETA_NEUTRAL_LABELS, else this just adds
+            # losing trades on the weaker side.
+            mode = "BIDIRECTIONAL"
+            discrim = find_direction_discriminator(
+                df, member_bi, col_arrays, long_trades, short_trades)
         elif long_ok and short_ok:
             mode="BIDIRECTIONAL"
             # Find direction discriminator

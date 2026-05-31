@@ -250,12 +250,31 @@ PARAM_META: dict[str, ParamMeta] = {
     "PASS2_QUANTILE_HI":    ParamMeta("Quantile High (P2)",    "Genetic Pass 2", "float", min=0.55, max=0.95, step=0.05),
     # ── Bidirectional ───────────────────────────────────────────────────────
     "FORCE_DIRECTION":       ParamMeta("Force Direction",      "Bidirectional", "str",
-                                        "Lock every cluster to a single trade direction. "
-                                        "Use long_only or short_only when your MT5 EA is configured for a single side — "
-                                        "this prevents the bidirectional discriminator from being emitted, "
-                                        "guaranteeing the .set parity with single-direction MT5 runs. "
+                                        "Lock every cluster's trade direction. long_only / short_only match a "
+                                        "single-side MT5 EA (no discriminator emitted). bidirectional forces BOTH "
+                                        "sides on every cluster via a per-bar discriminator — pair with Beta-Neutral "
+                                        "Labels, else you just add losing trades on the weaker side. "
                                         "auto (default) = empirical per-cluster classification.",
-                                        options=["auto", "long_only", "short_only"]),
+                                        options=["auto", "long_only", "short_only", "bidirectional"]),
+    # ── Research (experimental) ───────────────────────────────────────────────
+    # All default OFF → a normal run is unchanged. These surface the edge-finding
+    # toolkit so you can hunt for signal from the UI without editing source.
+    "USE_BETA_NEUTRAL_LABELS": ParamMeta("Beta-Neutral Labels", "Research (experimental)", "bool",
+                                        "Subtract market drift when judging direction, so longs/shorts are scored on "
+                                        "PATTERN merit not the instrument's trend. Fixes the 'everything is LONG_ONLY' "
+                                        "bias and makes genuine bidirectional setups possible."),
+    "USE_RESEARCH_FEATURES":  ParamMeta("Enhanced Features",    "Research (experimental)", "bool",
+                                        "Add market-structure (swings/BOS/FVG/sweeps), session/time, and "
+                                        "rank-normalized features to the clustering inputs — more information for the "
+                                        "engine to separate winners from losers than plain OHLC indicators."),
+    "USE_TRIPLE_BARRIER":     ParamMeta("Triple-Barrier Labels", "Research (experimental)", "bool",
+                                        "Label trades by which of TP / SL / time-limit hits first, with "
+                                        "volatility-scaled barriers (Lopez de Prado). More honest than fixed "
+                                        "quantile stops."),
+    "USE_FORWARD_SWEEP":      ParamMeta("Sweep Forward Horizon", "Research (experimental)", "bool",
+                                        "Try forward horizons 12/24/48/96 bars and keep the strongest sustained-move "
+                                        "one, instead of the fixed 24. Use when 'sustained=0%' says the current "
+                                        "horizon is noise."),
     "BIDIR_MIN_WR":          ParamMeta("Min Win Rate",         "Bidirectional", "float",
                                         "Min win-rate % to run direction check", min=45.0, max=70.0, step=0.5),
     "BIDIR_MIN_TRADES":      ParamMeta("Min Trades",           "Bidirectional", "int",
