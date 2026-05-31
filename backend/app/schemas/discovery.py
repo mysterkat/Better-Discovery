@@ -33,6 +33,16 @@ class MT5FetchRequest(BaseModel):
     clear_existing: bool = False
 
 
+class MT5FetchManyRequest(BaseModel):
+    """Fetch a basket of symbols into ONE folder (multi-instrument)."""
+    symbols: list[str]          # e.g. ["XAUUSD", "XAGUSD", "DXY"]
+    save_folder: str = ""       # empty → use default userdata/hist_data/
+    tf_specs: list[TfSpec]
+    # Wipes the folder ONCE before the first symbol; the rest accumulate
+    # (filenames are {symbol}_{tf}.csv so different symbols never collide).
+    clear_existing: bool = False
+
+
 class MqlExportRequest(BaseModel):
     """Request body for POST /mql/export."""
 

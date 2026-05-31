@@ -25,7 +25,7 @@ from ..jobs.manager import JOBS
 from ..jobs.runners import run_in_thread
 from ..paths import USER_DATA
 from ..schemas.common import JobRef
-from ..schemas.discovery import DataImportRequest, MT5FetchRequest
+from ..schemas.discovery import DataImportRequest, MT5FetchRequest, MT5FetchManyRequest
 
 
 # ── v0.7.0: MT5 indicator install + chart auto-setup payloads ────────────────
@@ -79,6 +79,27 @@ def mt5_fetch(req: MT5FetchRequest) -> JobRef:
         lambda: mt5_bridge.fetch_historical(
             req.symbol, req.save_folder, tf_specs,
             clear_existing=clear_existing,
+        ),
+    )
+    return JobRef(job_id=job.job_id, status=job.status)
+
+
+@router.post("/data/mt5/fetch-many", response_model=JobRef)
+def mt5_fetch_many(req: MT5FetchManyRequest) -> JobRef:
+    """Fetch a BASKET of symbols into one folder (multi-instrument). Clears once
+    before the first symbol; the rest accumulate so the cross-instrument
+    discovery has gold + silver + … side by side."""
+    tf_specs = [s.model_dump() for s in req.tf_specs]
+    syms = [s.strip().upper() for s in req.symbols if s.strip()]
+    if not syms:
+        raise HTTPException(400, "no symbols provided")
+    job = JOBS.create(kind="mt5_fetch", meta={"symbols": syms, "n_tf": len(tf_specs)})
+    clear_existing = req.clear_existing
+    save_folder = req.save_folder
+    run_in_thread(
+        job,
+        lambda: mt5_bridge.fetch_many_symbols(
+            syms, save_folder, tf_specs, clear_existing=clear_existing,
         ),
     )
     return JobRef(job_id=job.job_id, status=job.status)

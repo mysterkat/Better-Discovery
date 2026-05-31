@@ -83,14 +83,54 @@ def check_connection() -> dict[str, Any]:
     }
 
 
+def candles_to_trading_days(prefix: str, time_value: int, candle_count: int) -> int:
+    """
+    Inverse of ``trading_days_to_candles``: derive a calendar-span estimate (in
+    days) from a raw candle count for the given TF. Used only as a fallback when
+    a caller supplies ``candle_count`` but no explicit ``trading_days`` span.
+    Always rounds UP so the derived span never falls short of the candle count.
+    """
+    if prefix == "m":
+        per_day = 1440.0 / time_value
+    elif prefix == "h":
+        per_day = 24.0 / time_value
+    elif prefix in ("d", "D"):
+        per_day = 1.0
+    elif prefix == "W":
+        per_day = 1.0 / 5.0
+    elif prefix == "M":
+        per_day = 1.0 / 21.0
+    else:
+        per_day = 1.0
+    return int(math.ceil(candle_count / per_day))
+
+
 def _download_one(mt5: Any, symbol: str, tf_const: int, label: str,
-                  candle_count: int, folder: str) -> dict[str, Any]:
+                  span_days: int, folder: str) -> dict[str, Any]:
+    """
+    Pull historical bars for one symbol/timeframe using ``copy_rates_range``.
+
+    ``copy_rates_from_pos`` only returns bars already in the terminal's LOCAL
+    cache, so deep-history requests silently truncate (e.g. 1000d M15 → 372d).
+    ``copy_rates_range`` forces the terminal to serve the full requested window
+    from the server, so the broker's true depth is honoured.
+
+    ``span_days`` is the requested CALENDAR span: ``date_from`` is set to
+    ``now_utc - span_days`` and ``date_to`` to ``now_utc``. The warm-up
+    ``copy_rates_from_pos`` call is kept so the symbol is primed before the
+    range request. The on-disk CSV format (datetime ``time`` index +
+    ``open,high,low,close[,volume]`` columns) is preserved exactly.
+    """
     import time as _time
+    from datetime import datetime, timedelta, timezone
     import pandas as pd
 
     mt5.copy_rates_from_pos(symbol, tf_const, 0, 99999)   # warm-up cache
     _time.sleep(2)
-    rates = mt5.copy_rates_from_pos(symbol, tf_const, 0, candle_count)
+    # MT5 interprets range datetimes as UTC; use timezone-aware UTC bounds.
+    date_to   = datetime.now(timezone.utc)
+    date_from = date_to - timedelta(days=max(int(span_days), 1))
+    rates = mt5.copy_rates_range(symbol, tf_const, date_from, date_to)
     if rates is None or len(rates) == 0:
         return {
             "label": label, "ok": False,
@@ -109,6 +149,17 @@ def _download_one(mt5: Any, symbol: str, tf_const: int, label: str,
     filename = f"{symbol.lower()}_{label}.csv"
     path     = os.path.join(folder, filename)
     df.to_csv(path)
+    # Surface the broker's TRUE depth when the window came back short of ask.
+    actual_from = df.index[0]
+    actual_to   = df.index[-1]
+    actual_days = (actual_to - actual_from).days
+    if actual_days < int(span_days) - 1:
+        print(
+            f"    {label.upper()}: requested {int(span_days)}d but broker "
+            f"returned {actual_days}d ({actual_from} → {actual_to}, "
+            f"{len(df)} bars)",
+            flush=True,
+        )
     return {"label": label, "ok": True, "error": None, "candles": len(df), "path": path}
 
 
@@ -121,6 +172,9 @@ def main(
     Connect to MT5 and download historical data for each requested timeframe.
 
     tf_specs: list of {prefix: str, time_value: int, trading_days: int}
+        ``trading_days`` is the requested calendar span and is threaded straight
+        down to the range fetch. If a spec omits ``trading_days`` but supplies
+        ``candle_count``, the span is derived from it via the per-TF rate.
 
     Returns:
         {ok, terminal, save_folder, files: [{label, ok, candles, path, error}]}
@@ -152,7 +206,16 @@ def main(
         try:
             prefix     = str(spec["prefix"])
             time_value = int(spec["time_value"])
-            days       = int(spec["trading_days"])
+            # Prefer an explicit calendar span; otherwise derive one from a
+            # supplied candle_count so callers passing either shape still work.
+            if spec.get("trading_days") is not None:
+                days = int(spec["trading_days"])
+            elif spec.get("candle_count") is not None:
+                days = candles_to_trading_days(
+                    prefix, time_value, int(spec["candle_count"])
+                )
+            else:
+                raise ValueError("spec needs 'trading_days' or 'candle_count'")
             label      = tf_label(prefix, time_value)
             # Progress marker the bridge parses to update job.stage_*
             # Format must match `^\[(\d+)/(\d+)\]\s*(.+)$` — keep it stable.
@@ -163,8 +226,7 @@ def main(
             tf_const = getattr(mt5, attr_name, None)
             if tf_const is None:
                 raise ValueError(f"MT5 has no attribute {attr_name}")
-            candles = trading_days_to_candles(prefix, time_value, days)
-            res = _download_one(mt5, symbol, tf_const, label, candles, save_folder)
+            res = _download_one(mt5, symbol, tf_const, label, days, save_folder)
         except Exception as exc:
             res = {
                 "label": spec.get("prefix", "?") + str(spec.get("time_value", "")),
@@ -178,4 +240,34 @@ def main(
         "terminal": terminal_str,
         "save_folder": save_folder,
         "files": files,
+    }
+
+
+def fetch_many(
+    symbols: list[str],
+    tf_specs: list[dict[str, Any]],
+    save_folder: str,
+) -> dict[str, Any]:
+    """
+    Download the same set of timeframes for a basket of symbols.
+
+    Thin loop over ``main`` — one MT5 connect/shutdown cycle per symbol — so the
+    multi-instrument basket reuses the identical range-fetch path (and therefore
+    the identical CSV format). A failure for one symbol does not abort the rest.
+
+    tf_specs: same shape as ``main`` (see its docstring).
+
+    Returns:
+        {ok, symbols: {<symbol>: <result-from-main>}}
+        ``ok`` is True only if every symbol's pull fully succeeded.
+    """
+    results: dict[str, Any] = {}
+    for symbol in symbols:
+        try:
+            results[symbol] = main(symbol, save_folder, tf_specs)
+        except Exception as exc:  # pragma: no cover - defensive; main rarely raises
+            results[symbol] = {"ok": False, "error": str(exc), "files": []}
+    return {
+        "ok": all(r.get("ok") for r in results.values()) if results else False,
+        "symbols": results,
     }

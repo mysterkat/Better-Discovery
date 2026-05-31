@@ -104,6 +104,13 @@ input double SL_Pct              = 0.005220;
 input double TP_Pct              = 0.003630;
 input double Lots                = 0.10;
 
+//--- Trading costs (in R = risk multiples), mirroring the discovery simulator's
+//    COMMISSION_R / SWAP_R_PER_BAR so live results stay aligned with the .set's
+//    scored metrics. Commission_R = round-turn cost per trade; Swap_R_PerBar =
+//    cost per bar held. Defaults 0.0 = no cost applied.
+input double Commission_R        = 0.0;
+input double Swap_R_PerBar       = 0.0;
+
 //--- Cooldown
 input int    CooldownBars        = 3;
 
@@ -678,14 +685,35 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 
    double dealProfit = deal.Profit() + deal.Swap() + deal.Commission();
 
+   //--- Apply the discovery simulator's MODELED costs (Commission_R round-turn
+   //    + Swap_R_PerBar * bars held) so the live daily-loss gate matches the
+   //    .set's scored metrics. These are in R; convert to money via the same
+   //    rValue used below. NOTE: deal.Swap()/deal.Commission() above are the
+   //    broker's REAL costs already in dealProfit — these modeled costs are an
+   //    ADDITIONAL synthetic charge that exists only to mirror the simulator.
+   //    Leave both inputs at 0.0 to avoid double-charging against a broker that
+   //    already reports real swap/commission.
+   double modeledCostR = 0.0;
+   if(Commission_R > 0.0 || Swap_R_PerBar > 0.0)
+     {
+      int    barsHeld = (g_entryBarTime > 0)
+                        ? iBarShift(_Symbol, PERIOD_CURRENT, g_entryBarTime, false) : 0;
+      modeledCostR = Commission_R + Swap_R_PerBar * barsHeld;
+     }
+
    //--- Update daily loss counter (track losses in R units)
-   if(dealProfit < 0.0 && g_slDist > 0.0)
+   if(g_slDist > 0.0)
      {
       double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
       double tickSize   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
       double rValue     = (tickSize > 0.0) ? Lots * g_slDist / tickSize * tickValue : 0.0;
       if(rValue > 0.0)
-         g_dailyLossR += MathAbs(dealProfit) / rValue;
+        {
+         // Charge the modeled cost as additional money loss, then book net.
+         double dealProfitNet = dealProfit - modeledCostR * rValue;
+         if(dealProfitNet < 0.0)
+            g_dailyLossR += MathAbs(dealProfitNet) / rValue;
+        }
      }
 
    //--- Set cooldown from transaction (immediate, not waiting for next tick)

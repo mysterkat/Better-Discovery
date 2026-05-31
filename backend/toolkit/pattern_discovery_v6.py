@@ -187,12 +187,76 @@ MEANINGFUL_SUSTAIN_BARS = 4     # and hold for this many bars
 SPREAD_PTS              = 0.30
 REALISTIC_ENTRY         = True
 MAX_HOLD_BARS           = 32
+# Per-trade trading costs, expressed in R (risk multiples) so they subtract
+# directly from booked outcomes. COMMISSION_R = round-turn commission charged
+# once per trade; SWAP_R_PER_BAR = financing/swap charged per bar held.
+# Both default 0.0 → behaviour unchanged until a non-zero value is set.
+COMMISSION_R            = 0.0
+SWAP_R_PER_BAR          = 0.0
 ALLOWED_SESSIONS        = []
 COOLDOWN_BARS           = 4    # FTMO: longer cooldown → fewer clustered losses
+
+# ── RESEARCH EXTENSIONS (v6.1) ───────────────────────────────────────────────
+# Optional research modules (features_ext.py / labels_ext.py) wired in behind
+# these flags. ALL DEFAULT OFF — with the defaults below a run is byte-identical
+# to the historical engine (the gated code never executes, and the modules are
+# only imported when a flag is set). Flip the flags (or override them from the
+# UI / a wrapper) to enable the experimental "edge bundle".
+#
+# USE_EXT_FEATURES      : set of features_ext block tokens to append to the
+#                         feature matrix used for clustering. Empty set = OFF.
+#                         Valid tokens: {'structure','time','normalize',
+#                         'cross_asset'}. The 'rank' idea maps to 'normalize'.
+#                         When non-empty, add_all_ext_features() is called in the
+#                         feature-build path AND the produced columns are spliced
+#                         into the encoded vector X (else they cannot influence
+#                         clustering).
+# USE_TRIPLE_BARRIER    : route the per-cluster price-distribution / forward-move
+#                         stage through labels_ext.triple_barrier (ATR-scaled
+#                         López-de-Prado barriers) instead of the raw MFE/MAE
+#                         percentile sizing. OFF = current behaviour.
+# USE_BETA_NEUTRAL_LABELS: when sizing/scoring the forward move, subtract the
+#                         self-detrended drift (labels_ext.beta_neutral_forward_
+#                         return) so "long-bias == uptrend" is removed. OFF =
+#                         current behaviour. (If both label flags are set,
+#                         triple_barrier wins for SL/TP sizing; beta-neutral only
+#                         annotates the drift-adjusted direction tally.)
+# FORWARD_BARS_SWEEP    : list of forward horizons to evaluate; the engine keeps
+#                         the horizon with the strongest sustained-move signal
+#                         and reports the choice. Empty list = OFF (use the
+#                         single fixed FORWARD_BARS, unchanged behaviour).
+USE_EXT_FEATURES        = set()    # e.g. {'structure','time','normalize'}
+USE_TRIPLE_BARRIER      = False
+USE_BETA_NEUTRAL_LABELS = False
+FORWARD_BARS_SWEEP      = []       # e.g. [12, 24, 48]
+# UI-friendly toggles (bool → JSON-serialisable, so spawn-pool workers inherit
+# them via _app_override.json; sets/lists do not serialise). These let the app
+# drive the research bundle without the UI needing set/list field types.
+USE_RESEARCH_FEATURES   = False    # True => ext-feature bundle {'time','structure','normalize'}
+USE_FORWARD_SWEEP       = False    # True => sweep [12,24,48,96] when FORWARD_BARS_SWEEP is empty
+#
+# ── RESEARCH PROFILE (copy-paste to enable the full edge bundle) ─────────────
+# To turn on the experimental research stack, set the four flags like so
+# (leave everything else at its tuned default):
+#
+#   USE_EXT_FEATURES        = {'structure', 'time', 'normalize'}
+#   USE_TRIPLE_BARRIER      = True
+#   USE_BETA_NEUTRAL_LABELS = True
+#   FORWARD_BARS_SWEEP      = [12, 24, 48]
+#
+# Each piece degrades gracefully: if features_ext.py / labels_ext.py are missing
+# the engine prints a one-line note and falls back to current behaviour.
+# ─────────────────────────────────────────────────────────────────────────────
 
 SL_PCT_QUANTILE = 0.70   # FTMO: tighter stops → smaller worst-case excursions
 TP_PCT_QUANTILE = 0.60
 MIN_DIST_RR     = 0.30
+
+# REPORT-ONLY (no filtering). The EA fires on the exported feature box (a superset
+# of the discovery shape-cluster), so live trade count is inflated vs the cluster.
+# signal_retention = total_trades / member_count surfaces that ratio. This cap is
+# diagnostic only; None = never used to drop/select patterns.
+MAX_BOX_INFLATION = None
 
 # v2.1: optional SL/TP evolution.  When True the GA co-optimizes each rule's
 # stop and target as independent multipliers of the cluster's quantile-derived
@@ -617,7 +681,105 @@ def add_v5_features(df):
         df["vwap_dist"]=((cl-vwap)/vwap*100).clip(-5,5).fillna(0)
     else:
         df["vwap_dist"]=0.0
+    # ── RESEARCH: optional extended features (gated on USE_EXT_FEATURES) ──────
+    # When the flag set is non-empty, append the features_ext blocks here so the
+    # new columns exist on df BEFORE build_features_parallel encodes the matrix.
+    # The columns are also registered (ext_feature_columns) and spliced into X
+    # by the encoder — see _ext_feature_cols()/build_features_parallel. Default
+    # (empty set) leaves df untouched: pure no-op, byte-identical output.
+    df=_maybe_add_ext_features(df)
     return df.fillna(0)
+
+
+# ── RESEARCH helper: extended-feature column registry ────────────────────────
+# add_all_ext_features (features_ext.py) appends a deterministic, fixed set of
+# columns for a given `enable` set. We materialise that column list ONCE on a
+# tiny synthetic frame so the encoder knows exactly which columns to read — and
+# in which order — without depending on a particular data frame. The list is
+# cached at module level and passed into the mp.Pool workers via initargs
+# (Windows spawn re-imports this module and resets globals to their defaults, so
+# the worker MUST receive the list explicitly, never read USE_EXT_FEATURES).
+_EXT_FEATURE_COLS_CACHE = None   # None = not computed yet; list once resolved
+
+def _resolved_ext_enable():
+    """Resolve the active extended-feature set.
+
+    Explicit USE_EXT_FEATURES wins (power users / file edits). Otherwise the
+    UI-friendly USE_RESEARCH_FEATURES bool turns on a curated bundle. Read at
+    call time so UI overrides AND spawn workers (which inherit the bool via
+    _app_override.json) both resolve identically. Returns a set (may be empty)."""
+    explicit = set(globals().get("USE_EXT_FEATURES", set()) or set())
+    if explicit:
+        return explicit
+    if bool(globals().get("USE_RESEARCH_FEATURES", False)):
+        return {"time", "structure", "normalize"}
+    return set()
+
+def _ext_feature_cols():
+    """Return the ordered list of column names add_all_ext_features adds for the
+    currently-enabled USE_EXT_FEATURES set (read at call time so UI overrides
+    apply). Returns [] when the flag is empty OR the module is unavailable.
+
+    Deterministic: derived from a fixed synthetic OHLC frame, so the same
+    enable-set always yields the same columns in the same order. Cached after
+    the first successful resolution.
+    """
+    global _EXT_FEATURE_COLS_CACHE
+    enable=_resolved_ext_enable()
+    if not enable:
+        return []
+    if _EXT_FEATURE_COLS_CACHE is not None:
+        return _EXT_FEATURE_COLS_CACHE
+    try:
+        import features_ext as _fx
+    except ImportError as e:
+        print(f"  [research] features_ext unavailable ({e}); "
+              f"USE_EXT_FEATURES ignored, falling back to base features.")
+        _EXT_FEATURE_COLS_CACHE=[]
+        return []
+    # Synthetic 64-bar OHLC frame with a DatetimeIndex (time block needs one).
+    idx=pd.date_range("2020-01-01", periods=64, freq="5min")
+    base=np.linspace(100.0,101.0,64)
+    probe=pd.DataFrame({"open":base,"high":base+0.5,"low":base-0.5,
+                        "close":base,"volume":1.0}, index=idx)
+    try:
+        out=_fx.add_all_ext_features(probe, enable=enable)
+    except Exception as e:
+        print(f"  [research] features_ext probe failed ({e}); "
+              f"USE_EXT_FEATURES ignored.")
+        _EXT_FEATURE_COLS_CACHE=[]
+        return []
+    new_cols=[c for c in out.columns if c not in probe.columns]
+    _EXT_FEATURE_COLS_CACHE=new_cols
+    print(f"  [research] USE_EXT_FEATURES={sorted(enable)} -> "
+          f"{len(new_cols)} extra feature column(s) enter X: {new_cols}")
+    return new_cols
+
+def _maybe_add_ext_features(df):
+    """Append features_ext columns to `df` when USE_EXT_FEATURES is non-empty.
+    Lazy-imports features_ext; on ImportError prints a note and returns df
+    unchanged (current behaviour). No-op when the flag set is empty."""
+    enable=_resolved_ext_enable()
+    if not enable:
+        return df
+    try:
+        import features_ext as _fx
+    except ImportError as e:
+        print(f"  [research] features_ext unavailable ({e}); "
+              f"USE_EXT_FEATURES ignored, using base features only.")
+        return df
+    try:
+        df=_fx.add_all_ext_features(df, enable=enable)
+    except Exception as e:
+        print(f"  [research] add_all_ext_features failed ({e}); "
+              f"continuing with base features.")
+        return df
+    # Guarantee every registered ext column exists (defensive: keeps X width
+    # constant even if a block silently skips a column on degenerate data).
+    for c in _ext_feature_cols():
+        if c not in df.columns:
+            df[c]=0.0
+    return df
 
 def detect_regimes(df):
     up=(df["ema20"]>df["ema50"])&(df["ema50"]>df["ema200"])
@@ -718,13 +880,35 @@ def load_raw_data():
 # ENCODING (parallel) — snapshot + sequence
 # ─────────────────────────────────────────────────────────────────────────────
 _ENC={}
+# RESEARCH: names of the extended-feature columns spliced into the encoded
+# vector, in append order. Set inside _init_enc from the value passed via the
+# mp.Pool initargs (worker-safe: NOT read from the USE_EXT_FEATURES global,
+# which resets to its default on Windows spawn). Empty => no ext columns.
+_ENC_EXT_NAMES=[]
 
 def _init_enc(*arrs):
-    global _ENC
+    """Pool initializer. The FIRST 18 positional arrays are the historical base
+    feature columns (order matches `keys` below). RESEARCH: any FURTHER arrays
+    are extended-feature columns whose names arrive as the FINAL argument (a
+    tuple/list). When no ext features are enabled the call is exactly the
+    historical 18-array form and the tail logic is skipped — byte-identical."""
+    global _ENC,_ENC_EXT_NAMES
     keys=["closes","bodies","rngs","uwks","lwks","bulls","rsi","macd","bbw",
           "trend","mtf","atr","vol_ratio","vol_body","regime",
           "vol_div","bb_exp","prev_sess"]
-    _ENC=dict(zip(keys,arrs))
+    n_base=len(keys)
+    if len(arrs)>n_base:
+        # Trailing element is the ordered list of ext column names; the arrays
+        # between the base block and that name list are the ext columns.
+        ext_names=list(arrs[-1])
+        ext_arrs=arrs[n_base:n_base+len(ext_names)]
+        _ENC_EXT_NAMES=ext_names
+        _ENC=dict(zip(keys,arrs[:n_base]))
+        for nm,a in zip(ext_names,ext_arrs):
+            _ENC[f"ext::{nm}"]=a
+    else:
+        _ENC_EXT_NAMES=[]
+        _ENC=dict(zip(keys,arrs))
 
 def _encode_one(args):
     i,w=args; e=_ENC
@@ -772,6 +956,17 @@ def _encode_one(args):
             float(e["vol_div"][i]),
             float(e["prev_sess"][i])]
 
+    # ── RESEARCH: extended-feature context values (current bar i) ────────────
+    # Appended in registry order so every encoded vector shares the same layout.
+    # Empty when USE_EXT_FEATURES is off => `feats` is identical to the base
+    # encoding and X is byte-for-byte unchanged. Non-finite values are coerced
+    # to 0.0 so a single NaN does not drop the whole window (these are auxiliary
+    # context features, not the core shape).
+    for nm in _ENC_EXT_NAMES:
+        col=e.get(f"ext::{nm}")
+        val=float(col[i]) if col is not None else 0.0
+        feats.append(val if np.isfinite(val) else 0.0)
+
     v=np.array(feats,dtype=np.float32)
     return None if np.any(np.isnan(v)) else v
 
@@ -783,8 +978,21 @@ def build_features_parallel(df,w,n_workers):
                  "vol_body_conf","regime","vol_price_div","bb_expanding","prev_sess_bias"]
     arrs=[df[c].values.copy() if c in df.columns else np.zeros(len(df))
           for c in cols_needed]
+    # ── RESEARCH: append extended-feature columns so they ENTER X ────────────
+    # _ext_feature_cols() returns [] unless USE_EXT_FEATURES is non-empty (and
+    # features_ext imported), so the initargs reduce to the historical 18-array
+    # form and the encoded matrix is byte-identical by default. When enabled, the
+    # ext arrays follow the base block and the NAME LIST is the final initarg, so
+    # workers reconstruct the same column layout without reading any global.
+    ext_names=_ext_feature_cols()
+    if ext_names:
+        ext_arrs=[df[c].values.copy() if c in df.columns else np.zeros(len(df))
+                  for c in ext_names]
+        init_args=(*arrs, *ext_arrs, ext_names)
+    else:
+        init_args=tuple(arrs)
     args=[(i,w) for i in range(w,len(df))]
-    with mp.Pool(n_workers,initializer=_init_enc,initargs=arrs) as pool:
+    with mp.Pool(n_workers,initializer=_init_enc,initargs=init_args) as pool:
         results=[]; t0e=time.time()
         for i,r in enumerate(pool.imap(_encode_one,args,chunksize=2000)):
             results.append(r)
@@ -952,12 +1160,78 @@ def refine_shape_matching(df,indices,labels,w,threshold,n_workers):
 # ─────────────────────────────────────────────────────────────────────────────
 # PRICE DISTRIBUTIONS — ATR-normalised sustained move
 # ─────────────────────────────────────────────────────────────────────────────
+def _research_labels(df, fwd):
+    """RESEARCH: precompute labels_ext arrays for the whole frame, once.
+
+    Returns a dict with the pieces the price-distribution stage needs, or
+    ``None`` when neither label flag is set or labels_ext is unavailable (in
+    which case the caller keeps its current MFE/MAE behaviour).
+
+    Keys when active:
+      tp_dist, sl_dist : per-bar fractional TP / SL distances implied by the
+          ATR-scaled triple barrier (|barrier - entry| / entry). Present only
+          when USE_TRIPLE_BARRIER. Used to size each cluster's SL/TP from the
+          MEDIAN member-bar barrier distance — same fractional-price units as
+          the percentile sizing it replaces, so downstream math is unchanged.
+      excess : per-bar drift-removed forward return (self-detrended). Present
+          only when USE_BETA_NEUTRAL_LABELS. Used to decide LONG vs SHORT from
+          *excess* (alpha) sign rather than raw price drift.
+    """
+    want_tb=bool(globals().get("USE_TRIPLE_BARRIER", False))
+    want_bn=bool(globals().get("USE_BETA_NEUTRAL_LABELS", False))
+    if not (want_tb or want_bn):
+        return None
+    try:
+        import labels_ext as _lx
+    except ImportError as e:
+        print(f"  [research] labels_ext unavailable ({e}); "
+              f"USE_TRIPLE_BARRIER / USE_BETA_NEUTRAL_LABELS ignored, "
+              f"using MFE/MAE percentile labels.")
+        return None
+    out={}
+    try:
+        if want_tb:
+            # Long-side barriers sized from the engine's quantile multipliers
+            # (kept as ATR multiples) over the same horizon as the forward window.
+            tb=_lx.triple_barrier(
+                df,
+                tp_atr_mult=float(globals().get("TP_PCT_QUANTILE",0.6))+1.0,
+                sl_atr_mult=float(globals().get("SL_PCT_QUANTILE",0.7))+0.5,
+                max_hold=max(1,int(fwd)), side=1, entry="close")
+            entry_px=df["close"].to_numpy(float)
+            exit_px=tb["exit_price"].to_numpy(float)
+            # Fractional realized distance per bar; split into fav/adv by sign of
+            # the trade outcome so medians approximate cluster TP / SL sizing.
+            dist=np.abs(exit_px-entry_px)/(np.abs(entry_px)+1e-9)
+            lbl=tb["label"].to_numpy()
+            out["tp_dist"]=np.where(lbl> 0, dist, np.nan)
+            out["sl_dist"]=np.where(lbl< 0, dist, np.nan)
+        if want_bn:
+            out["excess"]=_lx.beta_neutral_forward_return(
+                df, max(1,int(fwd)), price_col="close").to_numpy(float)
+    except Exception as e:
+        print(f"  [research] labels_ext computation failed ({e}); "
+              f"falling back to MFE/MAE percentile labels.")
+        return None
+    note=[]
+    if want_tb and "tp_dist" in out: note.append("triple_barrier SL/TP")
+    if want_bn and "excess"  in out: note.append("beta-neutral direction")
+    if note:
+        print(f"  [research] labeling via labels_ext: {', '.join(note)} (fwd={fwd}).")
+    return out or None
+
 def compute_price_distributions(df,indices,labels,n_cl,fwd):
-    """v5: inner bar loop replaced with NumPy slice operations per trade."""
+    """v5: inner bar loop replaced with NumPy slice operations per trade.
+
+    RESEARCH: when USE_TRIPLE_BARRIER / USE_BETA_NEUTRAL_LABELS is set the SL/TP
+    sizing and/or LONG-SHORT direction are overridden per cluster via labels_ext
+    (see _research_labels). With both flags off this is the historical routine.
+    """
     hi=df["high"].values; lo=df["low"].values
     cl=df["close"].values; op=df["open"].values
     atr=df["atr14"].values; n=len(df)
     results={}
+    _rlab=_research_labels(df, fwd)   # None unless a label flag is set
 
     for cid in range(n_cl):
         member_bi=[indices[i] for i in range(len(indices)) if labels[i]==cid]
@@ -1032,7 +1306,76 @@ def compute_price_distributions(df,indices,labels,n_cl,fwd):
             "sustained_pct":   round((meaningful_long+meaningful_short)/
                                max(len(member_bi),1)*100,1),
         }
+
+        # ── RESEARCH override (gated) ────────────────────────────────────────
+        # Replace SL/TP sizing and/or direction with labels_ext-derived values
+        # for this cluster's member bars. No-op when _rlab is None (flags off),
+        # so the default result above is returned verbatim.
+        if _rlab is not None:
+            rd=results[cid]
+            if "tp_dist" in _rlab:
+                tp_m=_rlab["tp_dist"][member_bi]; sl_m=_rlab["sl_dist"][member_bi]
+                tp_m=tp_m[np.isfinite(tp_m)]; sl_m=sl_m[np.isfinite(sl_m)]
+                if len(tp_m)>=3 and len(sl_m)>=3:
+                    sl_pct=max(float(np.median(sl_m)),0.0002)
+                    tp_pct=max(float(np.median(tp_m)),0.0002)
+                    rd["sl_pct"]=round(sl_pct,5); rd["tp_pct"]=round(tp_pct,5)
+                    rd["sl_pct_label"]=f"{sl_pct*100:.3f}%"
+                    rd["tp_pct_label"]=f"{tp_pct*100:.3f}%"
+                    rd["implied_rr"]=round(tp_pct/sl_pct,2)
+                    rd["label_source"]="triple_barrier"
+            if "excess" in _rlab:
+                ex=_rlab["excess"][member_bi]; ex=ex[np.isfinite(ex)]
+                if len(ex)>0:
+                    # Net drift-removed forward move decides direction: positive
+                    # excess => the entry condition has long alpha (not just the
+                    # market drifting up); negative => short alpha.
+                    long_share=float(np.mean(ex>0))*100.0
+                    rd["direction"]="LONG" if np.mean(ex)>=0 else "SHORT"
+                    rd["long_pct"]=round(long_share,1)
+                    rd["label_source"]=(rd.get("label_source","")+"+beta_neutral").lstrip("+")
     return results
+
+def select_forward_horizon(df, indices, labels, n_cl, candidates):
+    """RESEARCH: pick the forward horizon with the strongest sustained-move edge.
+
+    For each candidate horizon we run the (already-existing) price-distribution
+    routine and score the horizon by the member-weighted average sustained-move
+    percentage across clusters — i.e. how often clusters produce a meaningful,
+    held move at that horizon. The horizon with the highest score is returned.
+
+    Parameters
+    ----------
+    candidates : list[int]
+        Forward-bar horizons to try. Empty => returns (FORWARD_BARS, None):
+        a pure no-op so the engine keeps its single fixed horizon.
+
+    Returns
+    -------
+    (best_fwd, table) where `table` is a list of (fwd, score) for logging, or
+    (FORWARD_BARS, None) when the sweep is disabled.
+    """
+    cands=[int(c) for c in (candidates or []) if int(c) >= 1]
+    if not cands and bool(globals().get("USE_FORWARD_SWEEP", False)):
+        cands=[12, 24, 48, 96]   # UI-friendly default sweep
+    if not cands:
+        return int(globals().get("FORWARD_BARS", 24)), None
+    table=[]
+    for fb in cands:
+        pdist=compute_price_distributions(df, indices, labels, n_cl, fb)
+        num=den=0.0
+        for cid in range(n_cl):
+            d=pdist.get(cid)
+            if not d:
+                continue
+            w=float(d.get("n_samples", 0))
+            num+=float(d.get("sustained_pct", 0.0))*w
+            den+=w
+        score=(num/den) if den > 0 else 0.0
+        table.append((fb, round(score, 3)))
+    # Deterministic tie-break: highest score, then SHORTER horizon (less lag).
+    best_fwd=max(table, key=lambda t: (t[1], -t[0]))[0]
+    return best_fwd, table
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BIDIRECTIONAL ANALYSIS & DIRECTION DISCRIMINATOR
@@ -1102,6 +1445,14 @@ def analyze_bidirectionality(df,indices,labels,n_cl,price_dists,fwd):
             mode = "LONG_ONLY"; discrim = None
         elif _force == "short_only":
             mode = "SHORT_ONLY"; discrim = None
+        elif _force == "bidirectional":
+            # Forced bidirectional: trade BOTH sides, decided per-bar by the
+            # discriminator, even if neither side cleared the natural BIDIR
+            # thresholds. Pair with USE_BETA_NEUTRAL_LABELS, else this just adds
+            # losing trades on the weaker side.
+            mode = "BIDIRECTIONAL"
+            discrim = find_direction_discriminator(
+                df, member_bi, col_arrays, long_trades, short_trades)
         elif long_ok and short_ok:
             mode="BIDIRECTIONAL"
             # Find direction discriminator
@@ -1236,7 +1587,14 @@ def write_combined_report(all_results, out_dir):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ranked = sorted(all_results, key=lambda r: r.get("composite_score", 0), reverse=True)
+    # OOS-bias fix (D): rank by out-of-sample (test_pf, test_wr); fall back to
+    # TRAIN composite_score only when no test split exists (test_pf missing/0).
+    ranked = sorted(
+        all_results,
+        key=lambda r: (1, r.get("test_pf", 0), r.get("test_wr", 0))
+        if r.get("test_pf", 0) else (0, r.get("composite_score", 0), 0),
+        reverse=True,
+    )
     kept = []
     for candidate in ranked:
         rule_c = candidate.get("genetic_rule", {})
@@ -1504,12 +1862,15 @@ def _bt_worker_dir(args):
     realistic = e["realistic"]; max_hold = e["max_hold"]
     allowed = e["allowed"]; cooldown = e["cooldown"]
     long = (direction == "LONG")
-    trades = []; last_sig = -cooldown - 1
+    # Serialize like the live EA: no new entry while a position is open, and
+    # cooldown is anchored on the prior trade's CLOSE (exit) bar, not the signal
+    # bar. last_exit is the bar index at which the previous position closed.
+    trades = []; last_exit = -cooldown - 1
 
     for bi in member_bi:
         if bi + 1 >= n: continue
         if allowed and int(sess[bi]) not in allowed: continue
-        if bi - last_sig < cooldown: continue
+        if bi - last_exit < cooldown: continue
         entry = op[bi + 1] if realistic and bi + 1 < n else cl[bi]
         if entry == 0: continue
         entry_ws = entry + spread if long else entry - spread
@@ -1563,13 +1924,19 @@ def _bt_worker_dir(args):
             int(e["snap_mtf"][bi]),
         )
 
+        # Charge trading costs in R: one round-turn commission per trade plus
+        # per-bar swap over the holding period. Subtracting from booked R (both
+        # WIN and LOSS) before recording flows the cost into PF/equity/DD.
+        cost_r = COMMISSION_R + SWAP_R_PER_BAR * bars_held
+        win_r  -= cost_r
+        loss_r -= cost_r
         if ht:
-            last_sig = bi
+            last_exit = bi + bars_held
             trades.append((bi, "WIN", round(win_r, 2), round(entry_ws, 2),
                            round(sl_v, 2), round(tp_v, 2),
                            direction, bars_held) + snap)
         elif hs:
-            last_sig = bi
+            last_exit = bi + bars_held
             trades.append((bi, "LOSS", round(loss_r, 2), round(entry_ws, 2),
                            round(sl_v, 2), round(tp_v, 2),
                            direction, bars_held) + snap)
@@ -1612,6 +1979,12 @@ def _calc_metrics(trades,member_count,trading_days,trades_df=None):
                 max_consec_losses=max_consec,
                 equity=equity,
                 member_count=member_count,
+                # REPORT-ONLY: post-rule trades / raw shape-cluster size. <1 means
+                # the genetic rule fired on fewer bars than the cluster; the EA's
+                # exported feature box is a superset, so live count inflates above
+                # this. TODO(follow-up): true box-vs-cluster recall = evaluate the
+                # exported box over the cluster regime mask (documented, not done).
+                signal_retention=round(total/member_count,3) if member_count else 0,
                 per_day=round(total/max(trading_days,1),2),
                 composite_score=round(composite,4))
 
@@ -2846,6 +3219,8 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
         f"; Pattern {pattern_no} — Cluster {cid} [{direction}] [{bidir_mode}]",
         f"; Train: WR={r.get('win_rate_',0)}%  Wilson={r.get('wilson_wr',0)}%"
         f"  PF={r.get('profit_factor',0)}  Score={r.get('composite_score',0)}",
+        f"; SignalRetention={r.get('signal_retention',0)} (report-only:"
+        f" post-rule trades / shape-cluster size; EA box is a superset → live inflates)",
         f"; Test:  WR={r.get('test_wr',0)}%  PF={r.get('test_pf',0)}"
         f"  Trades={r.get('test_trades',0)}",
         f"; SL={sl_pct*100:.3f}%  TP={tp_pct*100:.3f}%"
@@ -2962,6 +3337,11 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
         "; Force-close a position after this many bars if neither SL nor TP hit",
         "; (matches the simulator's MAX_HOLD_BARS). 0 = hold until SL/TP only.",
         f"MaxHoldBars={int(MAX_HOLD_BARS)}",
+        "; Trading costs in R (risk multiples), matching the simulator's",
+        "; COMMISSION_R / SWAP_R_PER_BAR. Commission = round-turn per trade;",
+        "; Swap = per bar held. 0.0 = no cost charged.",
+        f"Commission_R={float(COMMISSION_R):.6f}",
+        f"Swap_R_PerBar={float(SWAP_R_PER_BAR):.6f}",
     ]
 
     # Session filter — derive from session condition in rule if present
@@ -3173,6 +3553,10 @@ def run_mc_on_top_patterns(results, out_dir, n=None):
 
 def main():
     global RANDOM_SEED
+    # RESEARCH: the FORWARD_BARS_SWEEP block (below) may rebind FORWARD_BARS to
+    # the sweep winner. Declared here so the assignment is valid even though
+    # FORWARD_BARS is also READ earlier in this function (e.g. the LightGBM path).
+    global FORWARD_BARS
     t_total=time.time()
     OUT=Path(OUTPUT_FOLDER)/f"seed_{RANDOM_SEED}"
     OUT.mkdir(parents=True,exist_ok=True)
@@ -3321,6 +3705,29 @@ def main():
         dists_all = cdist(X_te_scaled, centroid_matrix, metric="euclidean")
         labels_te = np.array(valid_cids, dtype=np.int32)[np.argmin(dists_all, axis=1)]
 
+    # ── RESEARCH: forward-horizon sweep (gated on FORWARD_BARS_SWEEP) ─────────
+    # When the sweep list is non-empty, evaluate each candidate horizon on the
+    # TRAIN clusters and keep the one with the strongest sustained-move edge.
+    # The winner is rebound onto the FORWARD_BARS module global so EVERY
+    # downstream stage (price-dist, bidirectional, backtests, validation) uses
+    # the chosen horizon with no further plumbing. Empty list (default) skips
+    # this entirely and FORWARD_BARS is left exactly as configured.
+    # (FORWARD_BARS is declared global at the top of main().)
+    _sweep=list(globals().get("FORWARD_BARS_SWEEP", []) or [])
+    if _sweep:
+        _best_fwd,_sw_table=select_forward_horizon(
+            df_train, idx_tr, labels_tr, n_cl, _sweep)
+        if _sw_table is not None:
+            print("  [research] forward-horizon sweep "
+                  "(fwd: weighted sustained%):")
+            for _fb,_sc in _sw_table:
+                _mark=" <= chosen" if _fb==_best_fwd else ""
+                print(f"      fwd={_fb:>4}: {_sc}{_mark}")
+            if _best_fwd!=FORWARD_BARS:
+                print(f"  [research] FORWARD_BARS {FORWARD_BARS} -> {_best_fwd} "
+                      f"(sweep winner).")
+            FORWARD_BARS=_best_fwd
+
     # ── Price distributions ───────────────────────────────────────────────────
     _stage("Price Distributions")
     price_dists_tr=compute_price_distributions(
@@ -3452,12 +3859,13 @@ def main():
 
     # ── Validate on test ──────────────────────────────────────────────────────
     _stage("Validate (test)")
-    price_dists_te=compute_price_distributions(
-        df_test,idx_te,labels_te,n_cl,FORWARD_BARS)
+    # OOS-bias fix (E): do NOT re-fit SL/TP on test data. Reuse the TRAIN-fitted
+    # exit levels (price_dists_tr) as the quantile baseline so the OOS stage is a
+    # true hold-out (sltp_p1 overrides are already train-derived).
     bt_test=backtest_refined(
         df_test,idx_te,labels_te,
         {k:v for k,v in genetic_final.items() if isinstance(k[0],int)},
-        price_dists_te,FORWARD_BARS,nw,test_days,sltp_overrides=sltp_p1)
+        price_dists_tr,FORWARD_BARS,nw,test_days,sltp_overrides=sltp_p1)
 
     # ── Quality analysis ──────────────────────────────────────────────────────
     _stage("Quality Analysis")
@@ -3568,7 +3976,13 @@ def main():
             "test_trades_df": te.get("trades", pd.DataFrame()),
         })
 
-    final_results.sort(key=lambda r:r.get("composite_score",0),reverse=True)
+    # OOS-bias fix (D): prefer out-of-sample (test_pf, test_wr); fall back to
+    # TRAIN composite_score only when no test split exists (test_pf missing/0).
+    final_results.sort(
+        key=lambda r: (1, r.get("test_pf", 0), r.get("test_wr", 0))
+        if r.get("test_pf", 0) else (0, r.get("composite_score", 0), 0),
+        reverse=True,
+    )
     print(f"\n  {len(final_results)} patterns passed all filters")
 
     # ── Export ────────────────────────────────────────────────────────────────
@@ -3612,7 +4026,7 @@ def main():
               + ("  ⚠ MARGINAL" if r.get("marginal") else ""))
         print(f"  Train: WR={r['win_rate_']}% Wilson={r['wilson_wr']}% "
               f"PF={r['profit_factor']} Score={r['composite_score']} "
-              f"{r['per_day']}/day")
+              f"{r['per_day']}/day retain={r.get('signal_retention',0)} (report-only)")
         print(f"  Test:  WR={r['test_wr']}% PF={r['test_pf']} "
               f"({r['test_trades']} trades) Score={r['test_score']}")
         print(f"  {desc}")
@@ -3704,7 +4118,8 @@ def main():
             f"  CLUSTER {cid} [{direction}] [{r['bidir_mode']}]"
             + ("  ⚠ MARGINAL" if r.get("marginal") else ""),
             f"  Train: WR={r['win_rate_']}% Wilson={r['wilson_wr']}% "
-            f"PF={r['profit_factor']} Score={r['composite_score']} {r['per_day']}/day",
+            f"PF={r['profit_factor']} Score={r['composite_score']} {r['per_day']}/day "
+            f"retain={r.get('signal_retention',0)} (report-only)",
             f"  Test:  WR={r['test_wr']}% PF={r['test_pf']} "
             f"trades={r['test_trades']} "
             f"({round(r['test_trades']/max(test_days,1),2)}/day) "
