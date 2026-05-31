@@ -85,6 +85,28 @@ jobs:
           } else {
             Write-Host "Key format: OK (looks like a Tauri/minisign secret key)"
           }
+          # Fail fast if CI secret does not match the pubkey baked into shipped apps.
+          # v2.2.0 was published manually with a mismatched local key; this guard
+          # prevents a repeat on tag-driven CI releases.
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $pubB64 = $conf.plugins.updater.pubkey
+          $pubText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($pubB64))
+          $expectedKeyId = $null
+          if ($pubText -match 'minisign public key:\s*([0-9A-F]{16})') {
+            $expectedKeyId = $Matches[1]
+          }
+          $secretKeyId = $null
+          if ($decoded -match 'minisign secret key:\s*([0-9A-F]{16})') {
+            $secretKeyId = $Matches[1]
+          }
+          if (-not $expectedKeyId) { throw "Could not parse pubkey key-id from tauri.conf.json" }
+          if (-not $secretKeyId) { throw "Could not parse key-id from TAURI_SIGNING_PRIVATE_KEY" }
+          Write-Host "Updater pubkey key-id (shipped apps): $expectedKeyId"
+          Write-Host "CI signing secret key-id:              $secretKeyId"
+          if ($secretKeyId -ne $expectedKeyId) {
+            throw "Signing key mismatch: apps trust $expectedKeyId but CI secret is $secretKeyId. Update the GitHub secret to the private key for $expectedKeyId, or rotate tauri.conf.json pubkey (requires manual reinstall for existing users)."
+          }
+          Write-Host "Signing key-id matches embedded updater pubkey: OK"
 
       - name: Build Tauri app (signed)
         env:
