@@ -96,11 +96,14 @@ jobs:
             $expectedKeyId = $Matches[1]
           }
           $secretKeyId = $null
-          if ($decoded -match 'minisign secret key:\s*([0-9A-F]{16})') {
-            $secretKeyId = $Matches[1]
+          foreach ($pat in @(
+            'minisign secret key:\s*([0-9A-F]{16})',
+            'minisign encrypted secret key:\s*([0-9A-F]{16})'
+          )) {
+            if ($decoded -match $pat) { $secretKeyId = $Matches[1]; break }
           }
           if (-not $expectedKeyId) { throw "Could not parse pubkey key-id from tauri.conf.json" }
-          if (-not $secretKeyId) { throw "Could not parse key-id from TAURI_SIGNING_PRIVATE_KEY" }
+          if (-not $secretKeyId) { throw "Could not parse key-id from TAURI_SIGNING_PRIVATE_KEY (expected minisign secret/encrypted-secret comment)" }
           Write-Host "Updater pubkey key-id (shipped apps): $expectedKeyId"
           Write-Host "CI signing secret key-id:              $secretKeyId"
           if ($secretKeyId -ne $expectedKeyId) {
