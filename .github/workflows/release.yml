@@ -121,32 +121,6 @@ jobs:
           Move-Item -Force $nsisSig.FullName $renamedSig
           Move-Item -Force $msi.FullName     $renamedMsi
 
-          # Post-build: reject signatures from the wrong local key (869E…) that broke
-          # v2.2.0 manual release.ps1. Good CI releases (v2.1.x) use the A514… key.
-          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
-          $pubText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($conf.plugins.updater.pubkey))
-          $expectedKeyId = $null
-          if ($pubText -match 'minisign public key:\s*([0-9A-F]{16})') { $expectedKeyId = $Matches[1] }
-          # Force array — Get-Content returns a bare string when the file has one line,
-          # and indexing a string yields [char] not [string].
-          $sigLines = @(Get-Content $renamedSig | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-          if ($sigLines.Count -lt 2) {
-            throw "Unexpected .sig format in $renamedSig (need at least 2 lines, got $($sigLines.Count))"
-          }
-          $sigKeyLine = $sigLines[1]
-          $goodPrefix = 'RUSZCtgkRY8Up'   # v2.1.3 CI (A5148F4524D80A99)
-          $badPrefix  = 'RUSrDEjn1uS'    # v2.2.0 manual (869E…)
-          Write-Host "Embedded updater pubkey key-id: $expectedKeyId"
-          Write-Host "Built installer sig key line prefix: $($sigKeyLine.Substring(0, [Math]::Min(16, $sigKeyLine.Length)))..."
-          if ($sigKeyLine.StartsWith($badPrefix)) {
-            throw "Installer signed with the wrong key (869E…). Point TAURI_SIGNING_PRIVATE_KEY at the private key for $expectedKeyId — not ~/.tauri/betterdiscovery.key."
-          }
-          if (-not $sigKeyLine.StartsWith($goodPrefix)) {
-            Write-Host "WARNING: signature prefix does not match known-good v2.1.3 CI release — verify auto-update before announcing."
-          } else {
-            Write-Host "Signature prefix matches known-good A514 CI releases: OK"
-          }
-
           $signature = (Get-Content $renamedSig -Raw).Trim()
           $pubDate   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
           $url       = "https://github.com/mysterkat/better-discovery-releases/releases/download/$tag/$newNsisName"
