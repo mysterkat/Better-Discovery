@@ -571,3 +571,174 @@ def cross_instrument_gate(
 
     survivors.sort(key=lambda r: r["generalization_score"], reverse=True)
     return survivors
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (d) End-to-end orchestrator: per-symbol discovery -> pool rules -> gate
+# ─────────────────────────────────────────────────────────────────────────────
+def discover_multi(
+    symbols: Sequence[str],
+    data_folder: str,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+    min_instruments: int = 2,
+    min_trades: int = 5,
+    top_n_per_symbol: int | None = None,
+    eval_kwargs: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Full multi-instrument run: discover per symbol, pool every rule those runs
+    produced, then keep only the ones that TRANSFER across instruments.
+
+    ``symbols`` are primary-TF CSV filenames inside ``data_folder`` (e.g.
+    ``["xauusd_m15.csv", "xagusd_m15.csv", "dxy_m15.csv"]``). ``overrides`` are
+    engine config overrides applied to every symbol's discovery (file/TF keys are
+    managed internally by run_multi and must not be passed here).
+
+    Returns ``{ok, symbols, per_symbol_patterns:{sym:n}, n_rules, n_survivors,
+    survivors:[...]}`` — survivors ranked by ``generalization_score``.
+
+    IMPORTANT: this GATES the rules discovery already produced per symbol. If a
+    symbol yields 0 patterns (strict FTMO filters / no edge), there is nothing to
+    transfer-test. Feed candidates through by enabling the research profile and/or
+    loosening per-symbol filters via ``overrides``, e.g.::
+
+        {"USE_BETA_NEUTRAL_LABELS": True, "USE_SOFT_FILTER": True, "FILTER_EDGE_K": 0.30}
+
+    Cross-instrument agreement is itself a strong filter, so looser per-symbol
+    gates are fine here.
+    """
+    import os
+
+    overrides = dict(overrides or {})
+    multi = run_multi(symbols, data_folder, overrides)
+
+    pooled: list[dict[str, Any]] = []
+    per_symbol_counts: dict[str, int] = {}
+    for sym in symbols:
+        res = multi["results"].get(sym, {})
+        pats = res.get("patterns", []) if isinstance(res, dict) else []
+        per_symbol_counts[sym] = len(pats)
+        kept = 0
+        for i, p in enumerate(pats):
+            box = p.get("genetic_rule") or {}
+            if not box or not p.get("sl_pct") or not p.get("tp_pct"):
+                continue
+            pooled.append({
+                "genetic_rule": box,
+                "direction": str(p.get("direction", "LONG")).upper(),
+                "sl_pct": float(p["sl_pct"]),
+                "tp_pct": float(p["tp_pct"]),
+                "home_symbol": sym,
+                "pattern_id": p.get("pattern_id", f"{sym}#{i}"),
+            })
+            kept += 1
+            if top_n_per_symbol and kept >= top_n_per_symbol:
+                break
+
+    if not pooled:
+        return {
+            "ok": False,
+            "reason": "no rules produced by per-symbol discovery — nothing to "
+                      "transfer-test (enable research profile / loosen filters via overrides)",
+            "symbols": list(symbols),
+            "per_symbol_patterns": per_symbol_counts,
+            "n_rules": 0, "n_survivors": 0, "survivors": [],
+        }
+
+    dfs: dict[str, pd.DataFrame] = {}
+    load_errors: dict[str, str] = {}
+    for sym in symbols:
+        try:
+            dfs[sym] = load_symbol_features(os.path.join(data_folder, sym))
+        except Exception as exc:  # noqa: BLE001 - isolate one symbol's load failure
+            load_errors[sym] = f"{type(exc).__name__}: {exc}"
+
+    if len(dfs) < min_instruments:
+        return {
+            "ok": False,
+            "reason": f"only {len(dfs)} symbol frame(s) loaded; need >= {min_instruments}",
+            "symbols": list(symbols),
+            "per_symbol_patterns": per_symbol_counts,
+            "load_errors": load_errors,
+            "n_rules": len(pooled), "n_survivors": 0, "survivors": [],
+        }
+
+    survivors = cross_instrument_gate(
+        pooled, dfs,
+        min_instruments=min_instruments,
+        min_trades=min_trades,
+        prepared=True,
+        eval_kwargs=eval_kwargs,
+    )
+    return {
+        "ok": True,
+        "symbols": list(symbols),
+        "per_symbol_patterns": per_symbol_counts,
+        "load_errors": load_errors,
+        "n_rules": len(pooled),
+        "n_survivors": len(survivors),
+        "survivors": survivors,
+    }
+
+
+def _main(argv: Sequence[str] | None = None) -> dict[str, Any]:
+    """CLI: run multi-instrument discovery + transfer gate end-to-end.
+
+    Example::
+
+        python multi_instrument.py --folder /path/to/hist_data \\
+            --symbols xauusd_m15.csv xagusd_m15.csv dxy_m15.csv \\
+            --min-instruments 2 \\
+            --override USE_BETA_NEUTRAL_LABELS=true --override FILTER_EDGE_K=0.30 \\
+            --out transfer_report.json
+    """
+    import argparse
+    import json
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    ap = argparse.ArgumentParser(
+        description="Multi-instrument discovery + cross-instrument transfer gate")
+    ap.add_argument("--folder", required=True,
+                    help="folder containing the per-symbol primary-TF CSVs")
+    ap.add_argument("--symbols", nargs="+", required=True,
+                    help="primary-TF CSV filenames, e.g. xauusd_m15.csv xagusd_m15.csv")
+    ap.add_argument("--min-instruments", type=int, default=2)
+    ap.add_argument("--min-trades", type=int, default=5)
+    ap.add_argument("--top-n", type=int, default=None,
+                    help="cap rules per symbol fed to the gate (already discovery-ranked)")
+    ap.add_argument("--override", action="append", default=[],
+                    help="KEY=VALUE engine override, JSON-typed value (repeatable)")
+    ap.add_argument("--out", default=None, help="write the full JSON report here")
+    args = ap.parse_args(argv)
+
+    ov: dict[str, Any] = {}
+    for kv in args.override:
+        k, _, v = kv.partition("=")
+        try:
+            ov[k.strip()] = json.loads(v)
+        except Exception:
+            ov[k.strip()] = v
+
+    res = discover_multi(
+        args.symbols, args.folder, overrides=ov,
+        min_instruments=args.min_instruments, min_trades=args.min_trades,
+        top_n_per_symbol=args.top_n,
+    )
+    print(json.dumps({k: v for k, v in res.items() if k != "survivors"},
+                     indent=2, default=str))
+    print(f"\n=== {res.get('n_survivors', 0)} rule(s) transferred across "
+          f">= {args.min_instruments} instruments ===")
+    for s in res.get("survivors", [])[:20]:
+        print(f"  [{s.get('home_symbol', '?')}] {s.get('pattern_id', '?')}  "
+              f"score={s.get('generalization_score')}  passes={s.get('passed_symbols')}")
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(res, f, indent=2, default=str)
+        print(f"\nReport -> {args.out}")
+    return res
+
+
+if __name__ == "__main__":
+    _main()

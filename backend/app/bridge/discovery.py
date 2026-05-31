@@ -738,6 +738,7 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
             "sl_pct":          _jsonify_val(r.get("sl_pct", 0)),
             "tp_pct":          _jsonify_val(r.get("tp_pct", 0)),
             "set_file":        set_path,
+            "direction":       str(r.get("direction", "LONG")).upper(),
             # v0.6.0: Rule conditions for the UI's "Indicators" table. Each
             # rule is {col_name: (lower, upper)} mapping a feature/indicator
             # to the inclusive range that must hold for the pattern to fire.
