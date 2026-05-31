@@ -127,8 +127,13 @@ jobs:
           $pubText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($conf.plugins.updater.pubkey))
           $expectedKeyId = $null
           if ($pubText -match 'minisign public key:\s*([0-9A-F]{16})') { $expectedKeyId = $Matches[1] }
-          $sigLines = (Get-Content $renamedSig) | Where-Object { $_.Trim() -ne '' }
-          $sigKeyLine = $sigLines[1].Trim()
+          # Force array — Get-Content returns a bare string when the file has one line,
+          # and indexing a string yields [char] not [string].
+          $sigLines = @(Get-Content $renamedSig | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+          if ($sigLines.Count -lt 2) {
+            throw "Unexpected .sig format in $renamedSig (need at least 2 lines, got $($sigLines.Count))"
+          }
+          $sigKeyLine = $sigLines[1]
           $goodPrefix = 'RUSZCtgkRY8Up'   # v2.1.3 CI (A5148F4524D80A99)
           $badPrefix  = 'RUSrDEjn1uS'    # v2.2.0 manual (869E…)
           Write-Host "Embedded updater pubkey key-id: $expectedKeyId"
