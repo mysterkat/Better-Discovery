@@ -287,6 +287,44 @@ def fetch_historical(
     return result
 
 
+def fetch_many_symbols(
+    symbols: list[str],
+    save_folder: str,
+    tf_specs: list[dict[str, Any]],
+    *,
+    clear_existing: bool = False,
+) -> dict[str, Any]:
+    """Fetch several symbols into the SAME folder so a multi-instrument basket
+    can coexist for cross-instrument discovery.
+
+    ``clear_existing`` wipes the folder ONCE before the first symbol; subsequent
+    symbols accumulate (filenames are ``{symbol}_{tf}.csv`` so they never
+    collide). One symbol failing does not abort the batch — its slot carries an
+    ``error`` and the loop continues. Runs on the current job thread, so each
+    symbol's per-TF progress streams to the same job.
+    """
+    folder = save_folder or DEFAULT_HIST_FOLDER
+    per_symbol: list[dict[str, Any]] = []
+    for i, sym in enumerate(symbols):
+        try:
+            res = fetch_historical(
+                sym, folder, tf_specs,
+                clear_existing=(clear_existing and i == 0),
+            )
+            per_symbol.append({"symbol": sym, **(res if isinstance(res, dict) else {})})
+        except Exception as exc:  # noqa: BLE001 - isolate one symbol's failure
+            per_symbol.append({
+                "symbol": sym, "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+    return {
+        "ok": any(r.get("ok", False) for r in per_symbol),
+        "save_folder": folder,
+        "symbols": list(symbols),
+        "per_symbol": per_symbol,
+    }
+
+
 def candles_for_days(prefix: str, time_value: int, trading_days: int) -> int:
     import import_hist_data as _ih  # type: ignore[import-not-found]
     return _ih.trading_days_to_candles(prefix, time_value, trading_days)

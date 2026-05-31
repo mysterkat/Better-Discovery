@@ -1,13 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   checkMt5,
-  fetchMt5Data,
+  fetchMt5DataMany,
   getCurrentImport,
   getDefaultFolder,
   calcCandles,
   installMt5Helper,
   applyMt5Setup,
   type TfSpec,
+  type Mt5FileResult,
+  type Mt5SymbolResult,
   type Mt5CheckResult,
   type CurrentImport,
   type Mt5InstallResult,
@@ -134,7 +136,7 @@ export default function DataImportTab() {
     try {
       const tfs = rows.map((r) => `${r.prefix.toUpperCase()}${r.time_value}`);
       const r = await applyMt5Setup({
-        symbol,
+        symbol: (symbol.split(/[\s,]+/)[0] || symbol).trim().toUpperCase(),
         timeframes: tfs,
         wait_for_ack_s: 10.0,
       });
@@ -205,13 +207,14 @@ export default function DataImportTab() {
       time_value: r.time_value,
       trading_days: Math.max(1, parseInt(r.trading_days, 10) || 1),
     }));
+    const symbols = symbol.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
     setStarting(true);
     setError(null);
     setJobId(null);
     setJobResult(null);
     try {
-      const ref = await fetchMt5Data({
-        symbol: symbol.trim() || "XAUUSD",
+      const ref = await fetchMt5DataMany({
+        symbols: symbols.length ? symbols : ["XAUUSD"],
         save_folder: folder,
         tf_specs,
         clear_existing: clearExisting,
@@ -262,6 +265,11 @@ export default function DataImportTab() {
   };
 
   const outputFolder = overrideOnce && overrideFolder.trim() ? overrideFolder.trim() : defaultFolder;
+  // Distinct symbols currently on disk, parsed from `{symbol}_{tf}.csv` filenames —
+  // list_current_import returns symbol=null when a multi-instrument basket is present.
+  const importedSymbols = currentImport?.timeframes
+    ? Array.from(new Set(currentImport.timeframes.map((tf) => tf.filename.split("_")[0].toUpperCase()))).join(", ")
+    : "";
   const isDone = !!jobId && (job?.status === "done" || job?.status === "failed");
 
   return (
@@ -385,15 +393,19 @@ export default function DataImportTab() {
       {/* Symbol */}
       <div className="form-section">
         <div className="field">
-          <label className="field-label">Symbol</label>
+          <label className="field-label">Symbol(s)</label>
           <input
-            className="field-input field-sm"
+            className="field-input"
             value={symbol}
             onChange={(e) => setSymbol(e.target.value)}
-            placeholder="XAUUSD"
+            placeholder="XAUUSD, XAGUSD, DXY"
             disabled={isRunning}
           />
-          <span className="field-hint">MT5 symbol name — must match exactly as it appears in Market Watch.</span>
+          <span className="field-hint">
+            One MT5 symbol, or several comma-separated for a multi-instrument basket
+            (e.g. <code>XAUUSD, XAGUSD, DXY</code>). Each must match Market Watch exactly;
+            they all fetch into the same folder so cross-instrument discovery can use them.
+          </span>
         </div>
       </div>
 
@@ -503,7 +515,7 @@ export default function DataImportTab() {
         <div className="form-section">
           <div className="section-label">Currently Imported</div>
           <div className="current-import-banner">
-            <strong>{currentImport.symbol ?? "—"}</strong>
+            <strong>{currentImport.symbol || importedSymbols || "—"}</strong>
             {" · "}
             {currentImport.timeframes.map((tf) => tf.label).join(", ")}
             <span className="field-hint" style={{ marginLeft: 8 }}>
@@ -540,38 +552,52 @@ export default function DataImportTab() {
       {/* Results */}
       {jobResult != null && (() => {
         const r = jobResult as {
-          ok: boolean; terminal?: string; save_folder?: string;
-          files?: { label: string; ok: boolean; candles: number; path: string; error: string | null }[];
+          ok: boolean; save_folder?: string;
+          per_symbol?: Mt5SymbolResult[];
+          files?: Mt5FileResult[];   // legacy single-symbol shape
         };
+        // Normalise single + basket into one per-symbol list.
+        const groups: Mt5SymbolResult[] = r.per_symbol
+          ?? [{ symbol: "", ok: r.ok, files: r.files }];
         return (
           <div className="result-section" style={{ marginTop: 16 }}>
             <div className="section-label">Download Results</div>
             <div className="stat-row">
               <div className="stat-card">
-                <span className="stat-label">Terminal</span>
-                <span className="stat-value" style={{ fontSize: 12 }}>{r.terminal ?? "—"}</span>
-              </div>
-              <div className="stat-card">
                 <span className="stat-label">Saved to</span>
                 <span className="stat-value" style={{ fontSize: 12 }}>{r.save_folder ?? "—"}</span>
               </div>
+              <div className="stat-card">
+                <span className="stat-label">Symbols</span>
+                <span className="stat-value" style={{ fontSize: 12 }}>{groups.length}</span>
+              </div>
             </div>
-            <div className="tf-result-list">
-              {(r.files ?? []).map((f, i) => (
-                <div key={i} className={`tf-result-row ${f.ok ? "tf-result-ok" : "tf-result-err"}`}>
-                  <span className="tf-result-status">{f.ok ? "✓" : "✗"}</span>
-                  <span className="tf-result-label">{f.label.toUpperCase()}</span>
-                  {f.ok ? (
-                    <>
-                      <span className="tf-result-candles">{f.candles.toLocaleString()} candles</span>
-                      <span className="tf-result-path">{f.path}</span>
-                    </>
-                  ) : (
-                    <span className="tf-result-error">{f.error}</span>
-                  )}
+            {groups.map((g, gi) => (
+              <div key={gi} style={{ marginTop: 10 }}>
+                {g.symbol && (
+                  <div className="section-label" style={{ fontSize: 12 }}>
+                    {g.symbol}{g.error ? " ✗" : ""}
+                  </div>
+                )}
+                {g.error && <div className="tf-result-error">{g.error}</div>}
+                <div className="tf-result-list">
+                  {(g.files ?? []).map((f, i) => (
+                    <div key={i} className={`tf-result-row ${f.ok ? "tf-result-ok" : "tf-result-err"}`}>
+                      <span className="tf-result-status">{f.ok ? "✓" : "✗"}</span>
+                      <span className="tf-result-label">{f.label.toUpperCase()}</span>
+                      {f.ok ? (
+                        <>
+                          <span className="tf-result-candles">{f.candles.toLocaleString()} candles</span>
+                          <span className="tf-result-path">{f.path}</span>
+                        </>
+                      ) : (
+                        <span className="tf-result-error">{f.error}</span>
+                      )}
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              </div>
+            ))}
           </div>
         );
       })()}
@@ -583,7 +609,7 @@ export default function DataImportTab() {
             <h3 className="confirm-modal-title">Replace existing import?</h3>
             <p className="confirm-modal-body">
               The hist_data folder currently contains an import of{" "}
-              <strong>{currentImport.symbol ?? "—"}</strong>
+              <strong>{currentImport.symbol || importedSymbols || "—"}</strong>
               {" "}({currentImport.timeframes.length} file
               {currentImport.timeframes.length === 1 ? "" : "s"}).
               Continuing will <strong>delete it</strong> before fetching{" "}

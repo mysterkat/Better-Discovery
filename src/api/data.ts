@@ -79,6 +79,29 @@ export async function fetchMt5Data(req: Mt5FetchRequest): Promise<JobRef> {
   return api<JobRef>("POST", "/data/mt5/fetch", req);
 }
 
+export interface Mt5FetchManyRequest {
+  /** Basket of MT5 symbols fetched into one folder for multi-instrument discovery. */
+  symbols: string[];
+  save_folder: string;
+  tf_specs: TfSpec[];
+  /** Wipe the folder ONCE before the first symbol; the rest accumulate. */
+  clear_existing?: boolean;
+}
+
+/** Per-symbol result entry returned by the fetch-many job. */
+export interface Mt5SymbolResult {
+  symbol: string;
+  ok?: boolean;
+  terminal?: string;
+  save_folder?: string;
+  files?: Mt5FileResult[];
+  error?: string;
+}
+
+export async function fetchMt5DataMany(req: Mt5FetchManyRequest): Promise<JobRef> {
+  return api<JobRef>("POST", "/data/mt5/fetch-many", req);
+}
+
 export async function getCurrentImport(): Promise<CurrentImport> {
   return api<CurrentImport>("GET", "/data/current-import");
 }
