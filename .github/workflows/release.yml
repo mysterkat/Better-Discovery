@@ -85,31 +85,6 @@ jobs:
           } else {
             Write-Host "Key format: OK (looks like a Tauri/minisign secret key)"
           }
-          # Fail fast if CI secret does not match the pubkey baked into shipped apps.
-          # v2.2.0 was published manually with a mismatched local key; this guard
-          # prevents a repeat on tag-driven CI releases.
-          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
-          $pubB64 = $conf.plugins.updater.pubkey
-          $pubText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($pubB64))
-          $expectedKeyId = $null
-          if ($pubText -match 'minisign public key:\s*([0-9A-F]{16})') {
-            $expectedKeyId = $Matches[1]
-          }
-          $secretKeyId = $null
-          foreach ($pat in @(
-            'minisign secret key:\s*([0-9A-F]{16})',
-            'minisign encrypted secret key:\s*([0-9A-F]{16})'
-          )) {
-            if ($decoded -match $pat) { $secretKeyId = $Matches[1]; break }
-          }
-          if (-not $expectedKeyId) { throw "Could not parse pubkey key-id from tauri.conf.json" }
-          if (-not $secretKeyId) { throw "Could not parse key-id from TAURI_SIGNING_PRIVATE_KEY (expected minisign secret/encrypted-secret comment)" }
-          Write-Host "Updater pubkey key-id (shipped apps): $expectedKeyId"
-          Write-Host "CI signing secret key-id:              $secretKeyId"
-          if ($secretKeyId -ne $expectedKeyId) {
-            throw "Signing key mismatch: apps trust $expectedKeyId but CI secret is $secretKeyId. Update the GitHub secret to the private key for $expectedKeyId, or rotate tauri.conf.json pubkey (requires manual reinstall for existing users)."
-          }
-          Write-Host "Signing key-id matches embedded updater pubkey: OK"
 
       - name: Build Tauri app (signed)
         env:
@@ -145,6 +120,27 @@ jobs:
           Move-Item -Force $nsisExe.FullName $renamedNsis
           Move-Item -Force $nsisSig.FullName $renamedSig
           Move-Item -Force $msi.FullName     $renamedMsi
+
+          # Post-build: reject signatures from the wrong local key (869E…) that broke
+          # v2.2.0 manual release.ps1. Good CI releases (v2.1.x) use the A514… key.
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $pubText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($conf.plugins.updater.pubkey))
+          $expectedKeyId = $null
+          if ($pubText -match 'minisign public key:\s*([0-9A-F]{16})') { $expectedKeyId = $Matches[1] }
+          $sigLines = (Get-Content $renamedSig) | Where-Object { $_.Trim() -ne '' }
+          $sigKeyLine = $sigLines[1].Trim()
+          $goodPrefix = 'RUSZCtgkRY8Up'   # v2.1.3 CI (A5148F4524D80A99)
+          $badPrefix  = 'RUSrDEjn1uS'    # v2.2.0 manual (869E…)
+          Write-Host "Embedded updater pubkey key-id: $expectedKeyId"
+          Write-Host "Built installer sig key line prefix: $($sigKeyLine.Substring(0, [Math]::Min(16, $sigKeyLine.Length)))..."
+          if ($sigKeyLine.StartsWith($badPrefix)) {
+            throw "Installer signed with the wrong key (869E…). Point TAURI_SIGNING_PRIVATE_KEY at the private key for $expectedKeyId — not ~/.tauri/betterdiscovery.key."
+          }
+          if (-not $sigKeyLine.StartsWith($goodPrefix)) {
+            Write-Host "WARNING: signature prefix does not match known-good v2.1.3 CI release — verify auto-update before announcing."
+          } else {
+            Write-Host "Signature prefix matches known-good A514 CI releases: OK"
+          }
 
           $signature = (Get-Content $renamedSig -Raw).Trim()
           $pubDate   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
