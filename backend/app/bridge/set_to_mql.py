@@ -80,11 +80,13 @@ _DEFAULTS: dict[str, Any] = {
     "SignalTF4": "PERIOD_CURRENT",
     "DirectionMode": 1,
     "SL_Pct": 0.005220, "TP_Pct": 0.003630, "Lots": 0.10,
+    "Commission_R": 0.0, "Swap_R_PerBar": 0.0,
     "CooldownBars": 3, "BreakevenAtR": 0.0, "UseTrailing": "false",
     "TrailingStart": 1.0, "TrailingStep": 0.5, "MaxHoldBars": 0,
     "TradeAsian": "true", "TradeLondon": "true", "TradeNY": "true",
     "TradeOverlap": "true", "TradeOff": "true",
     "Discrim_Col": 1, "Discrim_Thresh": 0.012000, "Discrim_Dir": 1,
+    "MaxSpreadPoints": 30.0, "MaxDailyLossR": 0.0, "MaxOpenPositions": 1,
     "DebugMode": "false",
     "HoursBan": "", "EODCloseEnabled": "false", "EODCloseHour": 22,
     # rsi14 has natural [0-100] range
@@ -164,7 +166,7 @@ def _fmt_num(v: Any) -> str:
     if n == -999:
         return "-999.0"
     if n == 999:
-        return " 999.0"
+        return "999.0"
     if n == int(n) and abs(n) < 10000:
         return str(int(n))
     return f"{n:.6f}"
@@ -354,6 +356,15 @@ def _build_input_block(parsed: dict[str, Any]) -> str:
     ln(f"input double Lots                = {_fmt_num(merged['Lots'])};")
     ln("")
 
+    # ── Trading costs (mirror simulator's Commission_R / Swap_R_PerBar) ─────
+    ln("//--- Trading costs (in R = risk multiples)")
+    ln("//    Mirror the discovery simulator so live results stay aligned.")
+    ln("//    Commission_R = round-turn cost per trade; Swap_R_PerBar = cost per bar held.")
+    ln("//    Leave at 0.0 to avoid double-charging if broker already reports real costs.")
+    ln(f"input double {padded('Commission_R')}= {_fmt_num(merged['Commission_R'])};")
+    ln(f"input double {padded('Swap_R_PerBar')}= {_fmt_num(merged['Swap_R_PerBar'])};")
+    ln("")
+
     # ── Trade management ──────────────────────────────────────────────────────
     ln("//--- Trade management")
     ln(f"input int    CooldownBars        = {merged['CooldownBars']};")
@@ -380,11 +391,11 @@ def _build_input_block(parsed: dict[str, Any]) -> str:
     ln(f"input int    Discrim_Dir         = {merged['Discrim_Dir']};   // 1=col>thresh->LONG | -1=col>thresh->SHORT")
     ln("")
 
-    # ── Risk controls (not in .set — keep hardcoded defaults) ─────────────────
+    # ── Risk controls ─────────────────────────────────────────────────────────
     ln("//--- Risk controls")
-    ln("input double MaxSpreadPoints     = 30.0;   // Skip entry if spread > this (0=disabled)")
-    ln("input double MaxDailyLossR       = 0.0;    // Max daily loss in R units (0=disabled)")
-    ln("input int    MaxOpenPositions    = 1;      // Max simultaneous positions for this magic")
+    ln(f"input double {padded('MaxSpreadPoints')}= {_fmt_num(merged['MaxSpreadPoints'])};   // Skip entry if spread > this (0=disabled)")
+    ln(f"input double {padded('MaxDailyLossR')}= {_fmt_num(merged['MaxDailyLossR'])};    // Max daily loss in R units (0=disabled)")
+    ln(f"input int    {padded('MaxOpenPositions')}= {merged['MaxOpenPositions']};      // Max simultaneous positions for this magic")
     ln("")
 
     # ── Debug ─────────────────────────────────────────────────────────────────

@@ -112,7 +112,7 @@ if (-not (Test-Path $latestJson)) {
     Write-Host "  >> Generating latest.json..." -ForegroundColor Cyan
 
     $sig     = [System.IO.File]::ReadAllText($sigFile.FullName).Trim()
-    $zipUrl  = "https://github.com/mysterkat/Better-Discovery-releases/releases/download/v$Version/$($zipFile.Name)"
+    $zipUrl  = "https://github.com/mysterkat/better-discovery-releases/releases/download/v$Version/$($zipFile.Name)"
     $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
     $json = [ordered]@{
@@ -163,7 +163,7 @@ if ($zipFile) { $uploadFiles += $zipFile.FullName }
 if ($sigFile) { $uploadFiles += $sigFile.FullName }
 
 & gh release create "v$Version" `
-    --repo "mysterkat/Better-Discovery-releases" `
+    --repo "mysterkat/better-discovery-releases" `
     --title "v$Version" `
     --notes $Notes `
     @uploadFiles
@@ -176,5 +176,5 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Host "  ------------------------------------" -ForegroundColor DarkGray
 Write-Host "  Release v$Version published!" -ForegroundColor Green
-Write-Host "  https://github.com/mysterkat/Better-Discovery-releases/releases/tag/v$Version" -ForegroundColor Cyan
+Write-Host "  https://github.com/mysterkat/better-discovery-releases/releases/tag/v$Version" -ForegroundColor Cyan
 Write-Host ""
