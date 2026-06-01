@@ -95,50 +95,44 @@ jobs:
       - name: Locate artifacts, rename to safe filenames, build latest.json
         id: artifacts
         shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $tag       = "${{ steps.version.outputs.tag }}"
           $version   = "${{ steps.version.outputs.version }}"
           $bundleDir = "src-tauri/target/release/bundle"
 
+          # Tauri v2 with createUpdaterArtifacts=true produces the NSIS installer
+          # (-setup.exe) and an updater signature for it (-setup.exe.sig). The
+          # updater downloads and runs the .exe directly — there is NO .nsis.zip
+          # in v2 (that was the v1 format). The .sig content goes inside
+          # latest.json; the .sig file itself is not uploaded.
           $nsisExe = Get-ChildItem -Path "$bundleDir/nsis" -Filter "*-setup.exe" | Select-Object -First 1
+          $nsisSig = Get-ChildItem -Path "$bundleDir/nsis" -Filter "*-setup.exe.sig" | Select-Object -First 1
           $msi     = Get-ChildItem -Path "$bundleDir/msi"  -Filter "*.msi"          | Select-Object -First 1
 
           if (-not $nsisExe) { throw "NSIS installer not found" }
+          if (-not $nsisSig) { throw "NSIS updater signature (.exe.sig) not found — TAURI_SIGNING_PRIVATE_KEY may be unset or wrong" }
           if (-not $msi)     { throw "MSI installer not found" }
 
           # Rename to space-free names so GitHub doesn't mangle the URL on upload
           $newNsisName = "BetterDiscovery_${version}_x64-setup.exe"
+          $newSigName  = "BetterDiscovery_${version}_x64-setup.exe.sig"
           $newMsiName  = "BetterDiscovery_${version}_x64_en-US.msi"
-          $newZipName  = "BetterDiscovery_${version}_x64-setup.nsis.zip"
-          $newSigName  = "BetterDiscovery_${version}_x64-setup.nsis.zip.sig"
 
           $renamedNsis = Join-Path $nsisExe.DirectoryName $newNsisName
+          $renamedSig  = Join-Path $nsisSig.DirectoryName $newSigName
           $renamedMsi  = Join-Path $msi.DirectoryName     $newMsiName
 
           Move-Item -Force $nsisExe.FullName $renamedNsis
+          Move-Item -Force $nsisSig.FullName $renamedSig
           Move-Item -Force $msi.FullName     $renamedMsi
 
-          # Tauri updater expects a .nsis.zip containing the installer, plus a
-          # matching .sig. The build only produces the raw .exe + .exe.sig —
-          # we must package and re-sign for the updater to work.
-          $zipPath = Join-Path $nsisExe.DirectoryName $newZipName
-          Compress-Archive -Path $renamedNsis -DestinationPath $zipPath -Force
-          Write-Host "Created updater zip: $newZipName"
-
-          # Sign the .nsis.zip (the updater verifies THIS signature, not the .exe.sig)
-          & npx tauri signer sign --private-key "$env:TAURI_SIGNING_PRIVATE_KEY" --password "$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$zipPath"
-          $sigPath = "$zipPath.sig"
-          if (-not (Test-Path $sigPath)) { throw ".nsis.zip.sig not created after signing" }
-
-          $signature = (Get-Content $sigPath -Raw).Trim()
+          $signature = (Get-Content $renamedSig -Raw).Trim()
           $pubDate   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-          $url       = "https://github.com/mysterkat/better-discovery-releases/releases/download/$tag/$newZipName"
+          $url       = "https://github.com/mysterkat/better-discovery-releases/releases/download/$tag/$newNsisName"
 
-          # Version must be bare semver (no "v" prefix) — Tauri compares it
-          # against the app version in tauri.conf.json which has no prefix.
+          # Version MUST be bare semver (no "v" prefix). Tauri's updater parses
+          # this with the semver crate, which rejects a leading "v" and would
+          # fail the whole update check. (This was the v2.2.1 auto-update bug.)
           $manifest = [ordered]@{
             version   = $version
             notes     = "See release page for details."
@@ -155,9 +149,8 @@ jobs:
           Write-Host "--- latest.json ---"
           Get-Content latest.json
 
-          echo "nsis_path=$renamedNsis"   >> $env:GITHUB_OUTPUT
-          echo "msi_path=$renamedMsi"     >> $env:GITHUB_OUTPUT
-          echo "zip_path=$zipPath"        >> $env:GITHUB_OUTPUT
+          echo "nsis_path=$renamedNsis" >> $env:GITHUB_OUTPUT
+          echo "msi_path=$renamedMsi"   >> $env:GITHUB_OUTPUT
 
       - name: Publish release to public repo
         env:
@@ -168,7 +161,6 @@ jobs:
           $version   = "${{ steps.version.outputs.version }}"
           $nsisPath  = "${{ steps.artifacts.outputs.nsis_path }}"
           $msiPath   = "${{ steps.artifacts.outputs.msi_path }}"
-          $zipPath   = "${{ steps.artifacts.outputs.zip_path }}"
           $repo      = "mysterkat/better-discovery-releases"
 
           # Delete prior release with this tag if it exists (idempotent re-runs)
@@ -184,7 +176,6 @@ jobs:
             --notes "Release $version. Built from private source repo." `
             "$nsisPath" `
             "$msiPath" `
-            "$zipPath" `
             "latest.json"
 
       # ── v0.7.1: mirror a notes-only release to the source repo ───────────

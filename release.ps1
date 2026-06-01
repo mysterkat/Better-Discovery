@@ -62,80 +62,55 @@ if ($buildExit -ne 0) {
 Write-Host "     [OK] Build complete" -ForegroundColor Green
 
 # ── 4. Locate artifacts ───────────────────────────────────────────────────────
+# Tauri v2 (createUpdaterArtifacts=true) produces the NSIS installer
+# (-setup.exe) and its updater signature (-setup.exe.sig) during the build
+# above, since TAURI_SIGNING_PRIVATE_KEY was set. The updater downloads and
+# runs the .exe directly — there is NO .nsis.zip in v2.
 $bundleDir  = Join-Path $ScriptDir "src-tauri\target\release\bundle"
 $nsisDir    = Join-Path $bundleDir "nsis"
 $latestJson = Join-Path $bundleDir "latest.json"
 
-$installer = Get-ChildItem $nsisDir -Filter "*setup.exe" | Where-Object { $_.Name -notlike "*.zip" } | Select-Object -First 1
-$zipFile   = Get-ChildItem $nsisDir -Filter "*.nsis.zip"     | Select-Object -First 1
-$sigFile   = Get-ChildItem $nsisDir -Filter "*.nsis.zip.sig" | Select-Object -First 1
+$installer = Get-ChildItem $nsisDir -Filter "*-setup.exe"     | Select-Object -First 1
+$sigFile   = Get-ChildItem $nsisDir -Filter "*-setup.exe.sig" | Select-Object -First 1
 
 if (-not $installer) {
-    Write-Host "  [ERROR] Installer not found in $nsisDir" -ForegroundColor Red
+    Write-Host "  [ERROR] Installer (-setup.exe) not found in $nsisDir" -ForegroundColor Red
+    exit 1
+}
+if (-not $sigFile) {
+    Write-Host "  [ERROR] Updater signature (-setup.exe.sig) not found — was the build signed?" -ForegroundColor Red
     exit 1
 }
 
-# ── 5. Create .nsis.zip if Tauri didn't ──────────────────────────────────────
-if (-not $zipFile) {
-    Write-Host ""
-    Write-Host "  >> Creating updater zip..." -ForegroundColor Cyan
-    $zipPath = Join-Path $nsisDir ($installer.BaseName + ".nsis.zip")
-    Compress-Archive -Path $installer.FullName -DestinationPath $zipPath -Force
-    $zipFile = Get-Item $zipPath
-    Write-Host "     [OK] $($zipFile.Name)" -ForegroundColor Green
-}
+# ── 5. Generate latest.json ───────────────────────────────────────────────────
+Write-Host ""
+Write-Host "  >> Generating latest.json..." -ForegroundColor Cyan
 
-# ── 6. Sign .nsis.zip if not already signed ───────────────────────────────────
-if (-not $sigFile) {
-    Write-Host ""
-    Write-Host "  >> Signing updater zip..." -ForegroundColor Cyan
-    $keyContent = [System.IO.File]::ReadAllText($KeyFile).Trim()
-    Push-Location $ScriptDir
-    & npm run tauri -- signer sign -k $keyContent $zipFile.FullName
-    $signExit = $LASTEXITCODE
-    Pop-Location
-    if ($signExit -ne 0) {
-        Write-Host "  [FAILED] tauri signer sign exited $signExit" -ForegroundColor Red
-        exit 1
-    }
-    $sigFile = Get-Item ($zipFile.FullName + ".sig") -ErrorAction SilentlyContinue
-    if (-not $sigFile) {
-        Write-Host "  [ERROR] .sig file not created after signing" -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "     [OK] $($sigFile.Name)" -ForegroundColor Green
-}
+$sig     = [System.IO.File]::ReadAllText($sigFile.FullName).Trim()
+$exeUrl  = "https://github.com/mysterkat/better-discovery-releases/releases/download/v$Version/$($installer.Name)"
+$pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
-# ── 7. Generate latest.json ───────────────────────────────────────────────────
-if (-not (Test-Path $latestJson)) {
-    Write-Host ""
-    Write-Host "  >> Generating latest.json..." -ForegroundColor Cyan
-
-    $sig     = [System.IO.File]::ReadAllText($sigFile.FullName).Trim()
-    $zipUrl  = "https://github.com/mysterkat/better-discovery-releases/releases/download/v$Version/$($zipFile.Name)"
-    $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-
-    $json = [ordered]@{
-        version   = $Version
-        notes     = $Notes
-        pub_date  = $pubDate
-        platforms = [ordered]@{
-            "windows-x86_64" = [ordered]@{
-                signature = $sig
-                url       = $zipUrl
-            }
+# version MUST be bare semver (no "v") — Tauri's updater parses it with the
+# semver crate, which rejects a leading "v" and fails the whole update check.
+$json = [ordered]@{
+    version   = $Version
+    notes     = $Notes
+    pub_date  = $pubDate
+    platforms = [ordered]@{
+        "windows-x86_64" = [ordered]@{
+            signature = $sig
+            url       = $exeUrl
         }
     }
-
-    $jsonStr = $json | ConvertTo-Json -Depth 5
-    [System.IO.File]::WriteAllText($latestJson, $jsonStr, [System.Text.UTF8Encoding]::new($false))
-    Write-Host "     [OK] latest.json generated" -ForegroundColor Green
 }
+
+$jsonStr = $json | ConvertTo-Json -Depth 5
+[System.IO.File]::WriteAllText($latestJson, $jsonStr, [System.Text.UTF8Encoding]::new($false))
+Write-Host "     [OK] latest.json generated" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "  >> Artifacts ready:" -ForegroundColor Cyan
 Write-Host "     $($installer.Name)" -ForegroundColor Gray
-Write-Host "     $($zipFile.Name)" -ForegroundColor Gray
 Write-Host "     $($sigFile.Name)" -ForegroundColor Gray
 Write-Host "     latest.json" -ForegroundColor Gray
 
@@ -159,7 +134,6 @@ Write-Host ""
 Write-Host "  >> Creating GitHub release v$Version..." -ForegroundColor Cyan
 
 $uploadFiles = @($installer.FullName, $latestJson)
-if ($zipFile) { $uploadFiles += $zipFile.FullName }
 if ($sigFile) { $uploadFiles += $sigFile.FullName }
 
 & gh release create "v$Version" `
