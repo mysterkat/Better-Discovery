@@ -169,9 +169,13 @@ def export_onnx(model, feats: list[str], out_path: str | Path) -> str | None:
         lgb.LGBMClassifier, "LightGbmLGBMClassifier",
         calculate_linear_classifier_output_shapes, convert_lightgbm,
         options={"nocl": [True, False], "zipmap": [True, False]})
+    # Pin opsets explicitly: tree ensembles live in the ai.onnx.ml domain and
+    # skl2onnx refuses to convert without a version it knows; a moderate main
+    # opset keeps the file loadable by MT5's bundled ONNX runtime.
     onx = convert_sklearn(
         model, initial_types=[("input", FloatTensorType([1, len(feats)]))],
-        options={id(model): {"zipmap": False}})
+        options={id(model): {"zipmap": False}},
+        target_opset={"": 15, "ai.onnx.ml": 3})
     out_path.write_bytes(onx.SerializeToString())
     return str(out_path)
 
