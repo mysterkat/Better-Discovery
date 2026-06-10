@@ -10,8 +10,8 @@ reporting (copy the exact console line / screenshot).
 
 - [ ] Open the installed app → it should offer the auto-update (or Help/About
       shows the new version after restart).
-- **PASS:** app version shows **2.3.1** (2.3.0 only ships the fixes; 2.3.1
-  adds the ONNX training data — wait for it if the updater still shows 2.3.0).
+- **PASS:** app version shows **2.3.2** (2.3.0 = fidelity fixes, 2.3.1 = ONNX
+  training data, 2.3.2 = tuned defaults + cost knobs — update until you see it).
 - [ ] After updating, fully quit and reopen once (backend restarts with the
       new code).
 
@@ -40,9 +40,13 @@ Settings to confirm before running (Discovery tab):
 
 - [ ] `MT5_SERVER_UTC_OFFSET` matches your broker (2 winter / 3 summer for
       most EU brokers).
-- [ ] `SPREAD_PTS` ≈ your symbol's typical spread; `COMMISSION_R` /
-      `SWAP_R_PER_BAR` set if your account charges them (else 0).
-- [ ] Leave `GENE_SCORE_BOX_ONLY` / `GATE_BOX_ONLY` ON (defaults).
+- [ ] `SPREAD_PTS` ≈ your symbol's typical spread. `COMMISSION_R` now
+      defaults to **0.02** (FTMO-style round-turn estimate, sim-only) — set 0
+      if your account is spread-only. The exported `.set` always carries
+      `Commission_R=0` so the EA never double-charges.
+- [ ] Leave `GENE_SCORE_BOX_ONLY` / `GATE_BOX_ONLY` ON (defaults). The
+      "Research (experimental)" group's Enhanced Features toggle is now ON by
+      default (seeds clustering only — no EA-parity impact).
 
 Run discovery, then check the output folder (`userdata\discovery\seed_*`):
 
