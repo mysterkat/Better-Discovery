@@ -2,6 +2,8 @@
 
 This doc explains exactly what you need to prepare in MetaTrader 5 so the EA generated from a discovered pattern (`.set` → `.mq5`) runs correctly.
 
+**Compile errors (`undeclared identifier Commission_R`, etc.)?** See [docs/MT5_EA_COMPILE.md](docs/MT5_EA_COMPILE.md) for the full regenerate-and-copy workflow.
+
 ## TL;DR
 
 1. **Download historical data** in MT5 for every timeframe used in your discovery run (primary + signal TFs).

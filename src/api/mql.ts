@@ -3,6 +3,11 @@ import { api } from "./client";
 export interface MqlExportResult {
   ok: boolean;
   path: string;
+  inputs_present: number;
+  inputs_required: number;
+  missing_inputs: string[];
+  has_commission_r: boolean;
+  has_swap_r_per_bar: boolean;
 }
 
 export async function getTemplate(): Promise<{ path: string }> {

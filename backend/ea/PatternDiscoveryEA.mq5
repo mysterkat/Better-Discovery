@@ -29,6 +29,7 @@
 //|  24=rolling_sharpe 25=sd_zone      26=vwap_dist                 |
 //|                                                                  |
 //|  CHANGELOG:                                                      |
+//|  v4.01 — Modeled costs: input Commission_R / Swap_R_PerBar (.set names)|
 //|  v4.00 — N-TF support: replaced hardcoded M15+H1 with up to 4   |
 //|           configurable SignalTF inputs. mtf_bull_score is now    |
 //|           additive across all active signal TFs (range 0..N+1). |
@@ -65,7 +66,7 @@
 //|         — Improved: GetMTFbull returns 0 on H1 EMPTY (not skip)|
 //+------------------------------------------------------------------+
 #property copyright "Pattern Discovery v6"
-#property version   "4.00"
+#property version   "4.01"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -80,6 +81,7 @@ CDealInfo     deal;
 //==================================================================//
 //  INPUT PARAMETERS  (names must match COL_TO_EA mapping exactly)  //
 //==================================================================//
+// @BD_INPUT_BEGIN  (Set-to-MQL converter replaces through @BD_INPUT_END only)
 
 //--- Identity
 input long   MagicNumber         = 10001;
@@ -104,10 +106,7 @@ input double SL_Pct              = 0.005220;
 input double TP_Pct              = 0.003630;
 input double Lots                = 0.10;
 
-//--- Trading costs (in R = risk multiples), mirroring the discovery simulator's
-//    COMMISSION_R / SWAP_R_PER_BAR so live results stay aligned with the .set's
-//    scored metrics. Commission_R = round-turn cost per trade; Swap_R_PerBar =
-//    cost per bar held. Defaults 0.0 = no cost applied.
+//--- Trading costs (R multiples) — names match discovery .set (Commission_R, Swap_R_PerBar)
 input double Commission_R        = 0.0;
 input double Swap_R_PerBar       = 0.0;
 
@@ -271,6 +270,8 @@ input double sd_zone_hi          =  999.0;
 //--- Entry filter: VWAP distance [% from VWAP, 0 if no vol]
 input double vwap_dist_lo        = -999.0;
 input double vwap_dist_hi        =  999.0;
+
+// @BD_INPUT_END
 
 //==================================================================//
 //  GLOBALS                                                          //
@@ -691,8 +692,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    //    rValue used below. NOTE: deal.Swap()/deal.Commission() above are the
    //    broker's REAL costs already in dealProfit — these modeled costs are an
    //    ADDITIONAL synthetic charge that exists only to mirror the simulator.
-   //    Leave both inputs at 0.0 to avoid double-charging against a broker that
-   //    already reports real swap/commission.
+   //    Leave Commission_R and Swap_R_PerBar at 0.0 to avoid double-charging.
    double modeledCostR = 0.0;
    if(Commission_R > 0.0 || Swap_R_PerBar > 0.0)
      {

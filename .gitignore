@@ -42,3 +42,9 @@ Thumbs.db
 # Tauri signing keys — never commit
 *.key
 *.key.pub
+
+# Compiled MQL5 binaries (rebuilt from .mq5 via MetaEditor)
+*.ex5
+
+# Local-only doc backups
+*.local.bak.md

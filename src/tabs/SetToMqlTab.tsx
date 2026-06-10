@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { exportMql, getTemplate } from "../api/mql";
+import { exportMql, getTemplate, type MqlExportResult } from "../api/mql";
 import { openFolder } from "../api/system";
 
 export default function SetToMqlTab() {
@@ -8,6 +8,7 @@ export default function SetToMqlTab() {
   const [outputPath, setOutputPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [report, setReport] = useState<MqlExportResult | null>(null);
 
   useEffect(() => {
     getTemplate()
@@ -21,9 +22,14 @@ export default function SetToMqlTab() {
     setLoading(true);
     setError(null);
     setOutputPath(null);
+    setReport(null);
     try {
       const result = await exportMql(content, templatePath || null);
       setOutputPath(result.path);
+      setReport(result);
+      if (result.missing_inputs?.length) {
+        setError(`Missing inputs: ${result.missing_inputs.join(", ")}`);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -34,7 +40,18 @@ export default function SetToMqlTab() {
   const handleClear = () => {
     setSetContent("");
     setOutputPath(null);
+    setReport(null);
     setError(null);
+  };
+
+  const loadSetFile = (file: File | null) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      setSetContent(String(reader.result ?? ""));
+      setError(null);
+    };
+    reader.readAsText(file);
   };
 
   return (
@@ -55,8 +72,17 @@ export default function SetToMqlTab() {
       )}
 
       <div className="form-section">
+        <label className="field-label">Load <code>.set</code> file</label>
+        <input
+          type="file"
+          accept=".set,text/plain"
+          onChange={(e) => loadSetFile(e.target.files?.[0] ?? null)}
+        />
+      </div>
+
+      <div className="form-section">
         <label className="field-label">
-          Paste <code>.set</code> file content
+          Or paste <code>.set</code> file content
         </label>
         <textarea
           className="code-textarea"
@@ -97,9 +123,18 @@ export default function SetToMqlTab() {
 
       {error && <div className="alert alert-error">{error}</div>}
 
-      {outputPath && (
+      {outputPath && !error && (
         <div className="alert alert-success">
           <strong>✓ Conversion complete</strong>
+          {report && (
+            <p style={{ margin: "8px 0 4px" }}>
+              Inputs: {report.inputs_present}/{report.inputs_required}
+              {" · "}
+              Commission_R: {report.has_commission_r ? "yes" : "NO"}
+              {" · "}
+              Swap_R_PerBar: {report.has_swap_r_per_bar ? "yes" : "NO"}
+            </p>
+          )}
           <p style={{ margin: "8px 0 4px" }}>Output saved to:</p>
           <code className="output-path-code">{outputPath}</code>
           <div style={{ marginTop: 10 }}>

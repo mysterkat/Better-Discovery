@@ -380,6 +380,22 @@ PARAM_META: dict[str, ParamMeta] = {
                                         "Lot size for quick MC", min=0.01, max=10.0, step=0.01),
     "MC_MAX_DAYS":           ParamMeta("Auto-MC Max Days",     "MC Auto-run", "int",
                                         "Simulation horizon for quick MC", min=10, max=365, step=5),
+    # ── AI Review (advisory only — never gates or re-ranks patterns) ─────────
+    "AI_REVIEW_ENABLED":     ParamMeta("AI Review",            "AI Review", "bool",
+                                        "After the run, send ranked patterns + config to an LLM that "
+                                        "writes ai_review_seed{seed}.md (overfit flags, MT5 verification "
+                                        "order, knob suggestions). Advisory only — results are unchanged. "
+                                        "Needs a local Ollama (no key) or DEEPSEEK_API_KEY in the "
+                                        "environment. See docs/AI_REVIEW.md."),
+    "AI_REVIEW_BASE_URL":    ParamMeta("AI Base URL",          "AI Review", "str",
+                                        "OpenAI-compatible endpoint. Empty = auto: DeepSeek cloud if an "
+                                        "API key is set, else local Ollama (http://localhost:11434/v1)."),
+    "AI_REVIEW_MODEL":       ParamMeta("AI Model",             "AI Review", "str",
+                                        "Model name (e.g. deepseek-chat, llama3.1, qwen2.5:14b). "
+                                        "Empty = auto-pick to match the endpoint."),
+    "AI_REVIEW_TIMEOUT_S":   ParamMeta("AI Timeout (s)",       "AI Review", "int",
+                                        "Max seconds to wait for the review before continuing without it",
+                                        min=10, max=600, step=10),
 }
 
 # Flat set used as whitelist — derived from the metadata map so the two stay in sync.
@@ -436,6 +452,8 @@ _ADVANCED_KEYS: set[str] = {
     "CORRELATION_THRESHOLD", "RECENT_BARS",
     # MC Auto-run — RUN_MC_ON_TOP_N is the master toggle; the rest are sizing
     "MC_N_SIMS", "MC_BALANCE", "MC_LOT", "MC_MAX_DAYS",
+    # AI Review — the on/off toggle stays core; endpoint tuning is advanced
+    "AI_REVIEW_BASE_URL", "AI_REVIEW_MODEL", "AI_REVIEW_TIMEOUT_S",
 }
 for _k in _ADVANCED_KEYS:
     if _k in PARAM_META:

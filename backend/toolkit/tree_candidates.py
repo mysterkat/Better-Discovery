@@ -105,6 +105,11 @@ def cluster_by_lightgbm_leaves(
     """
     import lightgbm as lgb  # imported lazily so missing dep doesn't break import
 
+    # idx_tr arrives as a Python list from build_features_parallel(); vectorised
+    # ops like (idx_tr + forward_bars) require a ndarray.
+    idx_tr = np.asarray(idx_tr, dtype=np.int64)
+    X_tr = np.asarray(X_tr)
+
     hi = df_train["high"].values
     lo = df_train["low"].values
     cl = df_train["close"].values
@@ -136,7 +141,8 @@ def cluster_by_lightgbm_leaves(
         verbose=-1,
         n_jobs=-1,
     )
-    model.fit(X_fit, y_fit)
+    feat_names = [f"enc_{i}" for i in range(X_fit.shape[1])]
+    model.fit(X_fit, y_fit, feature_name=feat_names)
 
     # Predict leaf indices per (bar, tree).  Shape: (n_bars, n_trees).
     leaf_indices = model.predict(X_tr, pred_leaf=True)
@@ -226,6 +232,8 @@ def _walk_tree(
     # decision_type defaults to "<=" for numerical features.
     left = node.get("left_child", {})
     right = node.get("right_child", {})
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return
 
     # LEFT branch: feat <= threshold → upper bound tightens
     left_bounds = dict(current_bounds)
@@ -260,15 +268,19 @@ def assign_test_bars_to_leaves(
 
     # Pre-compute the train path list for nearest-neighbour fallback.
     train_paths = list(train_labels_by_path.keys())
-    train_paths_arr = np.asarray(train_paths) if train_paths else None
 
     labels_te = np.zeros(len(X_te), dtype=np.int32)
     for j, row in enumerate(leaf_indices):
-        p = tuple(row)
+        p = tuple(int(x) for x in row)
         if p in train_labels_by_path:
             labels_te[j] = train_labels_by_path[p]
-        elif train_paths_arr is not None:
-            # Hamming distance on the leaf-path tuple
-            dists = (train_paths_arr != np.asarray(row)).sum(axis=1)
-            labels_te[j] = train_labels_by_path[train_paths[int(np.argmin(dists))]]
+        elif train_paths:
+            # Hamming distance on the leaf-path tuple (object array of tuples
+            # does not compare element-wise with != reliably).
+            row_tuple = tuple(int(x) for x in row)
+            best_k = min(
+                range(len(train_paths)),
+                key=lambda k: sum(a != b for a, b in zip(train_paths[k], row_tuple)),
+            )
+            labels_te[j] = train_labels_by_path[train_paths[best_k]]
     return labels_te

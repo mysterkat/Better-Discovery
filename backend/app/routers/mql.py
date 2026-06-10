@@ -23,11 +23,12 @@ def mql_export(req: MqlExportRequest) -> dict:
             req.template_path,
             req.output_name,
         )
+        report = mql_bridge.export_report(path)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"ok": True, "path": path}
+    return {"ok": True, **report}
 
 
 @router.get("/mql/template")

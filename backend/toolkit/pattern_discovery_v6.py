@@ -117,7 +117,7 @@ _TOOLKIT_DIR  = _os.path.dirname(_os.path.abspath(__file__))
 _REPO_ROOT    = _os.path.dirname(_os.path.dirname(_TOOLKIT_DIR))  # …/BETTER DISCOVERY
 DATA_FOLDER   = _os.path.join(_REPO_ROOT, "userdata", "hist_data")
 # Up to 5 timeframe slots. Empty filename = slot unused.
-TF1_FILE      = "xauusd_m5.csv"
+TF1_FILE      = "xauusd_m10.csv"
 TF2_FILE      = "xauusd_m15.csv"
 TF3_FILE      = "xauusd_h1.csv"
 TF4_FILE      = ""
@@ -169,7 +169,7 @@ INDICATOR_WARMUP_BARS = 250
 # Multi-seed batch: set to 1 to run once (original behaviour).
 # Set to e.g. 8 to run 8 different seeds automatically and collect all
 # unique patterns across runs into a combined report.
-MULTI_SEED_COUNT = 8   # FTMO: wider seed sweep → more robust pattern set
+MULTI_SEED_COUNT = 4   # box-only is slower; 4 diverse seeds for a calibration run (crank after timing known)
 MULTI_SEED_BASE  = RANDOM_SEED   # seeds = BASE, BASE+1, BASE+2, …
 
 WINDOW_SIZE = 5
@@ -226,8 +226,8 @@ COOLDOWN_BARS           = 4    # FTMO: longer cooldown → fewer clustered losse
 #                         and reports the choice. Empty list = OFF (use the
 #                         single fixed FORWARD_BARS, unchanged behaviour).
 USE_EXT_FEATURES        = set()    # e.g. {'structure','time','normalize'}
-USE_TRIPLE_BARRIER      = False
-USE_BETA_NEUTRAL_LABELS = False
+USE_TRIPLE_BARRIER      = True     # match the app run's labeling (triple_barrier SL/TP)
+USE_BETA_NEUTRAL_LABELS = True     # match the app run's labeling (beta-neutral direction)
 FORWARD_BARS_SWEEP      = []       # e.g. [12, 24, 48]
 # UI-friendly toggles (bool → JSON-serialisable, so spawn-pool workers inherit
 # them via _app_override.json; sets/lists do not serialise). These let the app
@@ -267,12 +267,15 @@ SLTP_EVOLVE_MIN = 0.5
 SLTP_EVOLVE_MAX = 2.0
 
 # Genetic
-GENETIC_GENERATIONS      = 20
-GENETIC_POPULATION       = 70
+# Budget bumped (was 20/70). Larger pop + more gens lets the GA explore the
+# feasible region harder once graded fitness gives it a gradient to climb.
+# Runtime scales ~linearly with gens×pop; tune down if a run is too slow.
+GENETIC_GENERATIONS      = 120
+GENETIC_POPULATION       = 160
 GENETIC_MUTATE_RATE      = 0.25
 GENE_N_COLS_MIN          = 3
-GENE_N_COLS_MAX          = 6
-GENE_REPAIR_ATTEMPTS     = 3
+GENE_N_COLS_MAX          = 7
+GENE_REPAIR_ATTEMPTS     = 5
 GENE_DIVERSITY_THRESHOLD = 0.70
 GENE_ISLAND_COUNT        = 4
 GENE_MIGRATION_INTERVAL  = 10
@@ -281,6 +284,40 @@ GENE_MIGRATION_INTERVAL  = 10
 # maintains diversity without spawning GENE_ISLAND_COUNT separate processes.
 # Set to False to revert to island model (for A/B benchmarking).
 GENE_USE_CROWDING        = True
+
+# Graded (continuous) fitness. When True, _score_genetic returns small graded
+# "sub-feasible" credit for rules that ALMOST qualify (close on retention, trade
+# count, or break-even RR) instead of a flat 0.0. This turns the previously flat
+# zero-plateau into a gradient the GA can climb, so it reaches the feasible
+# region far more reliably (the #1 reason the GA struggled to find passers).
+# Feasible rules are offset by _GENE_FEASIBLE_OFFSET so they ALWAYS outrank any
+# sub-feasible rule — the final quality bar is unchanged. Set False to revert.
+GENE_GRADED_FITNESS      = True
+_GENE_FEASIBLE_OFFSET    = 0.30   # feasible scores shifted above the [0,0.30) sub-feasible band
+
+# Box-only (EA-faithful) scoring inside the GA fitness. When True, the GA scores
+# every rule on ALL train bars matching its box — what the EA fires — instead of
+# cluster/shape members. This is the most honest but also the HEAVIEST path (it can
+# hang on loose boxes until the perf work in _score_genetic lands). Mode B keeps
+# this OFF (fast cluster-gated GA) while still gating/reporting box-only below.
+# MODE A (now active): hang-proofed by MAX_MATCH_FRAC + GENE_CACHE_MAX below.
+GENE_SCORE_BOX_ONLY      = True
+
+# Gate + reported metrics use box-only (EA-faithful) numbers regardless of how the
+# GA scored. This is the honest-reporting half: the GA may explore cluster-gated
+# (fast), but a pattern only PASSES / is reported on what the EA will actually do
+# (bt_final + bt_test run box_only, gate reads those). Keep True for honest results.
+GATE_BOX_ONLY            = True
+
+# ── Box-only performance guards (make GENE_SCORE_BOX_ONLY viable, no hang) ────
+# A loose box (few/no conditions) matches a huge fraction of the 108k-bar train
+# set; the per-trade cooldown sim then loops over tens of thousands of bars per
+# fitness eval → the GA stalls. MAX_MATCH_FRAC rejects such boxes cheaply BEFORE
+# the sim (only in box-only mode), which also steers the GA toward selective,
+# tradeable rules. GENE_CACHE_MAX bounds the per-worker match-mask cache so it
+# can't balloon over the full bar set (the memory wall that killed workers).
+MAX_MATCH_FRAC           = 0.25   # box-only: reject boxes firing on >25% of bars
+GENE_CACHE_MAX           = 4000   # max cached (col,lo,hi) masks per worker
 
 # v1.0 surrogate fitness model — wraps the GA optimizer.
 # After SURROGATE_MIN_SAMPLES real evals the GBM predicts fitness;
@@ -300,21 +337,21 @@ SURROGATE_RETRAIN_EVERY  = 20     # retrain after every N new real evals
 #              whose member bars share similar predicted forward returns.
 #              Replaces clustering with profit-aware partitioning; the
 #              optimizer then polishes the bounds.  Requires lightgbm.
-CLUSTERING_METHOD        = "kmeans"
+CLUSTERING_METHOD        = "lightgbm"
 # Default ensemble = 1 tree so the cluster count is bounded by num_leaves
 # (comparable to KMeans's N_CLUSTERS).  Raising n_estimators multiplies
 # cluster count combinatorially — 3 trees × 32 leaves can yield 100-200
 # clusters in practice, which is too granular for the downstream pipeline.
 LIGHTGBM_N_ESTIMATORS    = 1
-LIGHTGBM_NUM_LEAVES      = 24      # max leaves per tree (≈ KMeans N_CLUSTERS)
+LIGHTGBM_NUM_LEAVES      = 32      # more leaf-clusters = more diverse warm-start seeds for box-only GA
 LIGHTGBM_MIN_SAMPLES_LEAF = 30     # minimum bars per leaf
 LIGHTGBM_LEARNING_RATE   = 0.05    # tree shrinkage
 
 # Pass 2
 TOP_FRACTION_PASS2       = 0.25
 MIN_TRADES_PER_DAY_PASS2 = 0.5
-PASS2_GENERATIONS        = 20
-PASS2_POPULATION         = 30
+PASS2_GENERATIONS        = 30
+PASS2_POPULATION         = 50
 PASS2_MUTATE_RATE        = 0.15
 PASS2_QUANTILE_LO        = 0.25
 PASS2_QUANTILE_HI        = 0.75
@@ -381,13 +418,23 @@ MIN_FREQ_PER_DAY        = 0.3
 # demands a fixed fraction of the edge the target aims for. One knob keeps the
 # floors coherent across the two scales and auto-tracks the targets. See
 # _wr_floor()/_pf_floor(). FTMO: at k=0.45: WR 52.25, PF 1.225.
-FILTER_EDGE_K           = 0.45   # FTMO: stricter edge floors (was 0.30)
+FILTER_EDGE_K           = 0.30   # realistic floors for honest box-only: PF>=1.15, WR>=51.5
 WR_BREAKEVEN            = 50.0
 PF_BREAKEVEN            = 1.0
-MAX_DRAWDOWN_R          = 10.0   # FTMO: cap path drawdown (was 15.0)
-MAX_CONSEC_LOSSES       = 5      # FTMO: reject streaky patterns (was 8)
-MIN_TIME_CONSISTENCY    = 0.45   # FTMO: demand steadier P&L over time (was 0.30)
+MAX_DRAWDOWN_R          = 12.0   # soft now; raised so it's not a constant marginal-fail
+MAX_CONSEC_LOSSES       = 8      # soft now; realistic for natural variance
+MIN_TIME_CONSISTENCY    = 0.35   # soft now; realistic OOS consistency bar
 MIN_TEST_TRADES_PER_DAY = 0.3
+# Hard/soft filter gate. A pattern is DROPPED if it fails any HARD filter
+# (true disqualifiers: must be profitable + actually trade enough out-of-sample).
+# Otherwise it PASSES — tagged MARGINAL — as long as it fails at most
+# MAX_SOFT_FAILS of the remaining SOFT (quality-proxy) filters. This stops a
+# profitable, tradeable rule from being rejected for a few proxy breaks; the real
+# FTMO verdict comes from the MC sim + EA-OOS + your MT5 backtest, not this
+# pre-screen. Move any name into HARD_FILTERS to make it a hard veto again, or set
+# MAX_SOFT_FAILS=0 to require ALL soft filters (the old strict behaviour).
+HARD_FILTERS            = {"profit_factor", "per_day", "test_trades"}
+MAX_SOFT_FAILS          = 4
 CORRELATION_THRESHOLD   = 0.70
 RECENT_BARS             = 8000
 
@@ -397,6 +444,22 @@ MC_N_SIMS         = 10000
 MC_BALANCE        = 100000
 MC_LOT            = 0.10
 MC_MAX_DAYS       = 60
+
+# ── Optional AI-in-the-loop review (ADVISORY ONLY, OFF by default) ────────────
+# When enabled, the finished run's ranked patterns + a config snapshot are sent
+# to an OpenAI-compatible LLM endpoint (local Ollama / LM Studio, or DeepSeek
+# cloud) and a markdown critique is written next to the report
+# (ai_review_seed{seed}.md). The reviewer NEVER gates, drops, or re-ranks
+# patterns — with this off the run is byte-identical to the engine without it,
+# and any AI failure degrades to a one-line note. See backend/toolkit/ai_review.py.
+# Enable via this flag (app-overridable) or env BD_AI_REVIEW=1. Endpoint/model
+# resolve from BD_AI_BASE_URL / BD_AI_MODEL / BD_AI_API_KEY (or
+# DEEPSEEK_API_KEY); with no key the default is a local Ollama at
+# http://localhost:11434/v1.
+AI_REVIEW_ENABLED   = False
+AI_REVIEW_BASE_URL  = ""     # "" = auto (DeepSeek if a key is set, else local Ollama)
+AI_REVIEW_MODEL     = ""     # "" = auto (deepseek-chat / llama3.1)
+AI_REVIEW_TIMEOUT_S = 120
 
 # =============================================================================
 #  INTERNALS
@@ -1003,8 +1066,9 @@ def build_features_parallel(df,w,n_workers):
         if v is not None:
             vectors.append(v); indices.append(w+off)
     X=np.vstack(vectors)
-    print(f"  Encoded {len(indices):,} windows  [{_elapsed(t0)}]")
-    return X,indices
+    indices_arr = np.asarray(indices, dtype=np.int64)
+    print(f"  Encoded {len(indices_arr):,} windows  [{_elapsed(t0)}]")
+    return X, indices_arr
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MULTI-ALGORITHM CLUSTERING
@@ -1579,22 +1643,47 @@ def _jaccard_rule_overlap(rule_a, rule_b):
     return len(cols_a & cols_b) / len(cols_a | cols_b)
 
 
+def _oos_rank_key(r):
+    """Rank patterns by what MT5 will actually reproduce.
+
+    Preference order:
+      1. EA-faithful box-only OOS (ea_test_pf, ea_test_wr) — the EA fires on
+         the exported feature box with no cluster/shape gate, so these are the
+         only OOS numbers MT5 can match.
+      2. Cluster-gated OOS (test_pf, test_wr) — diagnostic, overstates fidelity.
+      3. TRAIN composite_score — last resort when no test split exists.
+    Infinite PF (no losses, tiny sample) is capped so it can't dominate.
+    """
+    def _cap(x):
+        try:
+            x = float(x)
+        except (TypeError, ValueError):
+            return 0.0
+        if not np.isfinite(x):
+            return 99.0
+        return x
+
+    ea_pf = _cap(r.get("ea_test_pf", 0))
+    if ea_pf > 0 and r.get("ea_test_trades", 0):
+        return (2, ea_pf, _cap(r.get("ea_test_wr", 0)))
+    if r.get("test_pf", 0):
+        return (1, _cap(r.get("test_pf", 0)), _cap(r.get("test_wr", 0)))
+    return (0, _cap(r.get("composite_score", 0)), 0.0)
+
+
 def write_combined_report(all_results, out_dir):
     """
     Deduplicate patterns from multiple seeds by Jaccard overlap on rule columns,
-    re-rank globally by composite_score, then write combined CSV, report, chart.
+    re-rank globally by EA-faithful OOS quality, then write combined CSV,
+    report, chart.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # OOS-bias fix (D): rank by out-of-sample (test_pf, test_wr); fall back to
-    # TRAIN composite_score only when no test split exists (test_pf missing/0).
-    ranked = sorted(
-        all_results,
-        key=lambda r: (1, r.get("test_pf", 0), r.get("test_wr", 0))
-        if r.get("test_pf", 0) else (0, r.get("composite_score", 0), 0),
-        reverse=True,
-    )
+    # OOS-bias fix (D) + EA-coherence: rank by the EA-faithful box-only OOS
+    # metrics (what MT5 reproduces), falling back to cluster-gated test and
+    # finally TRAIN composite_score. See _oos_rank_key.
+    ranked = sorted(all_results, key=_oos_rank_key, reverse=True)
     kept = []
     for candidate in ranked:
         rule_c = candidate.get("genetic_rule", {})
@@ -1635,7 +1724,7 @@ def write_combined_report(all_results, out_dir):
         f"  Seeds: {MULTI_SEED_BASE} .. {MULTI_SEED_BASE + MULTI_SEED_COUNT - 1}",
         f"  {len(all_results)} total patterns  ->  {len(kept)} unique after dedup",
         f"  Jaccard overlap threshold: {ENSEMBLE_OVERLAP_THRESHOLD}",
-        f"  Ranked by composite_score (descending)",
+        f"  Ranked by EA-faithful OOS (ea_test_pf, ea_test_wr; what MT5 reproduces)",
         "=" * 65,
     ]
     for rank, r in enumerate(kept, 1):
@@ -1658,6 +1747,11 @@ def write_combined_report(all_results, out_dir):
             f"PF={r.get('test_pf', 0)}  "
             f"Trades={r.get('test_trades', 0)}  "
             f"Score={r.get('test_score', 0)}",
+            f"  EA-OOS (box-only, what MT5 fires): "
+            f"WR={r.get('ea_test_wr', 0)}%  "
+            f"PF={r.get('ea_test_pf', 0)}  "
+            f"Trades={r.get('ea_test_trades', 0)}  "
+            f"(inflation ×{r.get('box_inflation', 0)} vs gated test)",
             f"  SL={r.get('sl_pct_label', '?')}  "
             f"TP={r.get('tp_pct_label', '?')}  "
             f"Implied RR={r.get('implied_rr', 0)}  "
@@ -1863,14 +1957,18 @@ def _bt_worker_dir(args):
     allowed = e["allowed"]; cooldown = e["cooldown"]
     long = (direction == "LONG")
     # Serialize like the live EA: no new entry while a position is open, and
-    # cooldown is anchored on the prior trade's CLOSE (exit) bar, not the signal
-    # bar. last_exit is the bar index at which the previous position closed.
-    trades = []; last_exit = -cooldown - 1
+    # cooldown is anchored exactly like the EA's g_cooldownBar:
+    #   - SL/TP hit intrabar during bar j -> anchor = j   (bar was forming at close)
+    #   - MaxHold timeout                 -> anchor = j+1 (closed at next bar's open)
+    # The EA skips a signal when (formingBar - anchor) < CooldownBars; the forming
+    # bar for Python signal bar bi is bi+1 (the entry bar). last_exit is the last
+    # bar the position was alive in (serialization guard, exact for any cooldown).
+    trades = []; last_exit = -cooldown - 2; cd_anchor = -cooldown - 2
 
     for bi in member_bi:
         if bi + 1 >= n: continue
         if allowed and int(sess[bi]) not in allowed: continue
-        if bi - last_exit < cooldown: continue
+        if bi + 1 <= last_exit or (bi + 1) - cd_anchor < cooldown: continue
         entry = op[bi + 1] if realistic and bi + 1 < n else cl[bi]
         if entry == 0: continue
         entry_ws = entry + spread if long else entry - spread
@@ -1902,7 +2000,8 @@ def _bt_worker_dir(args):
             else:
                 if h_ >= sl_v_eff: hs = True; break
                 if lo_ <= tp_v_eff: ht = True; break
-        if not ht and not hs:
+        timeout = not ht and not hs
+        if timeout:
             exit_p = cl[min(bi + max_hold, n - 1)]
             exit_p_eff = exit_p - exit_spread if long else exit_p + exit_spread
             pnl = exit_p_eff - entry_ws if long else entry_ws - exit_p_eff
@@ -1925,21 +2024,18 @@ def _bt_worker_dir(args):
         )
 
         # Charge trading costs in R: one round-turn commission per trade plus
-        # per-bar swap over the holding period. Subtracting from booked R (both
-        # WIN and LOSS) before recording flows the cost into PF/equity/DD.
+        # per-bar swap over the holding period. Classify WIN/LOSS on the NET
+        # booked R (after costs) so a tiny TP win eaten by commission counts as
+        # a loss — otherwise _calc_metrics adds its |R| to gross WINS and PF
+        # silently inflates whenever COMMISSION_R/SWAP_R_PER_BAR are non-zero.
         cost_r = COMMISSION_R + SWAP_R_PER_BAR * bars_held
-        win_r  -= cost_r
-        loss_r -= cost_r
-        if ht:
-            last_exit = bi + bars_held
-            trades.append((bi, "WIN", round(win_r, 2), round(entry_ws, 2),
-                           round(sl_v, 2), round(tp_v, 2),
-                           direction, bars_held) + snap)
-        elif hs:
-            last_exit = bi + bars_held
-            trades.append((bi, "LOSS", round(loss_r, 2), round(entry_ws, 2),
-                           round(sl_v, 2), round(tp_v, 2),
-                           direction, bars_held) + snap)
+        booked_r = (win_r if ht else loss_r) - cost_r
+        res = "WIN" if booked_r > 0 else "LOSS"
+        last_exit = bi + bars_held
+        cd_anchor = last_exit + (1 if timeout else 0)
+        trades.append((bi, res, round(booked_r, 2), round(entry_ws, 2),
+                       round(sl_v, 2), round(tp_v, 2),
+                       direction, bars_held) + snap)
     return cid, direction, trades
 
 def _calc_metrics(trades,member_count,trading_days,trades_df=None):
@@ -2122,13 +2218,34 @@ def _rule_match_mask(member_bi_arr, rule, arrays, cache=None):
             vals = arr[member_bi_arr]
             col_mask = (vals >= lb) & (vals <= hb)
             if cache is not None:
+                # Bound cache so box-only (eval over the full 108k-bar set) can't
+                # balloon memory and kill the worker (the hang cause).
+                if len(cache) >= int(globals().get("GENE_CACHE_MAX", 4000)):
+                    cache.clear()
                 cache[key] = col_mask
         mask &= col_mask
     return mask
 
 
+def _subfeasible(stage_base: float, frac: float) -> float:
+    """Graded credit for a rule that fails a feasibility gate (graded fitness).
+
+    Returns a small positive score inside the [0, _GENE_FEASIBLE_OFFSET) band so
+    the GA gets a gradient toward feasibility instead of a flat 0.0. ``stage_base``
+    orders the gates (later pipeline stage → higher base, so progress always
+    scores higher); ``frac`` in [0,1] is the within-stage closeness. Returns 0.0
+    when grading is disabled or the rule made zero progress (so the repair path,
+    which triggers on exactly 0.0, still fires for truly degenerate rules).
+    """
+    if not globals().get("GENE_GRADED_FITNESS", True):
+        return 0.0
+    frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
+    return stage_base + 0.095 * frac
+
+
 def _score_genetic(member_bi, rule, sl_pct, tp_pct, direction,
-                   full_cluster_size, train_days, _cache=None):
+                   full_cluster_size, train_days, _cache=None,
+                   _return_trades=False):
     """Score a rule using additive Wilson-based fitness.
 
     v9.0 speedups applied:
@@ -2153,7 +2270,19 @@ def _score_genetic(member_bi, rule, sl_pct, tp_pct, direction,
     retention = matched / max(full_cluster_size, 1)
     min_retention = min((train_days * 1.0) / max(full_cluster_size, 1), 0.70)
     if retention < min_retention:
-        return 0.0
+        # Graded: closer to min_retention scores higher (matched==0 → 0.0 → repair).
+        return _subfeasible(0.0, retention / max(min_retention, 1e-9))
+
+    # Box-only cost guard: a box firing on too large a fraction of bars is too
+    # loose to be tradeable — reject it cheaply BEFORE the per-trade cooldown sim
+    # (which would otherwise loop over tens of thousands of bars and stall the GA).
+    # Only active in box-only mode (cluster-gated WANTS high retention). Graded so
+    # tighter boxes (closer to the cap) score higher → steers toward selectivity.
+    if globals().get("GENE_SCORE_BOX_ONLY", False):
+        _maxfrac = float(globals().get("MAX_MATCH_FRAC", 0.25))
+        matchfrac = matched / max(full_cluster_size, 1)
+        if matchfrac > _maxfrac:
+            return _subfeasible(0.0, _maxfrac / matchfrac)
 
     matched_arr = member_arr[match_mask]
 
@@ -2163,9 +2292,15 @@ def _score_genetic(member_bi, rule, sl_pct, tp_pct, direction,
         return 0.0
 
     # ── vectorised SL/TP detection (#22) ──────────────────────────────────
-    # Build forward-window index matrix: shape (n_trades, fwd).
+    # EA-faithful horizon: scan the window the gate sim actually holds a trade
+    # (MAX_HOLD_BARS), not FORWARD_BARS — otherwise the GA optimizes a 24-bar
+    # objective while the gate/EA book 32-bar holds with timeout exits.
+    hold = int(globals().get("MAX_HOLD_BARS", 0) or 0)
+    if hold <= 0:
+        hold = fwd
+    # Build forward-window index matrix: shape (n_trades, hold).
     # Clip to stay in bounds; pad with last valid index (price won't cross).
-    fwd_idx = valid[:, None] + np.arange(1, fwd + 1, dtype=np.int32)[None, :]
+    fwd_idx = valid[:, None] + np.arange(1, hold + 1, dtype=np.int32)[None, :]
     fwd_idx = np.clip(fwd_idx, 0, n - 1)
 
     entries = op[valid + 1]
@@ -2190,55 +2325,93 @@ def _score_genetic(member_bi, rule, sl_pct, tp_pct, direction,
     risk = risk[valid_risk]; reward = reward[valid_risk]
     fwd_idx = fwd_idx[valid_risk]
 
-    hi_mat = hi[fwd_idx]   # (n_trades, fwd)
+    hi_mat = hi[fwd_idx]   # (n_trades, hold)
     lo_mat = lo[fwd_idx]
 
+    # Spread-adjusted effective trigger levels, matching _bt_worker_dir: the
+    # exit side pays the spread too (tp_v_eff / sl_v_eff in the gate sim).
     if long:
+        tp_eff = tp_v - spread; sl_eff = sl_v - spread
         cum_hi = np.maximum.accumulate(hi_mat, axis=1)
         cum_lo = np.minimum.accumulate(lo_mat, axis=1)
-        tp_any = cum_hi >= tp_v[:, None]
-        sl_any = cum_lo <= sl_v[:, None]
+        tp_any = cum_hi >= tp_eff[:, None]
+        sl_any = cum_lo <= sl_eff[:, None]
     else:
+        tp_eff = tp_v + spread; sl_eff = sl_v + spread
         cum_lo = np.minimum.accumulate(lo_mat, axis=1)
         cum_hi = np.maximum.accumulate(hi_mat, axis=1)
-        tp_any = cum_lo <= tp_v[:, None]
-        sl_any = cum_hi >= sl_v[:, None]
+        tp_any = cum_lo <= tp_eff[:, None]
+        sl_any = cum_hi >= sl_eff[:, None]
 
     tp_hit = tp_any.any(axis=1)
     sl_hit = sl_any.any(axis=1)
-    tp_idx_v = np.where(tp_hit, np.argmax(tp_any, axis=1), fwd + 1)
-    sl_idx_v = np.where(sl_hit, np.argmax(sl_any, axis=1), fwd + 1)
+    tp_idx_v = np.where(tp_hit, np.argmax(tp_any, axis=1), hold + 1)
+    sl_idx_v = np.where(sl_hit, np.argmax(sl_any, axis=1), hold + 1)
 
-    # result per trade: 1=WIN, -1=LOSS, 0=timeout
-    results = np.where(tp_idx_v < sl_idx_v, 1,
-              np.where(sl_idx_v < tp_idx_v, -1, 0)).astype(np.int8)
+    # Pessimistic intrabar tie-break (matches _bt_worker_dir / the EA's
+    # unknowable tick order): both first trigger on the SAME bar → book the
+    # stop. The old `tp_idx < sl_idx → WIN, sl_idx < tp_idx → LOSS, else
+    # timeout` silently DROPPED same-bar ties from fitness.
+    is_win  = tp_hit & (tp_idx_v < sl_idx_v)
+    is_loss = sl_hit & (sl_idx_v <= tp_idx_v)
+    timeout = ~(is_win | is_loss)
 
-    # ── lightweight sequential cooldown filter ────────────────────────────
-    last_sig = -COOLDOWN_BARS - 1
+    # Timeout booking at the hold-window close, like the gate sim: realised
+    # move ÷ risk (signed), spread charged on exit. The old path skipped
+    # timeouts entirely, so the GA scored a different trade population than
+    # the gate measures and the EA trades.
+    cl_arr = e["cl"]
+    exit_bi = np.minimum(valid + hold, n - 1)
+    exit_eff = cl_arr[exit_bi] - spread if long else cl_arr[exit_bi] + spread
+    to_pnl = (exit_eff - adj_entries) if long else (adj_entries - exit_eff)
+
+    bars_held = np.where(is_win, tp_idx_v + 1,
+                np.where(is_loss, sl_idx_v + 1,
+                         np.minimum(hold, (n - 1) - valid))).astype(np.int32)
+    booked = np.where(is_win, reward / risk,
+             np.where(is_loss, -1.0, to_pnl / risk))
+    _comm = float(globals().get("COMMISSION_R", 0.0))
+    _swap = float(globals().get("SWAP_R_PER_BAR", 0.0))
+    if _comm or _swap:
+        booked = booked - (_comm + _swap * bars_held)
+
+    # ── EA-faithful sequential filter: serialized + exit-anchored cooldown ─
+    # Mirrors _bt_worker_dir exactly (incl. the timeout +1 anchor) so the GA
+    # climbs the same landscape the gate measures and MT5 reproduces. The old
+    # filter anchored on the signal bar and let trades overlap.
+    cooldown = int(globals().get("COOLDOWN_BARS", 0))
     sel: list[int] = []
+    last_exit = -cooldown - 2; cd_anchor = -cooldown - 2
+    bh_list = bars_held.tolist(); to_list = timeout.tolist()
     for i, bi in enumerate(valid.tolist()):
-        if bi - last_sig < COOLDOWN_BARS:
+        if bi + 1 <= last_exit or (bi + 1) - cd_anchor < cooldown:
             continue
-        if results[i] != 0:
-            last_sig = bi
-            sel.append(i)
+        sel.append(i)
+        last_exit = bi + bh_list[i]
+        cd_anchor = last_exit + (1 if to_list[i] else 0)
+
+    if _return_trades:
+        # Test/debug hook: expose the exact trade stream this fitness eval
+        # booked, so parity with _bt_worker_dir can be asserted directly.
+        return [(int(valid[i]), float(booked[i]), int(bh_list[i]),
+                 bool(to_list[i])) for i in sel]
 
     if not sel:
         return 0.0
     sel_idx = np.asarray(sel, dtype=np.int32)
-    res_sel = results[sel_idx]
-    wins   = int((res_sel == 1).sum())
-    losses = int((res_sel == -1).sum())
+    res_sel = booked[sel_idx]
+    wins   = int((res_sel > 0).sum())
+    losses = int(len(res_sel) - wins)
     total  = wins + losses
     if total < 10:
-        return 0.0
+        # Graded: more trades (toward the min of 10) scores higher.
+        return _subfeasible(0.10, total / 10.0)
 
-    rr_arr = reward[sel_idx] / risk[sel_idx]
-    avg_rr = float(rr_arr[res_sel == 1].mean()) if wins > 0 else 0.0
+    avg_rr = float(res_sel[res_sel > 0].mean()) if wins > 0 else 0.0
 
     # ── pure-NumPy consistency scoring (#21) ─────────────────────────────
     traded_bars  = valid[sel_idx]           # bar indices of all trades
-    is_win_arr   = (res_sel == 1)
+    is_win_arr   = (res_sel > 0)
     q_stab = _time_consistency_np(is_win_arr, traded_bars, n, train_days)
     q_dist = _trade_distribution_np(traded_bars, n, train_days)
     stability = q_stab * q_dist
@@ -2247,12 +2420,22 @@ def _score_genetic(member_bi, rule, sl_pct, tp_pct, direction,
     wr = wins / total
     breakeven = ((1 - wr) / wr) if wr > 0 else 999.0
     if avg_rr < breakeven:
-        return 0.0
-    gl = losses
-    gw = wins * avg_rr if avg_rr > 0 else 0
+        # Graded: closer to covering break-even RR scores higher.
+        return _subfeasible(0.20, avg_rr / max(breakeven, 1e-9))
+    # True-R profit factor from booked outcomes (timeout losses < 1R),
+    # matching _calc_metrics — not the wins*avg_rr/losses approximation
+    # that priced every loss at a flat 1R.
+    gw = float(res_sel[res_sel > 0].sum())
+    gl = float(-res_sel[res_sel <= 0].sum())
     pf = gw / gl if gl > 0 else 2.0
 
     use_targets = bool(globals().get("ENABLE_TARGET_SCORING", True))
+    # Graded fitness: lift every FEASIBLE score above the [0,0.30) sub-feasible
+    # band so a qualifying rule always beats a near-miss. A constant offset
+    # preserves the relative ordering of feasible rules (no change to selection
+    # among passers); it only separates the two bands.
+    _off = float(globals().get("_GENE_FEASIBLE_OFFSET", 0.30)) \
+        if globals().get("GENE_GRADED_FITNESS", True) else 0.0
     # Bug #32: additive bonus that grows with rule complexity (number of cols).
     cmplx = _complexity_bonus(len(rule))
     if use_targets:
@@ -2264,7 +2447,7 @@ def _score_genetic(member_bi, rule, sl_pct, tp_pct, direction,
         tgt_st  = float(globals().get("TARGET_STABILITY",       0.65))
         tgt_tpd = float(globals().get("TARGET_TRADES_PER_DAY",  1.0))
         tpd     = total / max(train_days, 1)
-        return (
+        return _off + (
             _target_score(wr_pct,    tgt_wr,  SCORE_W_WR) +
             _target_score(pf,        tgt_pf,  SCORE_W_PF) +
             _target_score(rr_val,    tgt_rr,  SCORE_W_RR) +
@@ -2275,7 +2458,7 @@ def _score_genetic(member_bi, rule, sl_pct, tp_pct, direction,
     q_wr = wilson_lower(wins, total)
     q_pf = min(pf, 4.0) / 4.0
     q_rr = min(avg_rr / max(breakeven, 0.01), 2.0) / 2.0
-    return (SCORE_W_WR * q_wr + SCORE_W_PF * q_pf +
+    return _off + (SCORE_W_WR * q_wr + SCORE_W_PF * q_pf +
             SCORE_W_RR * q_rr + SCORE_W_STAB * stability + cmplx)
 
 def _diagnose_and_repair(rule,col_stats,member_bi,sl_pct,tp_pct,
@@ -2425,9 +2608,21 @@ def _genetic_worker(args):
         col_stats[col]=(float(np.percentile(vals,5)),
                         float(np.percentile(vals,95)))
 
+    # Box-only (EA-faithful) eval set: score on ALL train bars matching the box —
+    # what the EA fires — not just cluster members. col_stats above (cluster) still
+    # seeds the search; only the SCORING population changes. Toggle GENE_SCORE_BOX_ONLY.
+    if globals().get("GENE_SCORE_BOX_ONLY", False):
+        eval_full = np.arange(int(_GEN["n"]), dtype=np.int32)
+        eval_full_size = int(_GEN["n"])
+    else:
+        eval_full = member_arr_full
+        eval_full_size = full_cluster_size
+
     # #23 — coarse subset (every 3rd bar) used for pass 1
     member_arr_coarse = member_arr_full[::3]
     coarse_cluster_size = max(len(member_arr_coarse), 1)
+    eval_coarse = eval_full[::3]
+    eval_coarse_size = max(len(eval_coarse), 1)
     # cutoff generation where we switch from coarse → full
     pass1_gens = max(1, int(generations * 0.75))
     pass2_gens = generations - pass1_gens
@@ -2455,8 +2650,8 @@ def _genetic_worker(args):
         # mask cache is keyed on (col, lo, hi) only, so it stays valid across
         # different sl/tp multipliers — sl/tp affect the trade sim, not matches.
         rule, slm, tpm = ind
-        bi = member_arr_full if use_full else member_arr_coarse
-        cs = full_cluster_size if use_full else coarse_cluster_size
+        bi = eval_full if use_full else eval_coarse
+        cs = eval_full_size if use_full else eval_coarse_size
         return _score_genetic(bi, rule, sl_pct * slm, tp_pct * tpm, direction,
                               cs, train_days, _cache=cache)
 
@@ -2537,9 +2732,9 @@ def _genetic_worker(args):
                     for _ in range(GENE_REPAIR_ATTEMPTS):
                         repaired=_diagnose_and_repair(
                             child[0],col_stats,
-                            member_arr_full if use_full else member_arr_coarse,
+                            eval_full if use_full else eval_coarse,
                             sl_pct*child[1],tp_pct*child[2],direction,
-                            full_cluster_size if use_full else coarse_cluster_size,
+                            eval_full_size if use_full else eval_coarse_size,
                             train_days,rng_)
                         if repaired:
                             cand=(repaired, child[1], child[2])
@@ -2768,6 +2963,13 @@ def _genetic_p2_worker(args):
         vals=np.array([float(arrays_[col][bi]) for bi in member_bi])
         col_stats[col]=(float(np.percentile(vals,PASS2_QUANTILE_LO*100)),
                         float(np.percentile(vals,PASS2_QUANTILE_HI*100)))
+    # Box-only (EA-faithful) eval set — score on all train bars matching the box,
+    # not just cluster members (see GENE_SCORE_BOX_ONLY). col_stats above (cluster
+    # IQR) still seeds the search; only the scoring population changes.
+    if globals().get("GENE_SCORE_BOX_ONLY", False):
+        eval_bi = np.arange(int(_GEN["n"]), dtype=np.int32); eval_size = int(_GEN["n"])
+    else:
+        eval_bi = member_bi; eval_size = full_size
     # Do NOT mirror col_stats for SHORT (fix 2.4)
     def _narrow(r):
         new={}
@@ -2783,8 +2985,8 @@ def _genetic_p2_worker(args):
         col_stats,GENE_N_COLS_MIN,GENE_N_COLS_MAX,rng_)
     pop=[seed_r]+[_mutate_rule(seed_r,col_stats,mutate_rate,rng_,False,True)  # can_drop=True (fix 2.1a)
                   for _ in range(pop_size-1)]
-    scores=[_score_genetic(member_bi,r,sl_pct,tp_pct,direction,
-                           full_size,train_days) for r in pop]
+    scores=[_score_genetic(eval_bi,r,sl_pct,tp_pct,direction,
+                           eval_size,train_days) for r in pop]
     best_r=pop[int(np.argmax(scores))]; best_s=max(scores)
     for _ in range(generations):
         p1=_tournament_select(pop,scores,k=3,rng_=rng_)
@@ -2792,14 +2994,14 @@ def _genetic_p2_worker(args):
         child=_mutate_rule(_cross_rules(p1,p2,rng_),col_stats,
                            mutate_rate,rng_,False,False)
         if not child: continue
-        cs=_score_genetic(member_bi,child,sl_pct,tp_pct,
-                          direction,full_size,train_days)
+        cs=_score_genetic(eval_bi,child,sl_pct,tp_pct,
+                          direction,eval_size,train_days)
         if cs==0:
-            rep=_diagnose_and_repair(child,col_stats,member_bi,sl_pct,tp_pct,
-                                     direction,full_size,train_days,rng_)
+            rep=_diagnose_and_repair(child,col_stats,eval_bi,sl_pct,tp_pct,
+                                     direction,eval_size,train_days,rng_)
             if rep:
-                cs2=_score_genetic(member_bi,rep,sl_pct,tp_pct,
-                                   direction,full_size,train_days)
+                cs2=_score_genetic(eval_bi,rep,sl_pct,tp_pct,
+                                   direction,eval_size,train_days)
                 if cs2>0: child=rep; cs=cs2
         idx_worst=int(np.argmin(scores))
         if cs>=scores[idx_worst]: pop[idx_worst]=child; scores[idx_worst]=cs
@@ -2818,12 +3020,19 @@ def _bt_refined_worker(args):
 # POST-GENETIC BACKTEST
 # ─────────────────────────────────────────────────────────────────────────────
 def backtest_refined(df, indices, labels, genetic_rules, price_dists,
-                     fwd, n_workers, trading_days, sltp_overrides=None):
+                     fwd, n_workers, trading_days, sltp_overrides=None,
+                     box_only=False):
     """Backtest only bars matching each genetic rule.
 
     sltp_overrides: optional {(cid,direction): (sl_pct, tp_pct)} from SL/TP
     evolution.  When a key is present its evolved stop/target override the
     cluster's quantile baseline (for the sim and the reported metrics).
+
+    box_only: when True, each rule fires on EVERY bar matching its feature box,
+    ignoring cluster membership — exactly how the exported EA behaves in MT5
+    (it has no cluster/shape gate). The default (False) keeps the cluster gate
+    (cluster members ∩ box), the historical behaviour. Use box_only=True to get
+    an EA-faithful estimate and to quantify box-inflation vs the gated count.
     """
     sltp_overrides = sltp_overrides or {}
     hi = df["high"].values.copy(); lo = df["low"].values.copy()
@@ -2841,6 +3050,10 @@ def backtest_refined(df, indices, labels, genetic_rules, price_dists,
         if cid not in cm: cm[cid] = []
         cm[cid].append(bi)
 
+    # box_only: candidate pool is EVERY bar (the EA has no cluster gate), so each
+    # rule matches against all indices rather than just its cluster's members.
+    all_bi = list(indices) if box_only else None
+
     filtered_args = []
     for (cid, direction), (rule, score) in genetic_rules.items():
         ov = sltp_overrides.get((cid, direction))
@@ -2850,7 +3063,8 @@ def backtest_refined(df, indices, labels, genetic_rules, price_dists,
             d = price_dists.get(cid)
             sl_p = d["sl_pct"] if d else 0.002
             tp_p = d["tp_pct"] if d else 0.003
-        filtered_bi = [bi for bi in cm.get(cid, [])
+        source_bi = all_bi if box_only else cm.get(cid, [])
+        filtered_bi = [bi for bi in source_bi
                        if all(not (c in col_arrays) or
                               (lb <= float(col_arrays[c][bi]) <= hb)
                               for c, (lb, hb) in rule.items())]
@@ -3214,15 +3428,24 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
 
     lines = []
 
-    # Header comment
+    # Header comment. The "Test:" line carries the EA-faithful (box-only) OOS
+    # numbers — the only figures an MT5 backtest of this .set can reproduce,
+    # since the EA fires on the exported feature box with no cluster/shape
+    # gate. The cluster-gated test numbers stay as a separate diagnostic line.
+    _ea_wr = r.get("ea_test_wr", r.get("test_wr", 0))
+    _ea_pf = r.get("ea_test_pf", r.get("test_pf", 0))
+    _ea_n  = r.get("ea_test_trades", r.get("test_trades", 0))
     lines += [
         f"; Pattern {pattern_no} — Cluster {cid} [{direction}] [{bidir_mode}]",
         f"; Train: WR={r.get('win_rate_',0)}%  Wilson={r.get('wilson_wr',0)}%"
         f"  PF={r.get('profit_factor',0)}  Score={r.get('composite_score',0)}",
         f"; SignalRetention={r.get('signal_retention',0)} (report-only:"
         f" post-rule trades / shape-cluster size; EA box is a superset → live inflates)",
-        f"; Test:  WR={r.get('test_wr',0)}%  PF={r.get('test_pf',0)}"
-        f"  Trades={r.get('test_trades',0)}",
+        f"; Test:  WR={_ea_wr}%  PF={_ea_pf}  Trades={_ea_n}"
+        f"  (EA-faithful box-only OOS — compare THIS to your MT5 backtest)",
+        f"; TestGated: WR={r.get('test_wr',0)}%  PF={r.get('test_pf',0)}"
+        f"  Trades={r.get('test_trades',0)}"
+        f"  (cluster∩box diagnostic; MT5 cannot reproduce this)",
         f"; SL={sl_pct*100:.3f}%  TP={tp_pct*100:.3f}%"
         f"  Implied RR={r.get('implied_rr',0)}",
         f"; Generated by Pattern Discovery v6 | seed={RANDOM_SEED}",
@@ -3472,6 +3695,57 @@ def _prepare_shared_data(nw: int) -> None:
     print("[cache] Load & Encode complete — cached for remaining seeds.\n")
 
 
+def _run_config_snapshot():
+    """JSON-safe snapshot of the knobs that shape a run's results. Consumed by
+    the results_seed{seed}.json artifact and the optional AI reviewer."""
+    names = [
+        "TRAIN_RATIO", "FORWARD_BARS", "MAX_HOLD_BARS", "COOLDOWN_BARS",
+        "SPREAD_PTS", "COMMISSION_R", "SWAP_R_PER_BAR",
+        "SL_PCT_QUANTILE", "TP_PCT_QUANTILE", "MIN_DIST_RR",
+        "GENETIC_GENERATIONS", "GENETIC_POPULATION",
+        "GENE_SCORE_BOX_ONLY", "GATE_BOX_ONLY", "MAX_MATCH_FRAC",
+        "ENABLE_TARGET_SCORING", "TARGET_WR_PCT", "TARGET_PF", "TARGET_RR",
+        "TARGET_STABILITY", "TARGET_TRADES_PER_DAY", "FILTER_EDGE_K",
+        "MIN_FREQ_PER_DAY", "MAX_DRAWDOWN_R", "MAX_CONSEC_LOSSES",
+        "MIN_TIME_CONSISTENCY", "MIN_TEST_TRADES_PER_DAY", "MAX_SOFT_FAILS",
+        "CLUSTERING_METHOD", "MULTI_SEED_COUNT", "FORCE_DIRECTION",
+        "USE_TRIPLE_BARRIER", "USE_BETA_NEUTRAL_LABELS",
+    ]
+    g = globals()
+    snap = {}
+    for nm in names:
+        v = g.get(nm)
+        if isinstance(v, (set, frozenset)):
+            v = sorted(v)
+        snap[nm] = v
+    snap["HARD_FILTERS"] = sorted(g.get("HARD_FILTERS", set()))
+    snap["wr_floor"] = round(_wr_floor(), 3)
+    snap["pf_floor"] = round(_pf_floor(), 3)
+    return snap
+
+
+def _results_summary_entry(r):
+    """JSON-safe scalar subset of one final_results pattern dict (no DataFrames)."""
+    keep = {}
+    for k in ("pattern_id", "cluster", "direction", "bidir_mode", "marginal",
+              "soft_fail", "win_rate_", "wilson_wr", "profit_factor",
+              "composite_score", "total_trades", "per_day", "max_drawdown_r",
+              "max_consec_losses", "signal_retention",
+              "test_wr", "test_pf", "test_trades", "test_score",
+              "ea_test_wr", "ea_test_pf", "ea_test_trades", "box_inflation",
+              "sl_pct", "tp_pct", "implied_rr", "consistency",
+              "overall_wr", "recent_wr", "degrading", "genetic_score",
+              "seed", "csv_path"):
+        if k in r:
+            keep[k] = r[k]
+    rule = r.get("genetic_rule") or {}
+    keep["genetic_rule"] = {c: [float(lo), float(hi)] for c, (lo, hi) in rule.items()}
+    d = r.get("discriminator")
+    if d:
+        keep["discriminator"] = {k2: v for k2, v in d.items() if k2 != "tree_text"}
+    return keep
+
+
 def run_mc_on_top_patterns(results, out_dir, n=None):
     """Run FTMO MC on top-N non-marginal passers using TEST-split trades only."""
     import json as _json
@@ -3486,7 +3760,9 @@ def run_mc_on_top_patterns(results, out_dir, n=None):
         return []
 
     passers = [r for r in results if r.get("passed") and not r.get("marginal")]
-    passers.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+    # Pick MC candidates by EA-faithful OOS quality (what MT5 reproduces),
+    # not the TRAIN composite score.
+    passers.sort(key=_oos_rank_key, reverse=True)
     top = passers[:n]
     if not top:
         print("[MC] no passing non-marginal patterns to evaluate")
@@ -3500,7 +3776,12 @@ def run_mc_on_top_patterns(results, out_dir, n=None):
             print(f"[MC] skip {r.get('pattern_id','?')}: no trades CSV")
             continue
         try:
-            daily = load_pattern_csv(csv_path, split_filter="test")
+            # Prefer the EA-faithful (box-only) OOS trades — the stream MT5
+            # will actually produce — falling back to the cluster-gated test
+            # split for CSVs written before the test_ea split existed.
+            daily = load_pattern_csv(csv_path, split_filter="test_ea")
+            if len(daily) < 5:
+                daily = load_pattern_csv(csv_path, split_filter="test")
         except Exception as e:
             print(f"[MC] skip {r.get('pattern_id','?')}: load failed: {e}")
             continue
@@ -3606,49 +3887,62 @@ def main():
     if _clustering_method == "lightgbm":
         try:
             from tree_candidates import cluster_by_lightgbm_leaves
+            _lgbm_n_est = int(globals().get("LIGHTGBM_N_ESTIMATORS", 3))
+            _lgbm_n_leaves = int(globals().get("LIGHTGBM_NUM_LEAVES", 32))
             labels_tr, n_cl, _lgbm_model = cluster_by_lightgbm_leaves(
                 X_tr, idx_tr, df_train,
                 forward_bars=FORWARD_BARS,
-                num_leaves=int(globals().get("LIGHTGBM_NUM_LEAVES", 32)),
-                n_estimators=int(globals().get("LIGHTGBM_N_ESTIMATORS", 3)),
+                num_leaves=_lgbm_n_leaves,
+                n_estimators=_lgbm_n_est,
                 min_samples_leaf=int(globals().get("LIGHTGBM_MIN_SAMPLES_LEAF", 30)),
                 random_seed=RANDOM_SEED,
                 learning_rate=float(globals().get("LIGHTGBM_LEARNING_RATE", 0.05)),
             )
-            # Build path->id map for test-set assignment below.
-            if _lgbm_model is not None:
+            if _lgbm_model is None:
+                print("  LightGBM: not enough labelled bars for a tree model "
+                      "— falling back to KMeans.")
+                _clustering_method = "kmeans"
+            else:
+                # Build path->id map for test-set assignment below.
                 leaf_idx_tr = _lgbm_model.predict(X_tr, pred_leaf=True)
                 if leaf_idx_tr.ndim == 1:
                     leaf_idx_tr = leaf_idx_tr.reshape(-1, 1)
                 for j, row in enumerate(leaf_idx_tr):
-                    p = tuple(row)
+                    p = tuple(int(x) for x in row)
                     if p not in _lgbm_train_paths:
                         _lgbm_train_paths[p] = int(labels_tr[j])
 
                 # v1.4: extract leaf-path rules for warm-start.  Only meaningful
                 # when n_estimators=1 (single tree → leaf_index == cluster id).
-                # For multi-tree ensembles, leaves don't map 1:1 to clusters.
-                if int(globals().get("LIGHTGBM_N_ESTIMATORS", 1)) == 1:
-                    from tree_candidates import extract_leaf_rules
-                    feature_names = [c for c in GENE_COLS if c in df_train.columns]
-                    per_leaf = extract_leaf_rules(_lgbm_model, feature_names)
-                    # Map leaf_index → cluster_id via the train_paths dict
-                    # (single-tree → path is a 1-tuple = leaf_index).
-                    for path_tuple, cluster_id in _lgbm_train_paths.items():
-                        leaf_idx = path_tuple[0] if path_tuple else None
-                        if leaf_idx is not None and leaf_idx in per_leaf:
-                            _leaf_rules[cluster_id] = per_leaf[leaf_idx]
-                    print(f"  Extracted {len(_leaf_rules)} leaf-path rules "
-                          f"for optimizer warm-start.")
-            print(f"  Clustering method: lightgbm "
-                  f"({int(globals().get('LIGHTGBM_N_ESTIMATORS', 1))} trees × "
-                  f"{int(globals().get('LIGHTGBM_NUM_LEAVES', 24))} leaves)")
-        except ImportError:
-            print("  lightgbm not installed — falling back to KMeans.  "
-                  "Install with: pip install lightgbm>=4.0")
+                if _lgbm_n_est == 1:
+                    try:
+                        from tree_candidates import extract_leaf_rules
+                        enc_names = [f"enc_{i}" for i in range(X_tr.shape[1])]
+                        per_leaf = extract_leaf_rules(_lgbm_model, enc_names)
+                        for path_tuple, cluster_id in _lgbm_train_paths.items():
+                            leaf_idx = path_tuple[0] if path_tuple else None
+                            if leaf_idx is not None and leaf_idx in per_leaf:
+                                _leaf_rules[cluster_id] = per_leaf[leaf_idx]
+                        print(f"  Extracted {len(_leaf_rules)} leaf-path rules "
+                              f"for optimizer warm-start.")
+                    except Exception as ex:
+                        print(f"  LightGBM leaf-rule extract skipped ({ex})")
+
+                print(f"  Clustering method: lightgbm "
+                      f"({_lgbm_n_est} trees × {_lgbm_n_leaves} leaves, "
+                      f"{n_cl} leaf-clusters)")
+        except ImportError as ex:
+            import sys as _sys
+            print(f"  LightGBM path import FAILED: {ex!r}")
+            print(f"    python = {_sys.executable}")
+            print(f"    (If lightgbm IS installed, you're running a different Python "
+                  f"than the embedded one, or tree_candidates isn't importable here.)")
+            print("  Falling back to KMeans.")
             _clustering_method = "kmeans"
         except Exception as ex:
-            print(f"  LightGBM clustering failed ({ex}), falling back to KMeans")
+            import traceback
+            print(f"  LightGBM clustering failed ({ex}) — falling back to KMeans")
+            traceback.print_exc()
             _clustering_method = "kmeans"
 
     if _clustering_method != "lightgbm":
@@ -3826,7 +4120,10 @@ def main():
 
     # ── Genetic pass 2 ────────────────────────────────────────────────────────
     _stage("Genetic Pass 2")
-    if top_keys:
+    # In box-only (Mode A) pass 1 already optimizes the EA-faithful objective, so
+    # pass 2 (re-optimizing the SAME objective from a narrowed seed) is redundant
+    # AND expensive — skip it. Pass 2 only earns its keep in cluster-gated mode.
+    if top_keys and not globals().get("GENE_SCORE_BOX_ONLY", False):
         genetic_p2=genetic_pass2_parallel(
             df_train,idx_tr,labels_tr,top_keys,genetic_p1,
             price_dists_tr,FORWARD_BARS,
@@ -3843,13 +4140,22 @@ def main():
             else:
                 print(f"  Pass 2 no improvement {key} (kept p1: {p1s:.4f})")
     else:
-        genetic_final=genetic_p1; print("  Skipped.")
+        genetic_final=genetic_p1
+        if globals().get("GENE_SCORE_BOX_ONLY", False):
+            print("  Skipped (box-only mode — pass 1 already optimizes box-only).")
+        else:
+            print("  Skipped.")
 
     # ── Post-P2 backtest ──────────────────────────────────────────────────────
     _stage("Post-P2 Backtest")
+    # box_only=True (honest discovery): the gate + reported TRAIN metrics now
+    # reflect what the EA fires (box-only), matching how the GA scored. Gating on
+    # in-sample box-only avoids test-set leakage; box-only TEST (bt_test_ea) is the
+    # OOS check reported alongside.
     bt_final=backtest_refined(
         df_train,idx_tr,labels_tr,genetic_final,
-        price_dists_tr,FORWARD_BARS,nw,train_days,sltp_overrides=sltp_p1)
+        price_dists_tr,FORWARD_BARS,nw,train_days,sltp_overrides=sltp_p1,
+        box_only=globals().get("GATE_BOX_ONLY", False))
     print(f"  Final refined results:")
     for key,r in sorted(bt_final.items(),
                         key=lambda x:x[1].get("composite_score",0),reverse=True):
@@ -3866,6 +4172,17 @@ def main():
         df_test,idx_te,labels_te,
         {k:v for k,v in genetic_final.items() if isinstance(k[0],int)},
         price_dists_tr,FORWARD_BARS,nw,test_days,sltp_overrides=sltp_p1)
+
+    # ── EA-faithful OOS backtest (cause C): score each box on the WHOLE test
+    # split with NO cluster/shape gate — exactly how the exported EA fires in
+    # MT5. Report-only for now: surfaces the box-inflation gap (live vs gated
+    # trade count) so you can see how much the cluster gate was flattering the
+    # numbers before deciding whether to gate on it. Does NOT affect pass/fail.
+    bt_test_ea=backtest_refined(
+        df_test,idx_te,labels_te,
+        {k:v for k,v in genetic_final.items() if isinstance(k[0],int)},
+        price_dists_tr,FORWARD_BARS,nw,test_days,sltp_overrides=sltp_p1,
+        box_only=True)
 
     # ── Quality analysis ──────────────────────────────────────────────────────
     _stage("Quality Analysis")
@@ -3890,6 +4207,11 @@ def main():
         cid,direction=key if isinstance(key,tuple) else (key,"LONG")
         if cid in flagged_corr: continue
         tr=bt_final.get(key,{}); te=bt_test.get(key,{})
+        ea=bt_test_ea.get(key,{})   # EA-faithful (box-only) OOS metrics
+        # Box-inflation: how many more trades the EA fires (box-only) vs the
+        # cluster-gated test count. >1 means MT5 will trade more than discovery.
+        _te_n=te.get("total_trades",0); _ea_n=ea.get("total_trades",0)
+        box_inflation=round(_ea_n/_te_n,2) if _te_n>0 else (float("inf") if _ea_n>0 else 0.0)
         d_tr=price_dists_tr.get(cid) or {}
         info=bidir_info.get(cid,{})
         # v5 soft filter: tally all fails; marginal = exactly 1 fail
@@ -3900,6 +4222,12 @@ def main():
             return fails
 
         print(f"\n  C{cid:>2d} {direction} checking filters:")
+        # EA-faithful OOS (report-only) — printed for EVERY pattern, pass or drop,
+        # so you can see what MT5 will actually trade even when nothing passes.
+        print(f"    [EA-OOS] gated test: WR={te.get('win_rate_',0)}% "
+              f"PF={te.get('profit_factor',0)} n={_te_n}  |  "
+              f"box-only (EA): WR={ea.get('win_rate_',0)}% "
+              f"PF={ea.get('profit_factor',0)} n={_ea_n}  |  inflation×{box_inflation}")
         trd_df=tr.get("trades",pd.DataFrame())
         consistency=time_consistency_score(trd_df)
         min_wr = _wr_floor(); min_pf = _pf_floor()
@@ -3912,7 +4240,10 @@ def main():
             ("max_drawdown_r",    tr.get("max_drawdown_r",99),   MAX_DRAWDOWN_R,       "max"),
             ("max_consec_losses", tr.get("max_consec_losses",99),MAX_CONSEC_LOSSES,    "max"),
             ("per_day",           tr.get("per_day",0),           MIN_FREQ_PER_DAY,     "min"),
-            ("test_trades",       te.get("total_trades",0),      min_test_trades,      "min"),
+            # test_trades uses the BOX-ONLY (EA) count, not the cluster-gated one:
+            # the cluster gate makes the test count near-zero for selective rules,
+            # which is an artifact, not what the EA actually trades out-of-sample.
+            ("test_trades",       _ea_n,                         min_test_trades,      "min"),
             ("time_consistency",  round(consistency,2),          MIN_TIME_CONSISTENCY, "min"),
         ]
         # Tally per-filter fails AND remember (name, value, threshold) for the
@@ -3926,21 +4257,31 @@ def main():
                     "threshold": float(thresh) if isinstance(thresh, (int, float)) else thresh,
                     "mode":      mode,  # "min" or "max"
                 })
-        n_fails = len(fail_details)
-        soft_fail = None  # populated only for marginals
-        if n_fails == 0:
-            print(f"    [PASS] All filters passed ✓")
-            is_marginal = False
-        elif USE_SOFT_FILTER and n_fails == 1:
-            soft_fail = fail_details[0]
-            op = "<" if soft_fail["mode"] == "min" else ">"
-            print(f"    [MARGINAL] 1 filter failed: {soft_fail['name']} "
-                  f"({soft_fail['value']} {op} {soft_fail['threshold']}) — kept with ⚠ tag")
-            is_marginal = True
-        else:
-            print(f"    [DROP] {n_fails} filters failed")
+        # Hard/soft gate: any HARD-filter fail drops the pattern; otherwise it
+        # passes (MARGINAL if it trips up to MAX_SOFT_FAILS soft proxies).
+        hard_fails = [f for f in fail_details if f["name"] in HARD_FILTERS]
+        soft_fails = [f for f in fail_details if f["name"] not in HARD_FILTERS]
+        soft_fail = soft_fails[0] if soft_fails else None  # back-compat (first softened)
+        max_soft = int(globals().get("MAX_SOFT_FAILS", 0))
+
+        def _fmt_fails(fs):
+            return ", ".join(
+                f"{f['name']}({f['value']}{'<' if f['mode']=='min' else '>'}{f['threshold']})"
+                for f in fs)
+
+        if hard_fails:
+            print(f"    [DROP] hard filter(s) failed: {_fmt_fails(hard_fails)}")
             continue
-        print(f"    [PASS] All filters passed ✓")
+        if len(soft_fails) > max_soft:
+            print(f"    [DROP] {len(soft_fails)} soft filters failed (max {max_soft}): "
+                  f"{_fmt_fails(soft_fails)}")
+            continue
+        is_marginal = len(soft_fails) > 0
+        if is_marginal:
+            print(f"    [MARGINAL] {len(soft_fails)} soft filter(s) failed — kept ⚠: "
+                  f"{_fmt_fails(soft_fails)}")
+        else:
+            print(f"    [PASS] All filters passed ✓")
 
         overall_wr,recent_wr=pattern_degradation(trd_df)
         _pat_id = f"C{cid}_{direction}_seed{RANDOM_SEED}"
@@ -3967,6 +4308,11 @@ def main():
             "test_pf":       te.get("profit_factor",0),
             "test_trades":   te.get("total_trades",0),
             "test_score":    te.get("composite_score",0),
+            # EA-faithful (box-only) OOS — what MT5 should actually reproduce.
+            "ea_test_wr":     ea.get("win_rate_",0),
+            "ea_test_pf":     ea.get("profit_factor",0),
+            "ea_test_trades": ea.get("total_trades",0),
+            "box_inflation":  box_inflation,
             "marginal":      is_marginal,   # v5: True = passed via soft filter
             "soft_fail":     soft_fail,     # {name,value,threshold,mode} or None
             # MC-chain fields
@@ -3974,15 +4320,15 @@ def main():
             "score":         tr.get("composite_score", 0.0),
             "pattern_id":    _pat_id,
             "test_trades_df": te.get("trades", pd.DataFrame()),
+            # EA-faithful OOS trade list (box-only) — what MT5 will produce;
+            # written to the per-pattern CSV as split="test_ea" and preferred
+            # by the MC chain.
+            "ea_test_trades_df": ea.get("trades", pd.DataFrame()),
         })
 
-    # OOS-bias fix (D): prefer out-of-sample (test_pf, test_wr); fall back to
-    # TRAIN composite_score only when no test split exists (test_pf missing/0).
-    final_results.sort(
-        key=lambda r: (1, r.get("test_pf", 0), r.get("test_wr", 0))
-        if r.get("test_pf", 0) else (0, r.get("composite_score", 0), 0),
-        reverse=True,
-    )
+    # OOS-bias fix (D) + EA-coherence: rank by the EA-faithful box-only OOS
+    # metrics (what MT5 reproduces), not the cluster-gated test numbers.
+    final_results.sort(key=_oos_rank_key, reverse=True)
     print(f"\n  {len(final_results)} patterns passed all filters")
 
     # ── Export ────────────────────────────────────────────────────────────────
@@ -4051,11 +4397,13 @@ def main():
 
         tdf=r.get("trades",pd.DataFrame())
         tdf_te=r.get("test_trades_df",pd.DataFrame())
-        if not tdf.empty or not tdf_te.empty:
+        tdf_ea=r.get("ea_test_trades_df",pd.DataFrame())
+        if not tdf.empty or not tdf_te.empty or not tdf_ea.empty:
             fp=str(OUT/f"cluster_{cid}_{direction}_seed{RANDOM_SEED}.csv")
-            # Tag each split and ensure required MC columns exist
+            # Tag each split and ensure required MC columns exist.
+            # "test_ea" = EA-faithful box-only OOS trades (preferred by MC).
             parts=[]
-            for _sdf, _split in [(tdf,"train"),(tdf_te,"test")]:
+            for _sdf, _split in [(tdf,"train"),(tdf_te,"test"),(tdf_ea,"test_ea")]:
                 if _sdf.empty:
                     continue
                 _sdf=_sdf.copy()
@@ -4124,6 +4472,9 @@ def main():
             f"trades={r['test_trades']} "
             f"({round(r['test_trades']/max(test_days,1),2)}/day) "
             f"Score={r['test_score']}",
+            f"  EA-OOS (box-only, what MT5 fires): WR={r.get('ea_test_wr',0)}% "
+            f"PF={r.get('ea_test_pf',0)} trades={r.get('ea_test_trades',0)} "
+            f"(inflation ×{r.get('box_inflation',0)} vs gated test)",
             f"  {desc}",
         ]
         if degrade: report_lines.append(degrade)
@@ -4143,6 +4494,46 @@ def main():
     rpt=str(OUT/f"report_seed{RANDOM_SEED}.txt")
     Path(rpt).write_text("\n".join(report_lines),encoding="utf-8")
     print(f"  Report      -> {rpt}")
+
+    # Machine-readable run summary — consumed by the optional AI reviewer and
+    # external tooling. Always written (cheap, deterministic, no DataFrames).
+    import json as _json_s
+    _summary_doc = None
+    try:
+        _summary_doc = {
+            "seed": RANDOM_SEED,
+            "run_config": _run_config_snapshot(),
+            "patterns": [_results_summary_entry(r) for r in final_results],
+        }
+        _sj = str(OUT / f"results_seed{RANDOM_SEED}.json")
+        Path(_sj).write_text(_json_s.dumps(_summary_doc, indent=1, default=str),
+                             encoding="utf-8")
+        print(f"  Summary JSON-> {_sj}")
+    except Exception as _se:
+        print(f"  [summary] JSON skipped: {_se}")
+
+    # Optional AI-in-the-loop review (ADVISORY only — never gates or re-ranks;
+    # OFF unless AI_REVIEW_ENABLED / BD_AI_REVIEW=1; failures are non-fatal).
+    _ai_on = bool(globals().get("AI_REVIEW_ENABLED", False))
+    if not _ai_on:
+        try:
+            from ai_review import is_enabled as _ai_env_on
+            _ai_on = _ai_env_on()
+        except Exception:
+            _ai_on = False
+    if _ai_on and _summary_doc is not None:
+        try:
+            from ai_review import review_run as _ai_review_run
+            _ai_path = _ai_review_run(
+                _summary_doc["patterns"], _summary_doc["run_config"],
+                OUT, RANDOM_SEED,
+                base_url=str(globals().get("AI_REVIEW_BASE_URL", "")) or None,
+                model=str(globals().get("AI_REVIEW_MODEL", "")) or None,
+                timeout_s=float(globals().get("AI_REVIEW_TIMEOUT_S", 120)))
+            if _ai_path:
+                print(f"  AI review   -> {_ai_path}")
+        except Exception as _ae:
+            print(f"  [ai_review] skipped: {_ae}")
 
     all_bt=[r for r in final_results]
     if all_bt: plot_performance(all_bt,str(OUT/f"performance_seed{RANDOM_SEED}.png"))

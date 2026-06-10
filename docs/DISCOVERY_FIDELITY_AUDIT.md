@@ -2,6 +2,49 @@
 
 **Re-verified against `v2.1.3` (commit `2ae3390`) on 2026-05-30.**
 
+> **UPDATE 2026-06-10 (working tree):** a follow-up audit found and fixed a
+> second family of divergences — the GA *fitness* simulated a different trade
+> process than the gate sim / EA. All fixed and locked by tests
+> (`backend/tests/test_sim_ga_parity.py` asserts the GA books the IDENTICAL
+> trade stream as `_bt_worker_dir`):
+>
+> 1. **GA horizon** — fitness scanned `FORWARD_BARS=24` bars while the gate/EA
+>    hold `MAX_HOLD_BARS=32`; timeout trades were dropped from fitness entirely.
+>    Now: GA scans `MAX_HOLD_BARS` and books timeouts at the hold-window close.
+> 2. **GA tie-break** — same-bar SL+TP was scored as *timeout* (dropped);
+>    sim/EA book the pessimistic stop. Now: stop wins ties everywhere.
+> 3. **GA overlap/cooldown** — fitness used a signal-anchored cooldown with no
+>    open-position gate. Now: serialized with the EA's exit-anchored arithmetic.
+> 4. **GA exit spread** — SL/TP trigger levels ignored exit-side spread. Now
+>    spread-adjusted like `tp_v_eff`/`sl_v_eff` in the sim.
+> 5. **GA PF** — was `wins*avg_rr/losses` (every loss priced −1R). Now true-R
+>    sums over booked outcomes, matching `_calc_metrics`.
+> 6. **Cooldown anchor (B refinement)** — the sim now reproduces the EA's bar
+>    arithmetic exactly: anchor = exit bar for intrabar closes, exit bar **+1**
+>    for MaxHold timeouts; comparison happens on the forming (entry) bar.
+> 7. **Cost-classification bug** — with `COMMISSION_R`/`SWAP_R_PER_BAR` > 0 a
+>    net-negative "WIN" inflated gross profit in PF. WIN/LOSS is now decided on
+>    NET booked R in both sim and GA.
+> 8. **Ranking/selection coherence (D/C follow-through)** — final ranking,
+>    multi-seed combined ranking, and MC top-N selection all keyed on
+>    cluster-gated `test_pf` (or TRAIN composite for MC) which MT5 cannot
+>    reproduce. All three now rank via `_oos_rank_key` → EA-faithful box-only
+>    OOS (`ea_test_pf`, `ea_test_wr`) first.
+> 9. **.set header honesty** — the `; Test:` line now carries the EA-faithful
+>    box-only OOS numbers (what an MT5 backtest can match); cluster-gated
+>    figures moved to a `; TestGated:` diagnostic line.
+> 10. **MC chain** — now simulates the EA-faithful OOS trade stream (new
+>     `split=test_ea` rows in per-pattern CSVs) instead of cluster-gated test
+>     trades, falling back to `test` for old CSVs.
+>
+> Also new: `results_seed{seed}.json` (machine-readable run summary) and an
+> optional, strictly advisory AI reviewer (`backend/toolkit/ai_review.py`,
+> OFF by default — see `docs/AI_REVIEW.md`).
+>
+> Verified 2026-06-10: 35 backend tests pass on the embedded runtime;
+> template EA and a converter-generated EA both compile 0 errors / 0 warnings
+> via MetaEditor. Part-5 per-trade MT5 diff still pending on a fresh export.
+
 This restores the original audit deliverable, which was lost (never committed to the
 worktree). It is **not** a verbatim copy — it is a fresh re-verification of all seven
 root causes against the *current* code. That matters: the original audit was run

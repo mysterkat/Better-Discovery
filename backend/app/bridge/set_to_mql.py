@@ -17,6 +17,7 @@ default_template_path() -> str
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -152,6 +153,24 @@ _FILTER_GROUPS: list[tuple[str, str]] = [
 ]
 
 
+# ── Input-block markers (must match PatternDiscoveryEA.mq5) ───────────────────
+_BD_INPUT_BEGIN = "// @BD_INPUT_BEGIN"
+_BD_INPUT_END = "// @BD_INPUT_END"
+
+# Matches: input double Commission_R = 0.0;  (optional trailing comment)
+_INPUT_LINE_RE = re.compile(
+    r"^\s*input\s+(?P<type>\S+)\s+(?P<name>\w+)\s*=\s*(?P<val>[^;]+);\s*(?://.*)?\s*$",
+    re.MULTILINE,
+)
+
+
+@dataclass(frozen=True)
+class _TemplateInput:
+    mql_type: str
+    name: str
+    default_raw: str
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _fmt_num(v: Any) -> str:
@@ -244,11 +263,36 @@ def parse_set_file(text: str) -> dict[str, Any]:
 
 
 def _detect_input_block(lines: list[str]) -> dict[str, int] | None:
-    """Find the boundaries of the input block (0-indexed line numbers).
+    """Find the replaceable input block (0-indexed line numbers).
 
-    Mirrors detectInputBlock() in the HTML converter.
-    Returns {'start', 'end'} or None if no input declarations found.
+    Prefer @BD_INPUT_BEGIN / @BD_INPUT_END markers so modeled-cost inputs
+    after @BD_INPUT_END are never stripped from generated pattern EAs.
+    Falls back to first..last ``input`` line if markers are absent.
     """
+    begin_idx = end_idx = -1
+    for i, ln in enumerate(lines):
+        if _BD_INPUT_BEGIN in ln:
+            begin_idx = i
+        if _BD_INPUT_END in ln:
+            end_idx = i
+
+    if begin_idx >= 0 and end_idx > begin_idx:
+        start = begin_idx
+        for i in range(begin_idx - 1, -1, -1):
+            t = lines[i].strip()
+            if t.startswith("//") or t == "":
+                start = i
+            else:
+                break
+        end = end_idx
+        for i in range(end_idx + 1, len(lines)):
+            t = lines[i].strip()
+            if t == "" or t.startswith("//"):
+                end = i
+            else:
+                break
+        return {"start": start, "end": end}
+
     first = last = -1
     for i, ln in enumerate(lines):
         if re.match(r"^\s*input\s+", ln):
@@ -258,7 +302,6 @@ def _detect_input_block(lines: list[str]) -> dict[str, int] | None:
     if first == -1:
         return None
 
-    # Walk backwards to include leading comments / blank lines
     start = first
     for i in range(first - 1, -1, -1):
         t = lines[i].strip()
@@ -267,7 +310,6 @@ def _detect_input_block(lines: list[str]) -> dict[str, int] | None:
         else:
             break
 
-    # Walk forward to include trailing blank / comment lines
     end = last
     for i in range(last + 1, len(lines)):
         t = lines[i].strip()
@@ -279,19 +321,112 @@ def _detect_input_block(lines: list[str]) -> dict[str, int] | None:
     return {"start": start, "end": end}
 
 
-def _build_input_block(parsed: dict[str, Any]) -> str:
+def _parse_template_inputs(template_lines: list[str]) -> list[_TemplateInput]:
+    """Every ``input`` between @BD_INPUT_BEGIN and @BD_INPUT_END in the EA template."""
+    block = _detect_input_block(template_lines)
+    if block is None:
+        return []
+    specs: list[_TemplateInput] = []
+    for ln in template_lines[block["start"] + 1 : block["end"]]:
+        m = _INPUT_LINE_RE.match(ln.rstrip("\r"))
+        if m:
+            specs.append(
+                _TemplateInput(
+                    mql_type=m.group("type").strip(),
+                    name=m.group("name"),
+                    default_raw=m.group("val").strip(),
+                )
+            )
+    return specs
+
+
+def _collect_input_names(mq5_text: str) -> set[str]:
+    # Normalise CRLF so ``$``-anchored input-line parsing works on Windows.
+    text = mq5_text.replace("\r\n", "\n").replace("\r", "\n")
+    names: set[str] = set()
+    for m in _INPUT_LINE_RE.finditer(text):
+        names.add(m.group("name"))
+    return names
+
+
+def _build_merged_params(
+    parsed: dict[str, Any], template_specs: list[_TemplateInput]
+) -> dict[str, Any]:
+    """Merge .set params onto defaults, then template defaults for any missing keys."""
+    merged: dict[str, Any] = dict(_DEFAULTS)
+    for spec in template_specs:
+        if spec.name not in merged:
+            merged[spec.name] = spec.default_raw
+    merged.update(parsed.get("params", {}))
+    return merged
+
+
+def _format_input_value(spec: _TemplateInput, merged: dict[str, Any]) -> str:
+    raw = merged.get(spec.name, spec.default_raw)
+    if spec.mql_type == "string":
+        s = str(raw).strip()
+        if s.startswith('"') and s.endswith('"'):
+            return s
+        return f'"{s}"'
+    if "ENUM_TIMEFRAMES" in spec.mql_type:
+        return str(raw).strip()
+    if spec.mql_type == "bool":
+        return "true" if str(raw).lower() == "true" else "false"
+    return _fmt_num(raw)
+
+
+def _render_input_declaration(spec: _TemplateInput, merged: dict[str, Any]) -> str:
+    val = _format_input_value(spec, merged)
+    pad = (spec.name + " ").ljust(24)
+    return f"input {spec.mql_type} {pad}= {val};"
+
+
+def _inject_missing_template_inputs(
+    mq5_text: str,
+    template_specs: list[_TemplateInput],
+    merged: dict[str, Any],
+) -> str:
+    """Insert any template ``input`` declarations missing from the generated file."""
+    present = _collect_input_names(mq5_text)
+    missing = [s for s in template_specs if s.name not in present]
+    if not missing:
+        return mq5_text
+
+    lines = mq5_text.splitlines()
+    end_idx = next((i for i, ln in enumerate(lines) if _BD_INPUT_END in ln), -1)
+    if end_idx < 0:
+        raise ValueError("Generated .mq5 is missing @BD_INPUT_END marker.")
+
+    patch: list[str] = [
+        "",
+        "//--- Auto-synced from PatternDiscoveryEA.mq5 (required inputs)",
+    ]
+    for spec in missing:
+        patch.append(_render_input_declaration(spec, merged))
+    patch.append("")
+
+    out_lines = lines[:end_idx] + patch + lines[end_idx:]
+    return "\n".join(out_lines)
+
+
+def _validate_export_inputs(mq5_text: str, template_specs: list[_TemplateInput]) -> None:
+    """Fail export if any template input name is absent from the generated .mq5."""
+    present = _collect_input_names(mq5_text)
+    required = {s.name for s in template_specs}
+    missing = sorted(required - present)
+    if missing:
+        raise ValueError(
+            "Generated .mq5 is missing input declarations from the EA template: "
+            + ", ".join(missing)
+        )
+
+
+def _build_input_block(parsed: dict[str, Any], merged: dict[str, Any]) -> str:
     """Generate the populated MQL5 input declaration block.
 
     Mirrors buildInputBlock() in PatternDiscovery_Converter.html.
     """
-    p = parsed["params"]
     meta = parsed.get("meta", {})
-
-    # Merge .set values onto defaults
-    merged: dict[str, Any] = dict(_DEFAULTS)
-    for k, v in p.items():
-        if k in merged:
-            merged[k] = v
 
     PAD = 24
     lines: list[str] = []
@@ -321,6 +456,7 @@ def _build_input_block(parsed: dict[str, Any]) -> str:
         ln(f"// SL={meta['sl_pct']}%  TP={meta['tp_pct']}%  Implied RR={meta['rr']}")
     ln("// Injected by BETTER DISCOVERY / Pattern Discovery v6 Converter")
     ln("//================================================================")
+    ln(_BD_INPUT_BEGIN)
     ln("")
 
     # ── Identity ──────────────────────────────────────────────────────────────
@@ -355,12 +491,7 @@ def _build_input_block(parsed: dict[str, Any]) -> str:
     ln(f"input double TP_Pct              = {_fmt_num(merged['TP_Pct'])};")
     ln(f"input double Lots                = {_fmt_num(merged['Lots'])};")
     ln("")
-
-    # ── Trading costs (mirror simulator's Commission_R / Swap_R_PerBar) ─────
-    ln("//--- Trading costs (in R = risk multiples)")
-    ln("//    Mirror the discovery simulator so live results stay aligned.")
-    ln("//    Commission_R = round-turn cost per trade; Swap_R_PerBar = cost per bar held.")
-    ln("//    Leave at 0.0 to avoid double-charging if broker already reports real costs.")
+    ln("//--- Trading costs (R multiples) — names match discovery .set file")
     ln(f"input double {padded('Commission_R')}= {_fmt_num(merged['Commission_R'])};")
     ln(f"input double {padded('Swap_R_PerBar')}= {_fmt_num(merged['Swap_R_PerBar'])};")
     ln("")
@@ -435,15 +566,56 @@ def _build_input_block(parsed: dict[str, Any]) -> str:
         ln(f"input double {padded(col + '_hi')}= {_fmt_num(hi)};  // {short_label}")
         ln("")
 
+    ln(_BD_INPUT_END)
     return "\n".join(lines)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def export_report(mq5_path: str | Path) -> dict[str, Any]:
+    """Summarise whether a generated .mq5 has every template input declared."""
+    text = Path(mq5_path).read_text(encoding="utf-8", errors="replace")
+    present = _collect_input_names(text)
+    template_lines = Path(default_template_path()).read_text(
+        encoding="utf-8", errors="replace"
+    ).splitlines()
+    required = {s.name for s in _parse_template_inputs(template_lines)}
+    missing = sorted(required - present)
+    return {
+        "path": str(Path(mq5_path).resolve()),
+        "inputs_present": len(present),
+        "inputs_required": len(required),
+        "missing_inputs": missing,
+        "has_commission_r": "Commission_R" in present,
+        "has_swap_r_per_bar": "Swap_R_PerBar" in present,
+    }
+
+
+def export_from_set_path(
+    set_path: str | Path,
+    template_path: str | None = None,
+    output_name: str | None = None,
+    also_write_paths: list[str | Path] | None = None,
+) -> str:
+    """Read a .set from disk and export; optionally mirror the .mq5 to extra paths."""
+    set_file = Path(set_path)
+    if not set_file.is_file():
+        raise FileNotFoundError(f".set file not found: {set_file}")
+    content = set_file.read_text(encoding="utf-8", errors="replace")
+    out = export(
+        content,
+        template_path=template_path,
+        output_name=output_name,
+        also_write_paths=also_write_paths,
+    )
+    return out
+
+
 def export(
     set_content: str,
     template_path: str | None = None,
     output_name: str | None = None,
+    also_write_paths: list[str | Path] | None = None,
 ) -> str:
     """Convert .set content + EA template into a ready-to-compile .mq5 file.
 
@@ -451,6 +623,8 @@ def export(
         set_content:   Raw text of the .set file produced by pattern_discovery_v6.
         template_path: Path to the .mq5 template; None → bundled default.
         output_name:   Override output filename stem (no extension).
+        also_write_paths: Optional extra paths to write the same .mq5 bytes
+            (e.g. next to the source .set on the Desktop).
 
     Returns:
         Absolute path to the generated .mq5 in userdata/mql/.
@@ -467,7 +641,15 @@ def export(
     template_lines = template_text.splitlines()
 
     parsed = parse_set_file(set_content)
-    input_block = _build_input_block(parsed)
+    template_specs = _parse_template_inputs(template_lines)
+    if not template_specs:
+        raise ValueError(
+            "EA template has no parsable inputs between "
+            f"{_BD_INPUT_BEGIN} and {_BD_INPUT_END}."
+        )
+
+    merged = _build_merged_params(parsed, template_specs)
+    input_block = _build_input_block(parsed, merged)
 
     block_info = _detect_input_block(template_lines)
     if block_info is None:
@@ -476,6 +658,8 @@ def export(
     before = template_lines[: block_info["start"]]
     after = template_lines[block_info["end"] + 1 :]
     merged_text = "\n".join(before) + "\n" + input_block + "\n" + "\n".join(after)
+    merged_text = _inject_missing_template_inputs(merged_text, template_specs, merged)
+    _validate_export_inputs(merged_text, template_specs)
 
     # Determine output filename
     if output_name is None:
@@ -485,7 +669,12 @@ def export(
 
     _MQL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     out_file = _MQL_OUTPUT_DIR / f"{output_name}.mq5"
-    out_file.write_text(merged_text, encoding="utf-8")
+    out_file.write_text(merged_text, encoding="utf-8", newline="\n")
+    if also_write_paths:
+        for extra in also_write_paths:
+            dest = Path(extra)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(merged_text, encoding="utf-8", newline="\n")
     return str(out_file)
 
 
