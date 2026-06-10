@@ -155,6 +155,16 @@ PARAM_META: dict[str, ParamMeta] = {
                                        "Force-exit after N bars", min=4, max=200, step=1),
     "COOLDOWN_BARS":        ParamMeta("Cooldown Bars",         "Trade Simulation", "int",
                                        "Bars to skip after each trade", min=0, max=20, step=1),
+    "COMMISSION_R":         ParamMeta("Commission (R)",        "Trade Simulation", "float",
+                                       "Round-turn commission per trade as a fraction of risk (R). "
+                                       "Estimate of your broker's REAL commission — sim-only; the "
+                                       "exported .set always carries 0 so the EA never double-charges. "
+                                       "Spread-only accounts: set 0.",
+                                       min=0.0, max=0.5, step=0.005),
+    "SWAP_R_PER_BAR":       ParamMeta("Swap (R per bar)",      "Trade Simulation", "float",
+                                       "Financing cost per bar held, in R. Sim-only (see Commission). "
+                                       "Usually 0 for intraday timeframes.",
+                                       min=0.0, max=0.1, step=0.001),
     # ── SL / TP ─────────────────────────────────────────────────────────────
     "SL_PCT_QUANTILE":      ParamMeta("SL Quantile",           "SL / TP", "float",
                                        "Adverse excursion quantile for stop-loss", min=0.5, max=0.99, step=0.01),
@@ -360,6 +370,11 @@ PARAM_META: dict[str, ParamMeta] = {
                                         "Min fraction of months with any trade", min=0.1, max=1.0, step=0.05),
     "MIN_TEST_TRADES_PER_DAY":ParamMeta("Min Test Trades/Day", "Quality Filters", "float",
                                          "Min frequency on the out-of-sample split", min=0.05, max=3.0, step=0.05),
+    "MAX_SOFT_FAILS":        ParamMeta("Max Soft-Filter Fails","Quality Filters", "int",
+                                        "How many SOFT quality filters a pattern may fail and still "
+                                        "pass as ⚠ MARGINAL. Hard filters (PF, frequency, OOS trades) "
+                                        "always veto. 0 = strict (all filters must pass).",
+                                        min=0, max=7, step=1),
     "CORRELATION_THRESHOLD": ParamMeta("Correlation Threshold","Quality Filters", "float",
                                         "Max allowed pattern-pair trade correlation", min=0.3, max=1.0, step=0.05),
     "RECENT_BARS":           ParamMeta("Recent Bars",          "Quality Filters", "int",
@@ -449,7 +464,7 @@ _ADVANCED_KEYS: set[str] = {
     "SCORE_W_WR", "SCORE_W_PF", "SCORE_W_RR", "SCORE_W_STAB",
     "SCORE_WILSON_CONFIDENCE",
     # Quality Filters
-    "CORRELATION_THRESHOLD", "RECENT_BARS",
+    "CORRELATION_THRESHOLD", "RECENT_BARS", "SWAP_R_PER_BAR",
     # MC Auto-run — RUN_MC_ON_TOP_N is the master toggle; the rest are sizing
     "MC_N_SIMS", "MC_BALANCE", "MC_LOT", "MC_MAX_DAYS",
     # AI Review — the on/off toggle stays core; endpoint tuning is advanced

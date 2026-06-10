@@ -190,8 +190,12 @@ MAX_HOLD_BARS           = 32
 # Per-trade trading costs, expressed in R (risk multiples) so they subtract
 # directly from booked outcomes. COMMISSION_R = round-turn commission charged
 # once per trade; SWAP_R_PER_BAR = financing/swap charged per bar held.
-# Both default 0.0 → behaviour unchanged until a non-zero value is set.
-COMMISSION_R            = 0.0
+# These are SIM-ONLY estimates of the broker's REAL costs — the .set exporter
+# always emits Commission_R=0 / Swap_R_PerBar=0 so the EA (which books the
+# broker's actual commission/swap from deal history) never double-charges.
+# 0.02 ≈ FTMO-style round-turn commission on gold at percent-SL sizing;
+# spread-only accounts should set 0.0.
+COMMISSION_R            = 0.02
 SWAP_R_PER_BAR          = 0.0
 ALLOWED_SESSIONS        = []
 COOLDOWN_BARS           = 4    # FTMO: longer cooldown → fewer clustered losses
@@ -232,7 +236,14 @@ FORWARD_BARS_SWEEP      = []       # e.g. [12, 24, 48]
 # UI-friendly toggles (bool → JSON-serialisable, so spawn-pool workers inherit
 # them via _app_override.json; sets/lists do not serialise). These let the app
 # drive the research bundle without the UI needing set/list field types.
-USE_RESEARCH_FEATURES   = False    # True => ext-feature bundle {'time','structure','normalize'}
+# ON (2026-06-10): the ext features feed ONLY the clustering/encoding stage,
+# which in box-only mode merely seeds the GA (col_stats + warm-start) — rules
+# are still built from GENE_COLS, so there is NO EA-parity risk, just more
+# diverse seeds. Any junk they cause is rejected by the box-only OOS gate.
+USE_RESEARCH_FEATURES   = True     # True => ext-feature bundle {'time','structure','normalize'}
+# OFF on purpose: sweeping horizons and keeping the best adds a selection
+# degree of freedom (multiple testing) and de-syncs FORWARD_BARS from the
+# exported MaxHoldBars story. Enable only for offline research.
 USE_FORWARD_SWEEP       = False    # True => sweep [12,24,48,96] when FORWARD_BARS_SWEEP is empty
 #
 # ── RESEARCH PROFILE (copy-paste to enable the full edge bundle) ─────────────
@@ -434,7 +445,10 @@ MIN_TEST_TRADES_PER_DAY = 0.3
 # pre-screen. Move any name into HARD_FILTERS to make it a hard veto again, or set
 # MAX_SOFT_FAILS=0 to require ALL soft filters (the old strict behaviour).
 HARD_FILTERS            = {"profit_factor", "per_day", "test_trades"}
-MAX_SOFT_FAILS          = 4
+# 3 (was 4): tightened one notch now that the GA optimizes the honest
+# box-only objective — the leniency was compensation for a fitness landscape
+# that no longer exists. Patterns failing 4+ soft proxies are not FTMO-grade.
+MAX_SOFT_FAILS          = 3
 CORRELATION_THRESHOLD   = 0.70
 RECENT_BARS             = 8000
 
@@ -3579,11 +3593,13 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
         "; Force-close a position after this many bars if neither SL nor TP hit",
         "; (matches the simulator's MAX_HOLD_BARS). 0 = hold until SL/TP only.",
         f"MaxHoldBars={int(MAX_HOLD_BARS)}",
-        "; Trading costs in R (risk multiples), matching the simulator's",
-        "; COMMISSION_R / SWAP_R_PER_BAR. Commission = round-turn per trade;",
-        "; Swap = per bar held. 0.0 = no cost charged.",
-        f"Commission_R={float(COMMISSION_R):.6f}",
-        f"Swap_R_PerBar={float(SWAP_R_PER_BAR):.6f}",
+        "; Trading costs: the SIM charged COMMISSION_R/SWAP_R_PER_BAR per trade as an",
+        "; ESTIMATE of real broker costs (this run: "
+        f"COMMISSION_R={float(COMMISSION_R):.4f}, SWAP_R_PER_BAR={float(SWAP_R_PER_BAR):.4f}).",
+        "; The EA books the broker's REAL commission/swap from deal history, so these",
+        "; synthetic inputs MUST stay 0.0 in MT5 — any non-zero value double-charges.",
+        "Commission_R=0.000000",
+        "Swap_R_PerBar=0.000000",
     ]
 
     # Session filter — derive from session condition in rule if present
