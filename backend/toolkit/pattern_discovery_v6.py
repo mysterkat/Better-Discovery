@@ -499,6 +499,18 @@ GENE_COLS = ["rsi14","macd_norm","atr_pct","bb_width","trend",
              "stoch_k","stoch_d","pin_bar","inside_bar","outside_bar",
              "htf_div","rolling_sharpe","sd_zone","vwap_dist"]
 
+# The EA's feat[27] vector, in COLUMN INDEX TABLE order (must stay in sync
+# with PatternDiscoveryEA.mq5 and set_to_mql._COLS). Used to snapshot the
+# full feature state at each trade's signal bar into the exported trade CSVs
+# (feat_* columns) — the training data for the ONNX trade filter.
+EA_FEATURE_COLS = [
+    "rsi14", "macd_norm", "atr_pct", "bb_width", "trend", "mtf_bull_score",
+    "body_pct", "rng_atr", "vol_ratio", "vol_body_conf", "regime",
+    "vol_price_div", "bb_expanding", "prev_sess_bias", "poc_dist", "bull",
+    "uwk_pct", "lwk_pct", "stoch_k", "stoch_d", "pin_bar", "inside_bar",
+    "outside_bar", "htf_div", "rolling_sharpe", "sd_zone", "vwap_dist",
+]
+
 DIRECTIONAL_COLS = {"trend","bull","macd_norm","rsi14","stoch_k","stoch_d","htf_div"}
 
 DISCRIM_COLS = ["trend","bull","macd_norm","rsi14","session",
@@ -3104,6 +3116,13 @@ def backtest_refined(df, indices, labels, genetic_rules, price_dists,
             for bi, res, rr, entry, sl_v, tp_v, dirn, bh,
                 reg, sess_v, trn, rsi14, stk, atrp, mtf in trades
         ])
+        # Full EA feature snapshot at each signal bar (feat_* columns) — the
+        # training data for the optional ONNX trade filter (onnx_filter.py).
+        if not tdf.empty:
+            _bis = np.asarray([t[0] for t in trades], dtype=np.int64)
+            for _fc in EA_FEATURE_COLS:
+                if _fc in df.columns:
+                    tdf["feat_" + _fc] = df[_fc].values[_bis]
         cid = key[0] if isinstance(key, tuple) else key
         m = _calc_metrics(trades, filt_size, trading_days, tdf)
         m["cluster"] = cid; m["key"] = key
