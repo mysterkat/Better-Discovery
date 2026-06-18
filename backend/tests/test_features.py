@@ -21,6 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "toolkit"))
 
 import pattern_discovery_v6 as pd6
+from toolkit.features_ext import add_cross_asset_features
 
 
 # ── Synthetic fixture ────────────────────────────────────────────────────────
@@ -171,3 +172,21 @@ def test_detect_regimes_produces_all_five_classes(featured_df):
     actual = set(tail["regime"].dropna().unique())
     # Allow missing classes on very short fixtures; at least 2 should appear.
     assert len(actual) >= 2, f"Only {len(actual)} regime class(es) seen: {actual}"
+
+
+def test_cross_asset_features_are_causal_and_finite_after_warmup():
+    base = _make_fixture(300)
+    ext = base[["open", "high", "low", "close", "volume"]].copy()
+    ext["close"] = ext["close"] * np.linspace(1.0, 1.03, len(ext))
+
+    out = add_cross_asset_features(base, {"DXY": ext})
+    required = [
+        "xa_dxy_ret1",
+        "xa_dxy_ret4",
+        "xa_dxy_mom_z",
+        "xa_dxy_rel_ret1",
+        "xa_dxy_ratio_z",
+    ]
+    missing = [c for c in required if c not in out.columns]
+    assert not missing
+    assert np.isfinite(out[required].iloc[220:].fillna(0).to_numpy()).all()

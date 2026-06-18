@@ -79,6 +79,8 @@ def cluster_by_lightgbm_leaves(
     min_samples_leaf: int,
     random_seed: int,
     learning_rate: float = 0.05,
+    device_type: str = "cpu",
+    gpu_use_dp: bool = False,
 ) -> tuple[np.ndarray, int, object]:
     """Train a LightGBM regressor on (features → signed best move) and return
     leaf-id labels in the same shape as the KMeans pipeline produces.
@@ -132,17 +134,41 @@ def cluster_by_lightgbm_leaves(
         # cluster so the rest of the pipeline still runs.
         return np.zeros(len(idx_tr), dtype=np.int32), 1, None
 
-    model = lgb.LGBMRegressor(
-        n_estimators=n_estimators,
-        num_leaves=num_leaves,
-        min_child_samples=min_samples_leaf,
-        learning_rate=learning_rate,
-        random_state=int(random_seed) % (2 ** 31),
-        verbose=-1,
-        n_jobs=-1,
-    )
     feat_names = [f"enc_{i}" for i in range(X_fit.shape[1])]
-    model.fit(X_fit, y_fit, feature_name=feat_names)
+
+    requested_device = str(device_type or "cpu").lower()
+    if requested_device not in {"cpu", "gpu", "auto"}:
+        requested_device = "cpu"
+    device_attempts = ["gpu", "cpu"] if requested_device == "auto" else [requested_device]
+    last_error: Exception | None = None
+    model = None
+    used_device = "cpu"
+    for dev in device_attempts:
+        params = dict(
+            n_estimators=n_estimators,
+            num_leaves=num_leaves,
+            min_child_samples=min_samples_leaf,
+            learning_rate=learning_rate,
+            random_state=int(random_seed) % (2 ** 31),
+            verbose=-1,
+            n_jobs=-1,
+        )
+        if dev == "gpu":
+            params["device_type"] = "gpu"
+            params["gpu_use_dp"] = bool(gpu_use_dp)
+        candidate = lgb.LGBMRegressor(**params)
+        try:
+            candidate.fit(X_fit, y_fit, feature_name=feat_names)
+            model = candidate
+            used_device = dev
+            break
+        except Exception as exc:  # noqa: BLE001 - fallback is intentional here
+            last_error = exc
+            if requested_device == "gpu":
+                raise
+    if model is None:
+        raise RuntimeError(f"LightGBM training failed on all devices: {last_error}") from last_error
+    setattr(model, "_bd_device_type", used_device)
 
     # Predict leaf indices per (bar, tree).  Shape: (n_bars, n_trees).
     leaf_indices = model.predict(X_tr, pred_leaf=True)

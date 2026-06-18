@@ -34,7 +34,8 @@ fn prune_python_build_artifacts(dir: &Path) -> io::Result<()> {
         let file_type = entry.file_type()?;
 
         if file_type.is_dir() {
-            if entry.file_name() == "__pycache__" {
+            let name = entry.file_name();
+            if name == "__pycache__" || name == ".pytest_cache" {
                 let _ = fs::remove_dir_all(&path);
                 continue;
             }

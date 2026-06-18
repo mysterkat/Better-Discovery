@@ -349,10 +349,14 @@ def rolling_normalize(
 
 
 # =============================================================================
-#  CROSS-ASSET STUB  (documented no-op until external data is wired)
+#  CROSS-ASSET FEATURES
 # =============================================================================
+def _clean_ext_name(name: str) -> str:
+    return "".join(ch.lower() if ch.isalnum() else "_" for ch in str(name)).strip("_")
+
+
 def add_cross_asset_features(df: pd.DataFrame, ext_data: dict | None = None) -> pd.DataFrame:
-    """STUB — wire DXY / yields / silver (and other cross-asset series) here.
+    """Append DXY / yields / silver / index context features.
 
     Intended to enrich an instrument (e.g. XAUUSD) with intermarket context:
       * DXY level / momentum (gold is broadly inverse to the dollar),
@@ -371,34 +375,42 @@ def add_cross_asset_features(df: pd.DataFrame, ext_data: dict | None = None) -> 
                 "silver": xag_df,
             }
 
-        When implemented, each series should be reindexed onto ``df.index``
-        (``reindex(df.index).ffill()``) BEFORE deriving features, to avoid
-        look-ahead from differing bar timestamps.
+        Each series is reindexed onto ``df.index`` and forward-filled BEFORE
+        deriving features, so a primary bar only sees external values known at
+        or before that timestamp.
 
     Returns
     -------
     pd.DataFrame
-        Currently a copy of ``df`` with NO new columns when ``ext_data`` is
-        empty/None (pure no-op). The signature and contract are frozen so the
-        dispatcher and call sites need not change once real logic lands.
-
-    TODO (when data exists)
-    -----------------------
-      1. reindex+ffill each external frame onto df.index,
-      2. add level, return(1, n) and rolling_normalize'd momentum columns,
-      3. add gold/silver ratio + dollar-correlation rolling beta,
-      4. register the produced column names in add_all_ext_features' registry.
+        A copy of ``df`` with five columns per external series:
+        ``ret1``, ``ret4``, ``mom_z``, ``rel_ret1``, and ``ratio_z``.
     """
     out = df.copy()
     if not ext_data:
         return out  # no-op: nothing wired yet
-    # --- IMPLEMENT HERE ----------------------------------------------------
-    # Example skeleton (kept inert until real columns are agreed):
-    #   for name, ext in ext_data.items():
-    #       aligned = ext.reindex(out.index).ffill()
-    #       out[f"{name}_close"] = aligned["close"]
-    #       out[f"{name}_ret1"]  = aligned["close"].pct_change()
-    # -----------------------------------------------------------------------
+
+    base_close = out["close"].astype(float)
+    base_ret1 = base_close.pct_change().replace([np.inf, -np.inf], np.nan)
+    for raw_name, ext in sorted(ext_data.items(), key=lambda kv: str(kv[0]).lower()):
+        if ext is None or "close" not in ext.columns:
+            continue
+        name = _clean_ext_name(raw_name)
+        aligned = ext.sort_index().reindex(out.index).ffill()
+        close = aligned["close"].astype(float)
+        ret1 = close.pct_change().replace([np.inf, -np.inf], np.nan)
+        ret4 = close.pct_change(4).replace([np.inf, -np.inf], np.nan)
+        mom = close.pct_change(12).replace([np.inf, -np.inf], np.nan)
+        mom_mean = mom.rolling(100, min_periods=25).mean()
+        mom_std = mom.rolling(100, min_periods=25).std(ddof=0)
+        ratio = base_close / (close + _EPS)
+        ratio_mean = ratio.rolling(200, min_periods=50).mean()
+        ratio_std = ratio.rolling(200, min_periods=50).std(ddof=0)
+
+        out[f"xa_{name}_ret1"] = ret1
+        out[f"xa_{name}_ret4"] = ret4
+        out[f"xa_{name}_mom_z"] = (mom - mom_mean) / (mom_std + _EPS)
+        out[f"xa_{name}_rel_ret1"] = base_ret1 - ret1
+        out[f"xa_{name}_ratio_z"] = (ratio - ratio_mean) / (ratio_std + _EPS)
     return out
 
 

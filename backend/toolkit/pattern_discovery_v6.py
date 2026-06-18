@@ -48,7 +48,7 @@ Requirements:
     Python 3.14+
 """
 from __future__ import annotations
-import sys, warnings, random, time, os, textwrap, re
+import sys, warnings, random, time, os, textwrap, re, json
 
 
 # v1.4.2 — raise per-process CRT stdio handle limit BEFORE any worker spawn.
@@ -240,7 +240,7 @@ FORWARD_BARS_SWEEP      = []       # e.g. [12, 24, 48]
 # which in box-only mode merely seeds the GA (col_stats + warm-start) — rules
 # are still built from GENE_COLS, so there is NO EA-parity risk, just more
 # diverse seeds. Any junk they cause is rejected by the box-only OOS gate.
-USE_RESEARCH_FEATURES   = True     # True => ext-feature bundle {'time','structure','normalize'}
+USE_RESEARCH_FEATURES   = True     # True => ext-feature bundle {'time','structure','normalize','cross_asset'}
 # OFF on purpose: sweeping horizons and keeping the best adds a selection
 # degree of freedom (multiple testing) and de-syncs FORWARD_BARS from the
 # exported MaxHoldBars story. Enable only for offline research.
@@ -357,6 +357,13 @@ LIGHTGBM_N_ESTIMATORS    = 1
 LIGHTGBM_NUM_LEAVES      = 32      # more leaf-clusters = more diverse warm-start seeds for box-only GA
 LIGHTGBM_MIN_SAMPLES_LEAF = 30     # minimum bars per leaf
 LIGHTGBM_LEARNING_RATE   = 0.05    # tree shrinkage
+LIGHTGBM_DEVICE          = "auto"  # "cpu", "gpu", or "auto" (try GPU, fall back to CPU)
+LIGHTGBM_GPU_USE_DP      = False   # GPU double precision: more exact, slower; usually False
+
+# Runtime instrumentation and cross-asset context.
+ENABLE_PERF_PROFILE      = True
+CROSS_ASSET_SYMBOLS      = "DXY,XAGUSD,US500,VIX,US10Y,US02Y"
+CROSS_ASSET_TF           = "primary"  # "primary" or "any"
 
 # Pass 2
 TOP_FRACTION_PASS2       = 0.25
@@ -616,6 +623,55 @@ def _load_raw(path):
     cols=["open","high","low","close"]+(["volume"] if "volume" in df.columns else [])
     return df[cols].astype(float)
 
+_HIST_FILE_RE = re.compile(r"^([a-z0-9]+)_([a-z]+\d*)\.csv$", re.IGNORECASE)
+
+def _parse_hist_filename(name):
+    m = _HIST_FILE_RE.match(str(name))
+    if not m:
+        return None
+    return m.group(1).upper(), m.group(2).lower()
+
+def _primary_hist_symbol_tf():
+    tf_files = [TF1_FILE, TF2_FILE, TF3_FILE, TF4_FILE, TF5_FILE]
+    primary_idx = max(1, min(5, int(PRIMARY_TF))) - 1
+    parsed = _parse_hist_filename(tf_files[primary_idx])
+    return parsed if parsed else (None, None)
+
+def _load_cross_asset_data():
+    wanted = {
+        s.strip().upper()
+        for s in str(globals().get("CROSS_ASSET_SYMBOLS", "") or "").split(",")
+        if s.strip()
+    }
+    if not wanted:
+        return {}
+    primary_symbol, primary_tf = _primary_hist_symbol_tf()
+    tf_mode = str(globals().get("CROSS_ASSET_TF", "primary") or "primary").lower()
+    folder = Path(DATA_FOLDER)
+    if not folder.is_dir():
+        return {}
+
+    out = {}
+    for path in sorted(folder.glob("*.csv")):
+        parsed = _parse_hist_filename(path.name)
+        if not parsed:
+            continue
+        symbol, tf = parsed
+        if symbol == primary_symbol or symbol not in wanted:
+            continue
+        if tf_mode == "primary" and primary_tf and tf != primary_tf:
+            continue
+        key = symbol.lower()
+        if key in out:
+            continue
+        try:
+            out[key] = _load_raw(str(path))
+        except Exception as exc:
+            print(f"  [research] cross-asset load skipped {path.name}: {exc}")
+    if out:
+        print(f"  [research] cross-asset context loaded: {', '.join(sorted(out))}")
+    return out
+
 def _ema(s,n): return s.ewm(span=n,adjust=False).mean()
 def _rsi(s,n=14):
     d=s.diff(); g=d.clip(lower=0).ewm(com=n-1,adjust=False).mean()
@@ -788,7 +844,7 @@ def add_v5_features(df):
 # cached at module level and passed into the mp.Pool workers via initargs
 # (Windows spawn re-imports this module and resets globals to their defaults, so
 # the worker MUST receive the list explicitly, never read USE_EXT_FEATURES).
-_EXT_FEATURE_COLS_CACHE = None   # None = not computed yet; list once resolved
+_EXT_FEATURE_COLS_CACHE = {}   # keyed by (enable tokens, cross-asset names)
 
 def _resolved_ext_enable():
     """Resolve the active extended-feature set.
@@ -801,7 +857,7 @@ def _resolved_ext_enable():
     if explicit:
         return explicit
     if bool(globals().get("USE_RESEARCH_FEATURES", False)):
-        return {"time", "structure", "normalize"}
+        return {"time", "structure", "normalize", "cross_asset"}
     return set()
 
 def _ext_feature_cols():
@@ -817,14 +873,17 @@ def _ext_feature_cols():
     enable=_resolved_ext_enable()
     if not enable:
         return []
-    if _EXT_FEATURE_COLS_CACHE is not None:
-        return _EXT_FEATURE_COLS_CACHE
+    ext_data = _load_cross_asset_data() if "cross_asset" in enable else {}
+    cache_key = (tuple(sorted(enable)), tuple(sorted(ext_data)))
+    if cache_key in _EXT_FEATURE_COLS_CACHE:
+        return _EXT_FEATURE_COLS_CACHE[cache_key]
     try:
         import features_ext as _fx
+        _fx.SERVER_UTC_OFFSET = int(globals().get("MT5_SERVER_UTC_OFFSET", 2))
     except ImportError as e:
         print(f"  [research] features_ext unavailable ({e}); "
               f"USE_EXT_FEATURES ignored, falling back to base features.")
-        _EXT_FEATURE_COLS_CACHE=[]
+        _EXT_FEATURE_COLS_CACHE[cache_key]=[]
         return []
     # Synthetic 64-bar OHLC frame with a DatetimeIndex (time block needs one).
     idx=pd.date_range("2020-01-01", periods=64, freq="5min")
@@ -832,14 +891,14 @@ def _ext_feature_cols():
     probe=pd.DataFrame({"open":base,"high":base+0.5,"low":base-0.5,
                         "close":base,"volume":1.0}, index=idx)
     try:
-        out=_fx.add_all_ext_features(probe, enable=enable)
+        out=_fx.add_all_ext_features(probe, enable=enable, ext_data=ext_data)
     except Exception as e:
         print(f"  [research] features_ext probe failed ({e}); "
               f"USE_EXT_FEATURES ignored.")
-        _EXT_FEATURE_COLS_CACHE=[]
+        _EXT_FEATURE_COLS_CACHE[cache_key]=[]
         return []
     new_cols=[c for c in out.columns if c not in probe.columns]
-    _EXT_FEATURE_COLS_CACHE=new_cols
+    _EXT_FEATURE_COLS_CACHE[cache_key]=new_cols
     print(f"  [research] USE_EXT_FEATURES={sorted(enable)} -> "
           f"{len(new_cols)} extra feature column(s) enter X: {new_cols}")
     return new_cols
@@ -853,12 +912,14 @@ def _maybe_add_ext_features(df):
         return df
     try:
         import features_ext as _fx
+        _fx.SERVER_UTC_OFFSET = int(globals().get("MT5_SERVER_UTC_OFFSET", 2))
     except ImportError as e:
         print(f"  [research] features_ext unavailable ({e}); "
               f"USE_EXT_FEATURES ignored, using base features only.")
         return df
     try:
-        df=_fx.add_all_ext_features(df, enable=enable)
+        ext_data = _load_cross_asset_data() if "cross_asset" in enable else {}
+        df=_fx.add_all_ext_features(df, enable=enable, ext_data=ext_data)
     except Exception as e:
         print(f"  [research] add_all_ext_features failed ({e}); "
               f"continuing with base features.")
@@ -3886,7 +3947,17 @@ def main():
              "Genetic Pass 2","Post-P2 Backtest",
              "Validate (test)","Quality Analysis","Export"]
     _sn=[0]
+    _profile=[]
+    _cur_stage={"name":"Setup","t":t_total}
     def _stage(name):
+        if bool(globals().get("ENABLE_PERF_PROFILE", True)) and _cur_stage["name"]:
+            now=time.time()
+            _profile.append({
+                "stage": _cur_stage["name"],
+                "seconds": round(now-_cur_stage["t"], 3),
+            })
+            _cur_stage["t"]=now
+            _cur_stage["name"]=name
         _sn[0]+=1; print(f"\n[{_sn[0]}/{len(_STAGES)}] {name}", flush=True)
 
     print(f"\n{'='*65}")
@@ -3932,6 +4003,8 @@ def main():
                 min_samples_leaf=int(globals().get("LIGHTGBM_MIN_SAMPLES_LEAF", 30)),
                 random_seed=RANDOM_SEED,
                 learning_rate=float(globals().get("LIGHTGBM_LEARNING_RATE", 0.05)),
+                device_type=str(globals().get("LIGHTGBM_DEVICE", "cpu")),
+                gpu_use_dp=bool(globals().get("LIGHTGBM_GPU_USE_DP", False)),
             )
             if _lgbm_model is None:
                 print("  LightGBM: not enough labelled bars for a tree model "
@@ -3965,7 +4038,8 @@ def main():
 
                 print(f"  Clustering method: lightgbm "
                       f"({_lgbm_n_est} trees × {_lgbm_n_leaves} leaves, "
-                      f"{n_cl} leaf-clusters)")
+                      f"{n_cl} leaf-clusters, "
+                      f"device={getattr(_lgbm_model, '_bd_device_type', 'cpu')})")
         except ImportError as ex:
             import sys as _sys
             print(f"  LightGBM path import FAILED: {ex!r}")
@@ -4579,6 +4653,32 @@ def main():
             run_mc_on_top_patterns(final_results, OUT)
         except Exception as _mc_e:
             print(f"[MC] chain failed: {_mc_e}")
+
+    if bool(globals().get("ENABLE_PERF_PROFILE", True)):
+        try:
+            if _cur_stage["name"]:
+                _profile.append({
+                    "stage": _cur_stage["name"],
+                    "seconds": round(time.time()-_cur_stage["t"], 3),
+                })
+                _cur_stage["name"] = ""
+            perf_doc = {
+                "seed": RANDOM_SEED,
+                "total_seconds": round(time.time()-t_total, 3),
+                "workers": nw,
+                "cpu_count": total_cpu,
+                "clustering_method": _clustering_method,
+                "lightgbm_device_requested": str(globals().get("LIGHTGBM_DEVICE", "cpu")),
+                "lightgbm_device_used": getattr(_lgbm_model, "_bd_device_type", None),
+                "extra_features": sorted(_resolved_ext_enable()),
+                "cross_assets": sorted(_load_cross_asset_data()) if "cross_asset" in _resolved_ext_enable() else [],
+                "stages": _profile,
+            }
+            perf_path = OUT / f"performance_profile_seed{RANDOM_SEED}.json"
+            perf_path.write_text(json.dumps(perf_doc, indent=2, default=str), encoding="utf-8")
+            print(f"  Perf profile -> {perf_path}")
+        except Exception as _pe:
+            print(f"  [profile] JSON skipped: {_pe}")
 
     print(f"\n{'='*65}")
     print(f"  TOTAL TIME: {_elapsed(t_total)}")

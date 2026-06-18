@@ -248,6 +248,16 @@ PARAM_META: dict[str, ParamMeta] = {
                                        "Shrinkage applied to each tree's contribution.  Lower = more "
                                        "trees needed but better-behaved leaves.",
                                        min=0.01, max=0.3, step=0.01),
+    "LIGHTGBM_DEVICE":     ParamMeta("LightGBM: Device",       "Regime & Features", "str",
+                                       "cpu = always CPU. gpu = require LightGBM GPU/OpenCL. "
+                                       "auto = try GPU first and fall back to CPU if unavailable.",
+                                       options=["auto", "cpu", "gpu"]),
+    "LIGHTGBM_GPU_USE_DP": ParamMeta("LightGBM: GPU Double Precision", "Regime & Features", "bool",
+                                       "Use double precision on GPU. Usually slower; leave off unless "
+                                       "you are comparing numerical drift."),
+    "ENABLE_PERF_PROFILE": ParamMeta("Performance Profile JSON", "Optimizer", "bool",
+                                       "Write per-stage timing JSON next to every discovery report so "
+                                       "speed changes can be measured instead of guessed."),
     # ── Genetic Pass 2 ──────────────────────────────────────────────────────
     "TOP_FRACTION_PASS2":      ParamMeta("Top Fraction",       "Genetic Pass 2", "float",
                                           "Best-scoring fraction carried into pass 2", min=0.05, max=0.5, step=0.05),
@@ -274,9 +284,16 @@ PARAM_META: dict[str, ParamMeta] = {
                                         "PATTERN merit not the instrument's trend. Fixes the 'everything is LONG_ONLY' "
                                         "bias and makes genuine bidirectional setups possible."),
     "USE_RESEARCH_FEATURES":  ParamMeta("Enhanced Features",    "Research (experimental)", "bool",
-                                        "Add market-structure (swings/BOS/FVG/sweeps), session/time, and "
-                                        "rank-normalized features to the clustering inputs — more information for the "
+                                        "Add market-structure (swings/BOS/FVG/sweeps), session/time, "
+                                        "cross-asset context, and rank-normalized features to the clustering inputs — more information for the "
                                         "engine to separate winners from losers than plain OHLC indicators."),
+    "CROSS_ASSET_SYMBOLS":    ParamMeta("Cross-Asset Symbols",  "Research (experimental)", "str",
+                                        "Comma-separated symbols to load from hist_data as context features "
+                                        "when Enhanced Features is on. Example: DXY,XAGUSD,US500,VIX,US10Y."),
+    "CROSS_ASSET_TF":         ParamMeta("Cross-Asset Timeframe", "Research (experimental)", "str",
+                                        "primary = only load external CSVs matching the primary timeframe. "
+                                        "any = use the first available file per external symbol.",
+                                        options=["primary", "any"]),
     "USE_TRIPLE_BARRIER":     ParamMeta("Triple-Barrier Labels", "Research (experimental)", "bool",
                                         "Label trades by which of TP / SL / time-limit hits first, with "
                                         "volatility-scaled barriers (Lopez de Prado). More honest than fixed "
@@ -450,6 +467,9 @@ _ADVANCED_KEYS: set[str] = {
     # LightGBM clustering internals — main toggle (CLUSTERING_METHOD) stays core
     "LIGHTGBM_N_ESTIMATORS", "LIGHTGBM_NUM_LEAVES",
     "LIGHTGBM_MIN_SAMPLES_LEAF", "LIGHTGBM_LEARNING_RATE",
+    "LIGHTGBM_GPU_USE_DP",
+    # Research internals
+    "CROSS_ASSET_SYMBOLS", "CROSS_ASSET_TF",
     # Genetic Pass 2 — entire group is tuning territory (always runs as GA)
     "TOP_FRACTION_PASS2", "MIN_TRADES_PER_DAY_PASS2",
     "PASS2_GENERATIONS", "PASS2_POPULATION", "PASS2_MUTATE_RATE",
@@ -569,11 +589,35 @@ def _auto_fill_tf_files(mod: Any, overrides: dict[str, Any]) -> None:
         return  # user customized at least one — respect their full setup
 
     from . import mt5_import as _mt5
-    inv = _mt5.list_current_import()
-    files: list[str] = [tf["filename"] for tf in inv.get("timeframes", [])]
-    if not files:
+    folder = Path(str(overrides.get("DATA_FOLDER", getattr(mod, "DATA_FOLDER", DEFAULT_HIST_DATA))))
+    entries: list[tuple[str, str, str, int]] = []
+    if folder.is_dir():
+        for f in folder.iterdir():
+            if not f.is_file():
+                continue
+            parsed = _mt5._parse_filename(f.name)  # app-owned helper
+            if parsed is None:
+                continue
+            symbol, label = parsed
+            entries.append((symbol, label, f.name, _mt5._TF_MINUTES.get(label, 99_999_999)))
+    if not entries:
         return  # no import detected — leave module's hardcoded defaults
 
+    # If hist_data contains several instruments for edge research, do not put
+    # DXY/XAG/VIX/etc. into TF slots. Pick the main tradable symbol and leave
+    # other instruments for CROSS_ASSET_* feature loading.
+    symbols = sorted({sym for sym, _label, _name, _mins in entries})
+    preferred = "XAUUSD" if "XAUUSD" in symbols else None
+    if preferred is None:
+        counts: dict[str, int] = {}
+        for sym, _label, _name, _mins in entries:
+            counts[sym] = counts.get(sym, 0) + 1
+        preferred = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+    files = [
+        name for sym, _label, name, _mins in sorted(entries, key=lambda e: e[3])
+        if sym == preferred
+    ]
     for i, key in enumerate(tf_keys):
         overrides[key] = files[i] if i < len(files) else ""
 
