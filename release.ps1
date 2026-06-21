@@ -101,7 +101,8 @@ Write-Host ""
 Write-Host "  >> Generating latest.json..." -ForegroundColor Cyan
 
 $sig     = [System.IO.File]::ReadAllText($sigFile.FullName).Trim()
-$exeUrl  = "https://github.com/mysterkat/better-discovery-releases/releases/download/v$Version/$($installer.Name)"
+$assetName = [Uri]::EscapeDataString($installer.Name)
+$exeUrl  = "https://github.com/mysterkat/better-discovery-releases/releases/download/v$Version/$assetName"
 $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
 # version MUST be bare semver (no "v") — Tauri's updater parses it with the
