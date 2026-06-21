@@ -386,10 +386,21 @@ PARAM_META: dict[str, ParamMeta] = {
     "MIN_TIME_CONSISTENCY":  ParamMeta("Min Time Consistency", "Quality Filters", "float",
                                         "Min fraction of months with any trade", min=0.1, max=1.0, step=0.05),
     "MIN_TEST_TRADES_PER_DAY":ParamMeta("Min Test Trades/Day", "Quality Filters", "float",
-                                         "Min frequency on the out-of-sample split", min=0.05, max=3.0, step=0.05),
+                                         "Minimum exported-box frequency on the out-of-sample split",
+                                         min=0.05, max=3.0, step=0.05),
+    "MIN_GATED_TEST_TRADES": ParamMeta("Min Gated OOS Trades", "Quality Filters", "int",
+                                        "Minimum cluster/shape-gated OOS trades. Rejects hypotheses that "
+                                        "never recur outside training.", min=0, max=1000, step=10),
+    "MIN_EA_TEST_PF":       ParamMeta("Min EA-OOS PF", "Quality Filters", "float",
+                                        "Hard minimum profit factor for the exact box exported to MT5.",
+                                        min=1.0, max=3.0, step=0.05),
+    "MIN_EA_TEST_EXPECTANCY_R":ParamMeta("Min EA-OOS Expectancy", "Quality Filters", "float",
+                                           "Hard minimum average net R per exported-box OOS trade.",
+                                           min=0.0, max=1.0, step=0.01),
     "MAX_SOFT_FAILS":        ParamMeta("Max Soft-Filter Fails","Quality Filters", "int",
                                         "How many SOFT quality filters a pattern may fail and still "
-                                        "pass as ⚠ MARGINAL. Hard filters (PF, frequency, OOS trades) "
+                                        "pass as ⚠ MARGINAL. Hard filters (train PF/frequency and "
+                                        "EA-OOS edge/trades) "
                                         "always veto. 0 = strict (all filters must pass).",
                                         min=0, max=7, step=1),
     "CORRELATION_THRESHOLD": ParamMeta("Correlation Threshold","Quality Filters", "float",
@@ -827,6 +838,15 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
             "test_wr":         _jsonify_val(r.get("test_wr", 0)),
             "test_pf":         _jsonify_val(r.get("test_pf", 0)),
             "test_trades":     _jsonify_val(r.get("test_trades", 0)),
+            # EA-faithful box-only OOS metrics. These are the deployable
+            # strategy's primary quality numbers; cluster-gated test metrics
+            # above remain diagnostics for the originating hypothesis.
+            "ea_test_wr":      _jsonify_val(r.get("ea_test_wr", 0)),
+            "ea_test_wilson_wr":_jsonify_val(r.get("ea_test_wilson_wr", 0)),
+            "ea_test_pf":      _jsonify_val(r.get("ea_test_pf", 0)),
+            "ea_test_trades":  _jsonify_val(r.get("ea_test_trades", 0)),
+            "ea_test_expectancy_r":_jsonify_val(r.get("ea_test_expectancy_r", 0)),
+            "ea_test_breakeven_wr":_jsonify_val(r.get("ea_test_breakeven_wr", 100)),
             "overall_wr":      _jsonify_val(r.get("overall_wr", 0)),
             "recent_wr":       _jsonify_val(r.get("recent_wr", 0)),
             "consistency":     _jsonify_val(r.get("consistency", 0)),
@@ -850,6 +870,10 @@ def run_discovery(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         vals = [r.get(key) for r in patterns_summary if isinstance(r.get(key), (int, float))]
         return round(sum(vals) / len(vals), 3) if vals else None
     overview = {
+        "avg_ea_test_wr": _avg("ea_test_wr"),
+        "avg_ea_test_pf": _avg("ea_test_pf"),
+        "avg_ea_test_expectancy_r": _avg("ea_test_expectancy_r"),
+        "total_ea_test_trades": sum(int(r.get("ea_test_trades") or 0) for r in patterns_summary),
         "avg_test_wr":  _avg("test_wr"),
         "avg_test_pf":  _avg("test_pf"),
         "avg_train_wr": _avg("train_wr"),

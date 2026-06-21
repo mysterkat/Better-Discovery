@@ -36,7 +36,7 @@ int OnInit()
   {
    SetIndexBuffer(0, DivBuf, INDICATOR_DATA);
    PlotIndexSetString(0, PLOT_LABEL, "vol_price_div");
-   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpVolMaPeriod + 1);
+   PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, InpVolMaPeriod);
    IndicatorSetString(INDICATOR_SHORTNAME,
        StringFormat("BD VolPriceDiv(MA%d > %.2f)", InpVolMaPeriod, InpVolThresh));
    IndicatorSetInteger(INDICATOR_DIGITS, 0);
@@ -54,13 +54,13 @@ int OnCalculate(const int rates_total,
                 const long &volume[],
                 const int &spread[])
   {
-   int need = InpVolMaPeriod + 1;
+   int need = InpVolMaPeriod;
    if(rates_total < need) return 0;
    int start = (prev_calculated > need) ? prev_calculated - 1 : need;
    for(int i = start; i < rates_total; i++)
      {
       double sum = 0.0;
-      for(int k = 1; k <= InpVolMaPeriod; k++)
+      for(int k = 0; k < InpVolMaPeriod; k++)
          sum += (double)tick_volume[i - k];
       double ma = sum / InpVolMaPeriod;
       if(ma <= 0.0) { DivBuf[i] = 0.0; continue; }

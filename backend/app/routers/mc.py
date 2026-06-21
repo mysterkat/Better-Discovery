@@ -16,7 +16,8 @@ from ..bridge import mc as mc_bridge
 from ..jobs.manager import JOBS
 from ..jobs.runners import run_in_thread
 from ..schemas.common import JobRef
-from ..schemas.mc import MCAdvancedRequest, MCRunAllRequest, MCRunRequest
+from ..schemas.mc import MCAdvancedRequest, MCCompareRequest, MCRunAllRequest, MCRunRequest
+from ..research.comparison import compare_sources
 
 router = APIRouter()
 
@@ -28,6 +29,10 @@ def _resolve_pnl_all(req: MCRunAllRequest) -> np.ndarray:
         if not req.file_path_html:
             raise HTTPException(400, "file_path_html is required for data_source='mt5_html'")
         return mc_bridge.load_daily_pnl("mt5_html", req.file_path_html)
+    if req.data_source == "local_ledger":
+        if not req.local_ledger_path:
+            raise HTTPException(400, "local_ledger_path is required for data_source='local_ledger'")
+        return mc_bridge.load_daily_pnl("local_ledger", req.local_ledger_path)
     # tradingview (default)
     if not req.pnl_csv_path:
         raise HTTPException(400, "pnl_csv_path is required for data_source='tradingview'")
@@ -72,7 +77,11 @@ def mc_run_all(req: MCRunAllRequest) -> JobRef:
     # carry R:<n> markers. None when unavailable; the dashboard renders the
     # heatmap conditionally.
     regime_data: dict | None = None
-    file_for_regime = req.file_path_html if req.data_source == "mt5_html" else req.pnl_csv_path
+    file_for_regime = (
+        req.file_path_html if req.data_source == "mt5_html"
+        else req.local_ledger_path if req.data_source == "local_ledger"
+        else req.pnl_csv_path
+    )
     if file_for_regime:
         regime_data = mc_bridge.compute_regime_from_file(req.data_source, file_for_regime)
     job = JOBS.create(kind="mc_all", meta={"n_days": int(pnl.size)})
@@ -90,6 +99,14 @@ def mc_run_all(req: MCRunAllRequest) -> JobRef:
     )
     if req.wait and job.wait(req.wait_timeout_s):
         return JobRef(job_id=job.job_id, status=job.status, result=job.result, error=job.error)
+    return JobRef(job_id=job.job_id, status=job.status)
+
+
+@router.post("/mc/compare", response_model=JobRef)
+def mc_compare(req: MCCompareRequest) -> JobRef:
+    """Compare local replay and MT5 Monte Carlo under one settings/seed contract."""
+    job = JOBS.create(kind="mc_compare", meta={"local": req.local_ledger_path, "mt5": req.mt5_report_path})
+    run_in_thread(job, lambda: compare_sources(req))
     return JobRef(job_id=job.job_id, status=job.status)
 
 

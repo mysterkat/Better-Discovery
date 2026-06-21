@@ -1,0 +1,2 @@
+"""Deterministic strategy research orchestration."""
+

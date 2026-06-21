@@ -62,7 +62,16 @@ _raise_fd_limit()
 # creating all userdata subdirs. Must happen before any bridge import.
 from . import paths  # noqa: F401, E402
 from .config import CONFIG  # noqa: E402
-from .routers import data, discovery, health, library, mc, mql, settings as settings_router  # noqa: E402
+from .routers import (  # noqa: E402
+    data,
+    discovery,
+    health,
+    library,
+    mc,
+    mql,
+    research,
+    settings as settings_router,
+)
 
 app = FastAPI(
     on_startup=[lambda: paths.validate_paths()],
@@ -87,6 +96,7 @@ app.include_router(discovery.router, tags=["discovery"])
 app.include_router(library.router, tags=["library"])
 app.include_router(mc.router, tags=["mc"])
 app.include_router(mql.router, tags=["mql"])
+app.include_router(research.router, tags=["research"])
 app.include_router(settings_router.router, tags=["settings"])
 
 

@@ -74,6 +74,12 @@ export interface PatternSummary {
   test_wr: number;
   test_pf: number;
   test_trades: number;
+  ea_test_wr: number;
+  ea_test_wilson_wr: number;
+  ea_test_pf: number;
+  ea_test_trades: number;
+  ea_test_expectancy_r: number;
+  ea_test_breakeven_wr: number;
   overall_wr: number;
   recent_wr: number;
   consistency: number;
@@ -87,6 +93,10 @@ export interface PatternSummary {
 }
 
 export interface DiscoveryOverview {
+  avg_ea_test_wr?: number | null;
+  avg_ea_test_pf?: number | null;
+  avg_ea_test_expectancy_r?: number | null;
+  total_ea_test_trades?: number;
   avg_test_wr?: number | null;
   avg_test_pf?: number | null;
   avg_train_wr?: number | null;

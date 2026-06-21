@@ -1,18 +1,13 @@
 //+------------------------------------------------------------------+
 //|  BD_Regime.mq5                                                    |
 //|  Categorical market regime [0..4]:                                |
-//|     0 = TrendUp        EMA20>EMA50>EMA200 AND ATR%<0.5%           |
-//|     1 = TrendDown      EMA20<EMA50<EMA200 AND ATR%<0.5%           |
-//|     2 = Squeeze        |trend|<0.5 AND BB_width<0.02              |
-//|     3 = WideVol        ATR% >= 0.8%                               |
+//|     0 = TrendUp        EMA20>EMA50>EMA200 AND high ATR%           |
+//|     1 = TrendDown      EMA20<EMA50<EMA200 AND high ATR%           |
+//|     2 = Squeeze        BB_width<Q25 AND low ATR%                  |
+//|     3 = WideVol        flat trend AND BB_width>Q75                |
 //|     4 = Choppy         (everything else)                          |
 //|                                                                  |
-//|  NOTE: This is a fixed-threshold approximation of the Python      |
-//|  algorithm, which uses rolling 100-200 bar quantiles. Useful for  |
-//|  visualisation; if a rule's regime filter is critical, neutralise |
-//|  it (lo=-999, hi=999) until the rolling-quantile version lands.   |
-//|                                                                  |
-//|  Mirrors GetRegime() in PatternDiscoveryEA.mq5.                   |
+//|  Uses the same ATR% median(200) and BB quantiles(100) as Python.   |
 //+------------------------------------------------------------------+
 #property copyright "BETTER DISCOVERY v0.7"
 #property version   "1.00"
@@ -34,6 +29,18 @@ int g_hEMA50 = INVALID_HANDLE;
 int g_hEMA200= INVALID_HANDLE;
 int g_hATR   = INVALID_HANDLE;
 int g_hBB    = INVALID_HANDLE;
+
+double LinearQuantile(double &values[], double q)
+  {
+   int n = ArraySize(values);
+   ArraySort(values);
+   double rankPos = (n - 1) * q;
+   int lower = (int)MathFloor(rankPos);
+   int upper = (int)MathCeil(rankPos);
+   if(lower == upper) return values[lower];
+   double weight = rankPos - lower;
+   return values[lower] * (1.0 - weight) + values[upper] * weight;
+  }
 
 int OnInit()
   {
@@ -97,11 +104,23 @@ int OnCalculate(const int rates_total,
       else if(e20[i] < e50[i] && e50[i] < e200[i]) tr = -1.0;
       double bw     = (bbm[i] > 0.0) ? (bbu[i] - bbl[i]) / bbm[i] : 0.0;
       double atrPct = (close[i] > 0.0) ? atr[i] / close[i] : 0.0;
+
+      double atrWindow[200], bbWindow[100];
+      for(int k = 0; k < 200; k++)
+         atrWindow[k] = (close[i-k] > 0.0) ? atr[i-k] / close[i-k] : 0.0;
+      for(int k = 0; k < 100; k++)
+         bbWindow[k] = (bbm[i-k] > 0.0) ? (bbu[i-k] - bbl[i-k]) / bbm[i-k] : 0.0;
+      double atrMedian = LinearQuantile(atrWindow, 0.50);
+      double bbQ25 = LinearQuantile(bbWindow, 0.25);
+      double bbQ75 = LinearQuantile(bbWindow, 0.75);
+      bool hiVol = atrPct > atrMedian * 1.1;
+      bool loVol = atrPct < atrMedian * 0.9;
+
       double r = 4.0;
-      if(tr ==  1.0 && atrPct < 0.005) r = 0.0;
-      else if(tr == -1.0 && atrPct < 0.005) r = 1.0;
-      else if(MathAbs(tr) < 0.5 && bw < 0.02) r = 2.0;
-      else if(atrPct >= 0.008) r = 3.0;
+      if(tr ==  1.0 && hiVol) r = 0.0;
+      else if(tr == -1.0 && hiVol) r = 1.0;
+      else if(MathAbs(tr) < 0.5 && bw > bbQ75) r = 3.0;
+      else if(bw < bbQ25 && loVol) r = 2.0;
       RegBuf[i] = r;
      }
    return rates_total;

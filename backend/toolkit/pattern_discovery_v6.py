@@ -443,15 +443,21 @@ MAX_DRAWDOWN_R          = 12.0   # soft now; raised so it's not a constant margi
 MAX_CONSEC_LOSSES       = 8      # soft now; realistic for natural variance
 MIN_TIME_CONSISTENCY    = 0.35   # soft now; realistic OOS consistency bar
 MIN_TEST_TRADES_PER_DAY = 0.3
+MIN_GATED_TEST_TRADES   = 50     # cluster/shape hypothesis must recur OOS
+MIN_EA_TEST_PF          = 1.20   # exported box must retain a meaningful edge
+MIN_EA_TEST_EXPECTANCY_R= 0.05   # average net R per exported-box OOS trade
 # Hard/soft filter gate. A pattern is DROPPED if it fails any HARD filter
-# (true disqualifiers: must be profitable + actually trade enough out-of-sample).
+# (true disqualifiers: deployable OOS edge + enough OOS recurrence/trades).
 # Otherwise it PASSES — tagged MARGINAL — as long as it fails at most
 # MAX_SOFT_FAILS of the remaining SOFT (quality-proxy) filters. This stops a
 # profitable, tradeable rule from being rejected for a few proxy breaks; the real
 # FTMO verdict comes from the MC sim + EA-OOS + your MT5 backtest, not this
 # pre-screen. Move any name into HARD_FILTERS to make it a hard veto again, or set
 # MAX_SOFT_FAILS=0 to require ALL soft filters (the old strict behaviour).
-HARD_FILTERS            = {"profit_factor", "per_day", "test_trades"}
+HARD_FILTERS            = {
+    "profit_factor", "per_day", "test_trades", "gated_test_trades",
+    "ea_test_pf", "ea_test_expectancy_r", "ea_test_wilson_edge",
+}
 # 3 (was 4): tightened one notch now that the GA optimizes the honest
 # box-only objective — the leniency was compensation for a fitness landscape
 # that no longer exists. Patterns failing 4+ soft proxies are not FTMO-grade.
@@ -962,7 +968,9 @@ def _align_htf(base, htf, prefix):
                     aligned contributes (matches pre-Group-C standalone).
     """
     cols = [c for c in ["trend", "rsi14", "ema20", "ema50", "atr14"] if c in htf.columns]
-    htf_s = htf[cols].reset_index().rename(columns={"time": "htf_time"})
+    # MT5 timestamps identify bar opens. The containing HTF candle is still
+    # forming at decision time, so expose only the previous completed candle.
+    htf_s = htf[cols].shift(1).reset_index().rename(columns={"time": "htf_time"})
     merged = pd.merge_asof(
         base.reset_index().sort_values("time"),
         htf_s.sort_values("htf_time"),
@@ -2145,7 +2153,14 @@ def _calc_metrics(trades,member_count,trading_days,trades_df=None):
         if dd>max_dd: max_dd=dd
     total=wins+losses
     pf=round(gw/gl,2) if gl else float("inf")
-    avg_rr=round(float(np.mean([r for r in rr_list if r>0])),2) if any(r>0 for r in rr_list) else 0
+    wins_r=[r for r in rr_list if r>0]
+    losses_r=[abs(r) for r in rr_list if r<0]
+    avg_rr=round(float(np.mean(wins_r)),2) if wins_r else 0
+    avg_loss_r=round(float(np.mean(losses_r)),4) if losses_r else 0
+    expectancy_r=round(float(np.mean(rr_list)),4) if rr_list else 0
+    payoff_ratio=(float(np.mean(wins_r))/float(np.mean(losses_r))
+                  if wins_r and losses_r and np.mean(losses_r)>0 else 0)
+    breakeven_wr=round(100.0/(1.0+payoff_ratio),1) if payoff_ratio>0 else 100.0
     wilson_wr=round(wilson_lower(wins,total)*100,1)
     composite=score_rule(wins,losses,avg_rr,trades_df,trading_days)
     # per_day = actual trades (wins+losses) / trading days.
@@ -2157,7 +2172,9 @@ def _calc_metrics(trades,member_count,trading_days,trades_df=None):
     return dict(total_trades=total,wins=wins,losses=losses,
                 win_rate_=round(wins/total*100,1) if total else 0,
                 wilson_wr=wilson_wr,
-                avg_rr=avg_rr,profit_factor=pf,
+                avg_rr=avg_rr,avg_loss_r=avg_loss_r,
+                expectancy_r=expectancy_r,breakeven_wr=breakeven_wr,
+                profit_factor=pf,
                 max_drawdown_r=round(max_dd,2),
                 max_consec_losses=max_consec,
                 equity=equity,
@@ -3412,11 +3429,9 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
     """
     import math
 
-    # Features whose EA implementation returns only integer values.
-    # Genetic bounds are computed on continuous training-data arrays which can
-    # produce fractional limits (e.g. mtf_bull_score_hi=1.8839 when the true
-    # max is 2.0).  We snap lo DOWN and hi UP to the nearest integer so the EA
-    # never silently blocks bars that lie at a valid integer boundary.
+    # Features whose EA implementation returns only integer values. Preserve
+    # exactly the integer states admitted by the GA's continuous interval:
+    # ceil(lower) .. floor(upper). Rounding outward silently broadens rules.
     INTEGER_BOUND_FEATURES = {
         "mtf_bull_score",   # {0, 1, 2}
         "mtf_bear_score",   # {0, 1, 2}
@@ -3430,15 +3445,19 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
         "session",          # {0, 1, 2, 3, 4}
         "vol_price_div",    # {-1, 0, 1}
         "prev_sess_bias",   # {-1, 0, 1}
-        "sd_zone",          # {-1, 0, 1}  FIX: was missing — fractional bounds
-                            # (e.g. lo=0.3) would exclude valid integer 0 in EA
+        "sd_zone",          # {-1, 0, 1}
     }
 
     def _snap_bounds(col, lo_v, hi_v):
-        """Snap lo down and hi up to nearest integer for discrete features."""
+        """Snap inward so the exported EA admits the same discrete states."""
         if col in INTEGER_BOUND_FEATURES:
-            lo_snapped = float(math.floor(lo_v))
-            hi_snapped = float(math.ceil(hi_v))
+            lo_snapped = float(math.ceil(lo_v))
+            hi_snapped = float(math.floor(hi_v))
+            if lo_snapped > hi_snapped:
+                raise ValueError(
+                    f"Discrete rule {col} has no admissible integer state: "
+                    f"[{lo_v:.6f}, {hi_v:.6f}]"
+                )
             if lo_snapped != lo_v or hi_snapped != hi_v:
                 print(f"  [set_file] {col}: snapped bounds "
                       f"[{lo_v:.6f}, {hi_v:.6f}] → "
@@ -3535,7 +3554,8 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
         f"  PF={r.get('profit_factor',0)}  Score={r.get('composite_score',0)}",
         f"; SignalRetention={r.get('signal_retention',0)} (report-only:"
         f" post-rule trades / shape-cluster size; EA box is a superset → live inflates)",
-        f"; Test:  WR={_ea_wr}%  PF={_ea_pf}  Trades={_ea_n}"
+        f"; Test:  WR={_ea_wr}%  Wilson={r.get('ea_test_wilson_wr',0)}%"
+        f"  PF={_ea_pf}  ExpR={r.get('ea_test_expectancy_r',0)}  Trades={_ea_n}"
         f"  (EA-faithful box-only OOS — compare THIS to your MT5 backtest)",
         f"; TestGated: WR={r.get('test_wr',0)}%  PF={r.get('test_pf',0)}"
         f"  Trades={r.get('test_trades',0)}"
@@ -3584,11 +3604,12 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
     _primary_idx_for_set = max(1, min(5, int(PRIMARY_TF))) - 1
     # Collect the SIGNAL slots only (everything except primary), in slot order,
     # mapped to ENUM_TIMEFRAMES. Pad/truncate to exactly 4 SignalTF inputs.
-    _signal_periods = [
-        _csv_to_period(fn)
+    _signal_slots = [
+        (i, _csv_to_period(fn))
         for i, fn in enumerate(_tf_files_for_set)
         if i != _primary_idx_for_set and fn
     ]
+    _signal_periods = [period for _, period in _signal_slots]
     while len(_signal_periods) < 4:
         _signal_periods.append("PERIOD_CURRENT")
     _signal_periods = _signal_periods[:4]
@@ -3599,6 +3620,16 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
     ]
     for i, period in enumerate(_signal_periods, start=1):
         lines.append(f"SignalTF{i}={_TF_NAME_TO_INT.get(period, 0)}")
+    # 0 = automatic slowest signal TF. A forced original TF slot is translated
+    # to the compact SignalTF1..4 index used by the EA.
+    _htf_source_slot = 0
+    _configured_htf_slot = int(globals().get("HTF_DIV_TF", 0) or 0) - 1
+    if _configured_htf_slot >= 0:
+        for compact_idx, (original_idx, _) in enumerate(_signal_slots, start=1):
+            if original_idx == _configured_htf_slot:
+                _htf_source_slot = compact_idx
+                break
+    lines.append(f"HtfDivSignalSlot={_htf_source_slot}")
 
     # Discriminator for bidirectional
     if bidir_mode=="BIDIRECTIONAL" and discriminator:
@@ -3671,8 +3702,8 @@ def generate_set_file(pattern_no, cid, direction, rule, sl_pct, tp_pct,
         lines.append(f"Trade{sess_name}={active}")
 
     # Condition parameters — only write conditions that are actually active in the rule.
-    # Bounds for integer-valued features are snapped outward to the nearest integer
-    # so the EA's range check never silently excludes a valid discrete value.
+    # Bounds for integer-valued features are snapped inward so the exported EA
+    # admits exactly the integer states selected by the optimizer.
     active_cond_lines = []
     for col, (ea_lo, ea_hi) in COL_TO_EA.items():
         if col == "session": continue  # handled above via TradeXxx booleans
@@ -3803,7 +3834,8 @@ def _run_config_snapshot():
         "ENABLE_TARGET_SCORING", "TARGET_WR_PCT", "TARGET_PF", "TARGET_RR",
         "TARGET_STABILITY", "TARGET_TRADES_PER_DAY", "FILTER_EDGE_K",
         "MIN_FREQ_PER_DAY", "MAX_DRAWDOWN_R", "MAX_CONSEC_LOSSES",
-        "MIN_TIME_CONSISTENCY", "MIN_TEST_TRADES_PER_DAY", "MAX_SOFT_FAILS",
+        "MIN_TIME_CONSISTENCY", "MIN_TEST_TRADES_PER_DAY", "MIN_GATED_TEST_TRADES",
+        "MIN_EA_TEST_PF", "MIN_EA_TEST_EXPECTANCY_R", "MAX_SOFT_FAILS",
         "CLUSTERING_METHOD", "MULTI_SEED_COUNT", "FORCE_DIRECTION",
         "USE_TRIPLE_BARRIER", "USE_BETA_NEUTRAL_LABELS",
     ]
@@ -3828,7 +3860,8 @@ def _results_summary_entry(r):
               "composite_score", "total_trades", "per_day", "max_drawdown_r",
               "max_consec_losses", "signal_retention",
               "test_wr", "test_pf", "test_trades", "test_score",
-              "ea_test_wr", "ea_test_pf", "ea_test_trades", "box_inflation",
+              "ea_test_wr", "ea_test_wilson_wr", "ea_test_pf", "ea_test_trades",
+              "ea_test_expectancy_r", "ea_test_breakeven_wr", "box_inflation",
               "sl_pct", "tp_pct", "implied_rr", "consistency",
               "overall_wr", "recent_wr", "degrading", "genetic_score",
               "seed", "csv_path"):
@@ -4310,6 +4343,7 @@ def main():
                       f"— dropping C{drop}")
 
     min_test_trades=int(test_days*MIN_TEST_TRADES_PER_DAY)
+    min_gated_test_trades=int(globals().get("MIN_GATED_TEST_TRADES", 50))
     final_results=[]
 
     for key,(rule,gscore) in genetic_final.items():
@@ -4340,6 +4374,8 @@ def main():
         trd_df=tr.get("trades",pd.DataFrame())
         consistency=time_consistency_score(trd_df)
         min_wr = _wr_floor(); min_pf = _pf_floor()
+        ea_breakeven_wr=float(ea.get("breakeven_wr",100.0))
+        ea_wilson_edge=round(float(ea.get("wilson_wr",0))-ea_breakeven_wr,2)
         checks=[
             ("implied_rr",       d_tr.get("implied_rr",0),     MIN_DIST_RR,         "min"),
             ("win_rate_%",        tr.get("win_rate_",0),         min_wr,              "min"),
@@ -4349,10 +4385,15 @@ def main():
             ("max_drawdown_r",    tr.get("max_drawdown_r",99),   MAX_DRAWDOWN_R,       "max"),
             ("max_consec_losses", tr.get("max_consec_losses",99),MAX_CONSEC_LOSSES,    "max"),
             ("per_day",           tr.get("per_day",0),           MIN_FREQ_PER_DAY,     "min"),
-            # test_trades uses the BOX-ONLY (EA) count, not the cluster-gated one:
-            # the cluster gate makes the test count near-zero for selective rules,
-            # which is an artifact, not what the EA actually trades out-of-sample.
+            # Require both deployable box frequency and recurrence of the
+            # originating cluster/shape hypothesis outside training.
             ("test_trades",       _ea_n,                         min_test_trades,      "min"),
+            ("gated_test_trades", _te_n,                         min_gated_test_trades,"min"),
+            ("ea_test_pf",        ea.get("profit_factor",0),    MIN_EA_TEST_PF,       "min"),
+            ("ea_test_expectancy_r",ea.get("expectancy_r",0),  MIN_EA_TEST_EXPECTANCY_R,"min"),
+            # A selected strategy's conservative OOS WR must clear its own
+            # realized payoff-ratio breakeven, not an arbitrary 50% threshold.
+            ("ea_test_wilson_edge",ea_wilson_edge,                0.0,                  "min"),
             ("time_consistency",  round(consistency,2),          MIN_TIME_CONSISTENCY, "min"),
         ]
         # Tally per-filter fails AND remember (name, value, threshold) for the
@@ -4419,8 +4460,11 @@ def main():
             "test_score":    te.get("composite_score",0),
             # EA-faithful (box-only) OOS — what MT5 should actually reproduce.
             "ea_test_wr":     ea.get("win_rate_",0),
+            "ea_test_wilson_wr":ea.get("wilson_wr",0),
             "ea_test_pf":     ea.get("profit_factor",0),
             "ea_test_trades": ea.get("total_trades",0),
+            "ea_test_expectancy_r":ea.get("expectancy_r",0),
+            "ea_test_breakeven_wr":ea.get("breakeven_wr",100),
             "box_inflation":  box_inflation,
             "marginal":      is_marginal,   # v5: True = passed via soft filter
             "soft_fail":     soft_fail,     # {name,value,threshold,mode} or None

@@ -90,7 +90,7 @@ int OnCalculate(const int rates_total,
       double ltf_slope = ltf_now - ltf_ago;
 
       // HTF lookup is per-bar because HTF bars don't align 1:1 with LTF.
-      int htfShift = iBarShift(_Symbol, InpHtfPeriod, time[i], false);
+      int htfShift = iBarShift(_Symbol, InpHtfPeriod, time[i], false) + 1;
       if(htfShift < 0) { DivBuf[i] = 0.0; continue; }
       double htfBuf[];
       if(CopyBuffer(g_hRsiHtf, 0, htfShift, InpHtfLookback + 1, htfBuf) <= 0)

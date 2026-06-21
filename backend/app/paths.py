@@ -68,13 +68,19 @@ def _resolve_userdata() -> Path:
 USER_DATA: Path = _resolve_userdata()
 
 # ── Guaranteed subdirectories ──────────────────────────────────────────────────
-for _sub in ("themes", "recent", "cache", "mql", "hist_data", "discovery", "library"):
+for _sub in (
+    "themes", "recent", "cache", "mql", "hist_data", "discovery", "library",
+    "research", "research/artifacts", "research/configs", "research/reports",
+    "market_data",
+):
     (USER_DATA / _sub).mkdir(exist_ok=True)
 
 # Convenient default path constants used by bridges.
 DEFAULT_HIST_DATA: Path   = USER_DATA / "hist_data"
 DEFAULT_DISC_OUTPUT: Path = USER_DATA / "discovery"
 DEFAULT_LIBRARY: Path     = USER_DATA / "library"
+DEFAULT_RESEARCH: Path    = USER_DATA / "research"
+DEFAULT_MARKET_DATA: Path = USER_DATA / "market_data"
 
 
 def existing_src_available() -> bool:

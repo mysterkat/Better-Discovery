@@ -1,0 +1,7 @@
+# Project-local MCP configuration. Codex loads this after the repository is trusted.
+[mcp_servers.better_discovery]
+command = "powershell.exe"
+args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/start-research-mcp.ps1"]
+startup_timeout_sec = 30
+tool_timeout_sec = 7200
+

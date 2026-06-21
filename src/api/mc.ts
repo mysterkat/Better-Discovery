@@ -13,9 +13,10 @@ export interface McRunRequest {
 
 export interface McRunAllRequest {
   pnl?: number[];
-  data_source?: "tradingview" | "mt5_html";
+  data_source?: "tradingview" | "mt5_html" | "local_ledger";
   pnl_csv_path?: string;       // TradingView CSV
   file_path_html?: string;     // MT5 Strategy Tester HTML
+  local_ledger_path?: string;  // Local replay closed-trade ledger
   pnl_split?: string;
   global_params?: Record<string, unknown>;
   phase1_params?: Record<string, unknown>;
@@ -42,6 +43,29 @@ export async function runMc(req: McRunRequest): Promise<JobRef> {
 
 export async function runAllPhases(req: McRunAllRequest): Promise<JobRef> {
   return api<JobRef>("POST", "/mc/run_all", req);
+}
+
+export interface McCompareRequest {
+  local_ledger_path: string;
+  mt5_report_path: string;
+  global_params?: Record<string, unknown>;
+  phase1_params?: Record<string, unknown>;
+  phase2_params?: Record<string, unknown>;
+  funded_params?: Record<string, unknown>;
+  longterm_params?: Record<string, unknown>;
+}
+
+export interface McCompareResult {
+  parity: {
+    decision: "pass" | "block"; local_trades: number; mt5_trades: number;
+    trade_count_delta_pct: number; local_net_profit: number; mt5_net_profit: number;
+    net_profit_delta_pct: number;
+  };
+  headlines: { local: Record<string, number | null>; mt5: Record<string, number | null>; delta: Record<string, number | null> };
+}
+
+export function compareMc(req: McCompareRequest): Promise<JobRef> {
+  return api("POST", "/mc/compare", req);
 }
 
 export async function getMcResults(jobId: string): Promise<JobRef> {

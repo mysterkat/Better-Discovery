@@ -104,7 +104,7 @@ void OnDeinit(const int reason)
 // Helper: 1 if EMA20>EMA50>EMA200 at signalShift on signal handles slot s, else 0
 double SignalUp(int s, datetime barTime)
   {
-   int ss = iBarShift(_Symbol, g_sigTFs[s], barTime, false);
+   int ss = iBarShift(_Symbol, g_sigTFs[s], barTime, false) + 1;
    if(ss < 0) return 0.0;
    double e20[1], e50[1], e200[1];
    if(CopyBuffer(g_hSig20[s],  0, ss, 1, e20)  <= 0) return 0.0;

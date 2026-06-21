@@ -32,7 +32,7 @@
 
 input int    InpBars     = 5000;          // Bars of history to dump
 input string InpOutFile  = "bd_feature_dump.csv";
-input ENUM_TIMEFRAMES InpHtfDiv = PERIOD_M15;   // Match Python HTF_DIV setting
+input ENUM_TIMEFRAMES InpHtfDiv = PERIOD_H1;    // Slowest default signal TF
 input ENUM_TIMEFRAMES InpMtfTF1 = PERIOD_M15;
 input ENUM_TIMEFRAMES InpMtfTF2 = PERIOD_H1;
 input ENUM_TIMEFRAMES InpMtfTF3 = PERIOD_CURRENT;
@@ -295,7 +295,7 @@ bool Dump()
       double mtfb  = Buf(g_handles[11], 0, s);
 
       // vol_ratio + vol_body_conf computed inline (no BD indicator yet)
-      double vsum = 0; for(int k=1;k<=20;k++) vsum += (double)iTickVolume(_Symbol,_Period,s+k);
+      double vsum = 0; for(int k=0;k<20;k++) vsum += (double)iTickVolume(_Symbol,_Period,s+k);
       double vma  = vsum / 20.0;
       double vr   = (vma > 0) ? MathMin((double)iTickVolume(_Symbol,_Period,s) / vma, 5.0) : 0.0;
       double vbc  = MathMin(vr * body_pct, 5.0);

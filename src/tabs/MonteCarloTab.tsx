@@ -15,7 +15,7 @@ import type { ParamDef } from "../api/discovery";
 const CHALLENGE_FEE_KEY = "CHALLENGE_FEE";
 const FEE_REFUND_KEY = "FEE_REFUNDED_ON_FIRST_PAYOUT";
 
-type DataSource = "tradingview" | "mt5_html";
+type DataSource = "tradingview" | "mt5_html" | "local_ledger";
 
 export default function MonteCarloTab() {
   const [params, setParams] = useState<ParamDef[]>([]);
@@ -23,6 +23,7 @@ export default function MonteCarloTab() {
   const [dataSource, setDataSource] = useState<DataSource>("mt5_html");
   const [csvPath, setCsvPath] = useState("");
   const [htmlPath, setHtmlPath] = useState("");
+  const [ledgerPath, setLedgerPath] = useState("");
   const [openGroups, setOpenGroups] = useState<Set<string>>(
     new Set(["Simulation", "Phase 1"]),
   );
@@ -154,7 +155,7 @@ export default function MonteCarloTab() {
     return out;
   };
 
-  const filePath = dataSource === "tradingview" ? csvPath : htmlPath;
+  const filePath = dataSource === "tradingview" ? csvPath : dataSource === "mt5_html" ? htmlPath : ledgerPath;
   const canRun = filePath.trim().length > 0;
 
   // When the job transitions to "done", auto-open the dashboard window once.
@@ -169,7 +170,7 @@ export default function MonteCarloTab() {
 
   const handleRun = async () => {
     if (!canRun) {
-      setError(`Please drop the ${dataSource === "mt5_html" ? "MT5 HTML report" : "TradingView CSV"} file (or paste its absolute path).`);
+      setError(`Please select the ${dataSource === "mt5_html" ? "MT5 HTML report" : dataSource === "local_ledger" ? "local replay ledger" : "TradingView CSV"}.`);
       return;
     }
     setStarting(true);
@@ -197,7 +198,9 @@ export default function MonteCarloTab() {
         data_source: dataSource,
         ...(dataSource === "mt5_html"
           ? { file_path_html: htmlPath.trim() }
-          : { pnl_csv_path: csvPath.trim() }),
+          : dataSource === "local_ledger"
+            ? { local_ledger_path: ledgerPath.trim() }
+            : { pnl_csv_path: csvPath.trim() }),
         global_params: globalParams,
         phase1_params: buildGroupParams("Phase 1"),
         phase2_params: buildGroupParams("Phase 2"),
@@ -322,6 +325,12 @@ export default function MonteCarloTab() {
             disabled={isRunning}>
             🖥 MT5 HTML Report
           </button>
+          <button
+            className={`mc-source-btn${dataSource === "local_ledger" ? " active" : ""}`}
+            onClick={() => setDataSource("local_ledger")}
+            disabled={isRunning}>
+            Local Replay Ledger
+          </button>
         </div>
 
         {dataSource === "tradingview" ? (
@@ -333,7 +342,7 @@ export default function MonteCarloTab() {
             disabled={isRunning}
             hint="Export from TradingView Strategy Tester → List of Trades → Download CSV. Must include a Net P&L column."
           />
-        ) : (
+        ) : dataSource === "mt5_html" ? (
           <FileDropZone
             label="MT5 Strategy Tester HTML Report"
             value={htmlPath}
@@ -341,6 +350,15 @@ export default function MonteCarloTab() {
             accept=".html"
             disabled={isRunning}
             hint="In MT5 Strategy Tester: right-click results → Save as Report (.html). UTF-16 encoded — must contain a Deals table."
+          />
+        ) : (
+          <FileDropZone
+            label="Local Replay Trade Ledger"
+            value={ledgerPath}
+            onChange={setLedgerPath}
+            accept=".csv,.parquet"
+            disabled={isRunning}
+            hint="Use closed_trades.csv or closed_trades.parquet exported by Research Lab."
           />
         )}
       </div>

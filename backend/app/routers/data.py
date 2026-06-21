@@ -23,6 +23,8 @@ from ..bridge import mt5_import as mt5_bridge
 from ..bridge import mt5_setup as mt5_setup_bridge
 from ..jobs.manager import JOBS
 from ..jobs.runners import run_in_thread
+from ..market_data import MARKET_DATA
+from ..market_data.models import MarketDataImportRequest
 from ..paths import USER_DATA
 from ..schemas.common import JobRef
 from ..schemas.discovery import DataImportRequest, MT5FetchRequest, MT5FetchManyRequest
@@ -44,6 +46,36 @@ router = APIRouter()
 
 _CACHE_DIR = USER_DATA / "cache" / "data_preview"
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@router.get("/data/providers")
+def market_data_providers() -> list[dict[str, Any]]:
+    """List canonical market-data providers and their capabilities."""
+    return MARKET_DATA.providers()
+
+
+@router.get("/data/datasets")
+def market_data_datasets() -> list[dict[str, Any]]:
+    return MARKET_DATA.list_datasets()
+
+
+@router.get("/data/datasets/{dataset_id}")
+def market_data_dataset(dataset_id: str) -> dict[str, Any]:
+    try:
+        return MARKET_DATA.get_dataset(dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/data/provider/fetch", response_model=JobRef)
+def market_data_fetch(req: MarketDataImportRequest) -> JobRef:
+    """Import an immutable canonical dataset and publish discovery CSVs."""
+    job = JOBS.create(
+        kind="market_data_fetch",
+        meta={"provider": req.provider, "symbols": req.symbols, "timeframes": req.timeframes},
+    )
+    run_in_thread(job, lambda: MARKET_DATA.import_data(req))
+    return JobRef(job_id=job.job_id, status=job.status)
 
 
 @router.get("/data/mt5/check")

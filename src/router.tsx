@@ -4,6 +4,7 @@ export type TabId =
   | "data-import"
   | "discovery"
   | "strategy-compare"
+  | "research-lab"
   | "set-to-mql"
   | "monte-carlo";
 
@@ -26,6 +27,12 @@ export const TABS: TabDef[] = [
     label: "Pattern Discovery",
     icon: "🔍",
     Component: lazy(() => import("./tabs/DiscoveryTab")),
+  },
+  {
+    id: "research-lab",
+    label: "Research Lab",
+    icon: "▦",
+    Component: lazy(() => import("./tabs/ResearchLabTab")),
   },
   {
     id: "strategy-compare",

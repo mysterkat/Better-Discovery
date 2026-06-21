@@ -114,6 +114,72 @@ export async function getPreview(id: string): Promise<DataPreview> {
   return api<DataPreview>("GET", `/data/preview/${id}`);
 }
 
+export interface MarketDataProvider {
+  id: "dukascopy";
+  name: string;
+  venue: string;
+  supports_ticks: boolean;
+  supports_bars: boolean;
+}
+
+export interface DatasetFile {
+  kind: "ticks" | "bars" | "discovery_csv";
+  symbol: string;
+  timeframe?: string | null;
+  path: string;
+  rows: number;
+  sha256: string;
+  first_time?: string | null;
+  last_time?: string | null;
+  quality?: Record<string, unknown>;
+}
+
+export interface MarketDataset {
+  dataset_id: string;
+  state: "building" | "complete" | "failed";
+  provider: string;
+  venue: string;
+  symbols: string[];
+  timeframes: string[];
+  requested_from: string;
+  requested_to: string;
+  created_at: string;
+  files: DatasetFile[];
+  quality: Record<string, unknown>;
+  import_options?: {
+    include_ticks?: boolean;
+    write_discovery_csv?: boolean;
+    price_digits?: Record<string, number>;
+    storage_layout?: string;
+  };
+  progress?: Record<string, unknown>;
+  error?: string | null;
+}
+
+export interface ProviderFetchRequest {
+  provider: "dukascopy";
+  symbols: string[];
+  timeframes: string[];
+  date_from: string;
+  date_to: string;
+  include_ticks: boolean;
+  write_discovery_csv: boolean;
+  price_digits?: Record<string, number>;
+  resume_dataset_id?: string;
+}
+
+export function getMarketDataProviders(): Promise<MarketDataProvider[]> {
+  return api("GET", "/data/providers");
+}
+
+export function listMarketDatasets(): Promise<MarketDataset[]> {
+  return api("GET", "/data/datasets");
+}
+
+export function fetchProviderData(req: ProviderFetchRequest): Promise<JobRef> {
+  return api("POST", "/data/provider/fetch", req);
+}
+
 // ── v0.7.0: MT5 indicator install + auto-chart setup ─────────────────────────
 
 export interface Mt5InstallResult {

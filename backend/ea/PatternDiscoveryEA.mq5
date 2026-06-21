@@ -88,14 +88,14 @@ input long   MagicNumber         = 10001;
 
 //--- Signal timeframes (multi-TF)
 //    Each non-PERIOD_CURRENT slot becomes an active signal TF whose
-//    trend (EMA20>50>200) contributes to mtf_bull_score. The first
-//    active slot also provides the RSI14 used by htf_div.
-//    Defaults preserve v3 behaviour (M15 for htf_div, H1 for trend).
+//    trend (EMA20>50>200) contributes to mtf_bull_score. htf_div uses
+//    the slowest active slot by default, matching discovery auto mode.
 //    Set a slot to PERIOD_CURRENT to disable it.
 input ENUM_TIMEFRAMES SignalTF1   = PERIOD_M15;
 input ENUM_TIMEFRAMES SignalTF2   = PERIOD_H1;
 input ENUM_TIMEFRAMES SignalTF3   = PERIOD_CURRENT;
 input ENUM_TIMEFRAMES SignalTF4   = PERIOD_CURRENT;
+input int    HtfDivSignalSlot     = 0; // 0=slowest active, 1..4=active slot
 
 //--- Direction
 //    0 = LongOnly  |  1 = ShortOnly  |  2 = Auto (discriminator)
@@ -1076,7 +1076,9 @@ double GetMTFbull(int shift)
 
    for(int i = 0; i < g_nSignals; i++)
      {
-      int sShift = iBarShift(_Symbol, g_signalTFs[i], barTime, false);
+      // The containing signal candle is still forming. Use the previous fully
+      // closed signal candle, matching Python's shifted HTF asof join.
+      int sShift = iBarShift(_Symbol, g_signalTFs[i], barTime, false) + 1;
       double e20  = BufVal(g_hEMA20_signal[i],  0, sShift);
       double e50  = BufVal(g_hEMA50_signal[i],  0, sShift);
       double e200 = BufVal(g_hEMA200_signal[i], 0, sShift);
@@ -1114,11 +1116,11 @@ double GetVolRatio(int shift)
   {
    long volArr[];
    ArraySetAsSeries(volArr, true);
-   if(CopyTickVolume(_Symbol, PERIOD_CURRENT, shift, 21, volArr) < 21)
+   if(CopyTickVolume(_Symbol, PERIOD_CURRENT, shift, 20, volArr) < 20)
       return EMPTY_VALUE;
    double vol = (double)volArr[0];
    double sum = 0.0;
-   for(int i = 1; i <= 20; i++) sum += (double)volArr[i];
+   for(int i = 0; i < 20; i++) sum += (double)volArr[i];
    double ma20 = sum / 20.0;
    if(ma20 <= 0.0) return EMPTY_VALUE;
    return MathMin(vol / ma20, 5.0);
@@ -1133,11 +1135,22 @@ double GetVolBodyConf(int shift)
    return MathMin(vr * bp, 5.0);
   }
 
+double LinearQuantile(double &values[], double q)
+  {
+   int n = ArraySize(values);
+   if(n < 1) return EMPTY_VALUE;
+   ArraySort(values);
+   double rankPos = (n - 1) * q;
+   int lower = (int)MathFloor(rankPos);
+   int upper = (int)MathCeil(rankPos);
+   if(lower == upper) return values[lower];
+   double weight = rankPos - lower;
+   return values[lower] * (1.0 - weight) + values[upper] * weight;
+  }
+
 //--- col 10: Market regime [0=TrendUp 1=TrendDn 2=Squeeze 3=WideVol 4=Choppy]
-// NOTE: The discovery algo uses rolling quantiles over 100-200 bars to
-// classify regime — this is an approximation using fixed thresholds.
-// If regime appears in a rule's active conditions, consider neutralising
-// (lo=-999, hi=999) until a full rolling-quantile implementation is added.
+// Exact discovery parity: ATR% rolling median(200) and BB-width rolling
+// quantiles(100), evaluated on the current fully closed primary bar.
 double GetRegime(int shift)
   {
    double tr    = GetEMATrend(shift);
@@ -1146,10 +1159,37 @@ double GetRegime(int shift)
    double close = iClose(_Symbol, PERIOD_CURRENT, shift);
    if(tr == EMPTY_VALUE || bw == EMPTY_VALUE || atr == EMPTY_VALUE) return EMPTY_VALUE;
    double atrPct = (close > 0.0) ? atr / close : 0.0;
-   if(tr ==  1.0 && atrPct < 0.005) return 0.0;
-   if(tr == -1.0 && atrPct < 0.005) return 1.0;
-   if(MathAbs(tr) < 0.5 && bw < 0.02) return 2.0;
-   if(atrPct >= 0.008)               return 3.0;
+
+   double atrRaw[200], closeRaw[200], atrHistory[200];
+   if(CopyBuffer(g_hATR, 0, shift, 200, atrRaw) < 200 ||
+      CopyClose(_Symbol, PERIOD_CURRENT, shift, 200, closeRaw) < 200)
+      return EMPTY_VALUE;
+   for(int i = 0; i < 200; i++)
+     {
+      if(atrRaw[i] == EMPTY_VALUE || closeRaw[i] <= 0.0) return EMPTY_VALUE;
+      atrHistory[i] = atrRaw[i] / closeRaw[i];
+     }
+
+   double bbMid[100], bbUpper[100], bbLower[100], bbHistory[100];
+   if(CopyBuffer(g_hBB, 0, shift, 100, bbMid) < 100 ||
+      CopyBuffer(g_hBB, 1, shift, 100, bbUpper) < 100 ||
+      CopyBuffer(g_hBB, 2, shift, 100, bbLower) < 100)
+      return EMPTY_VALUE;
+   for(int i = 0; i < 100; i++)
+     {
+      if(bbMid[i] == EMPTY_VALUE || bbMid[i] <= 0.0) return EMPTY_VALUE;
+      bbHistory[i] = (bbUpper[i] - bbLower[i]) / bbMid[i];
+     }
+   double atrMedian = LinearQuantile(atrHistory, 0.50);
+   double bbQ25 = LinearQuantile(bbHistory, 0.25);
+   double bbQ75 = LinearQuantile(bbHistory, 0.75);
+   bool hiVol = atrPct > atrMedian * 1.1;
+   bool loVol = atrPct < atrMedian * 0.9;
+
+   if(tr ==  1.0 && hiVol) return 0.0;
+   if(tr == -1.0 && hiVol) return 1.0;
+   if(MathAbs(tr) < 0.5 && bw > bbQ75) return 3.0;
+   if(bw < bbQ25 && loVol) return 2.0;
    return 4.0;
   }
 
@@ -1344,13 +1384,15 @@ double GetHtfDiv(int shift)
    if(rsiNow == EMPTY_VALUE || rsi5ago == EMPTY_VALUE) return 0.0;
    double ltf_slope = rsiNow - rsi5ago;
 
-   // Use the FIRST active signal TF's RSI (slot 0). With no signal TFs
-   // configured, htf_div is always 0 (matches Python's flat-50 fallback).
+   // Auto uses the slowest active signal TF, matching Python. A non-zero input
+   // selects a compact active slot (1..g_nSignals).
    if(g_nSignals < 1) return 0.0;
+   int source = (HtfDivSignalSlot >= 1 && HtfDivSignalSlot <= g_nSignals)
+                ? HtfDivSignalSlot - 1 : g_nSignals - 1;
    datetime barTime = iTime(_Symbol, PERIOD_CURRENT, shift);
-   int sShift = iBarShift(_Symbol, g_signalTFs[0], barTime, false);
-   double htfNow  = BufVal(g_hRSI_signal[0], 0, sShift);
-   double htfAgo  = BufVal(g_hRSI_signal[0], 0, sShift + 3);
+   int sShift = iBarShift(_Symbol, g_signalTFs[source], barTime, false) + 1;
+   double htfNow  = BufVal(g_hRSI_signal[source], 0, sShift);
+   double htfAgo  = BufVal(g_hRSI_signal[source], 0, sShift + 3);
    if(htfNow == EMPTY_VALUE || htfAgo == EMPTY_VALUE) return 0.0;
    double htf_slope = htfNow - htfAgo;
 

@@ -79,6 +79,7 @@ _DEFAULTS: dict[str, Any] = {
     "SignalTF2": "PERIOD_H1",
     "SignalTF3": "PERIOD_CURRENT",
     "SignalTF4": "PERIOD_CURRENT",
+    "HtfDivSignalSlot": 0,
     "DirectionMode": 1,
     "SL_Pct": 0.005220, "TP_Pct": 0.003630, "Lots": 0.10,
     "Commission_R": 0.0, "Swap_R_PerBar": 0.0,
@@ -217,6 +218,10 @@ def parse_set_file(text: str) -> dict[str, Any]:
             continue
 
         if line.startswith(";"):
+            if "EA box is a superset" in line:
+                meta["box_superset_warning"] = True
+            if "EA-faithful box-only OOS" in line:
+                meta["ea_faithful_oos"] = True
             # Extract performance metadata from comment headers
             m = re.search(
                 r"Train:.*?WR=([\d.]+)%.*?Wilson=([\d.]+)%.*?PF=([\d.]+).*?Score=([\d.]+)",
@@ -470,12 +475,13 @@ def _build_input_block(parsed: dict[str, Any], merged: dict[str, Any]) -> str:
     # or the .mq5 fails to compile with "undeclared identifier 'SignalTFn'".
     ln("//--- Signal timeframes (multi-TF)")
     ln("//    Each non-PERIOD_CURRENT slot becomes an active signal TF whose")
-    ln("//    trend (EMA20>50>200) contributes to mtf_bull_score. The first")
-    ln("//    active slot also provides the RSI14 used by htf_div.")
+    ln("//    trend (EMA20>50>200) contributes to mtf_bull_score.")
+    ln("//    htf_div uses the slowest active slot unless explicitly selected.")
     ln("//    Defaults match the discovery setup; PERIOD_CURRENT disables a slot.")
     for slot in (1, 2, 3, 4):
         key = f"SignalTF{slot}"
         ln(f"input ENUM_TIMEFRAMES {padded(key)}= {merged[key]};")
+    ln(f"input int    {padded('HtfDivSignalSlot')}= {merged['HtfDivSignalSlot']};")
     ln("")
 
     # ── Direction ─────────────────────────────────────────────────────────────

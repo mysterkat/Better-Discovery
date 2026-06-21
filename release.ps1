@@ -28,16 +28,30 @@ Write-Host "  ------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  >> Bumping version to $Version..." -ForegroundColor Cyan
 
-$pkgFile = Join-Path $ScriptDir "package.json"
 $cfgFile = Join-Path $ScriptDir "src-tauri\tauri.conf.json"
+$cargoFile = Join-Path $ScriptDir "src-tauri\Cargo.toml"
+$cargoLockFile = Join-Path $ScriptDir "src-tauri\Cargo.lock"
 
-$pkg = [System.IO.File]::ReadAllText($pkgFile)
-$pkg = $pkg -replace '"version":\s*"[^"]+"', "`"version`": `"$Version`""
-[System.IO.File]::WriteAllText($pkgFile, $pkg, [System.Text.UTF8Encoding]::new($false))
+Push-Location $ScriptDir
+npm version $Version --no-git-tag-version --allow-same-version | Out-Null
+$npmVersionExit = $LASTEXITCODE
+Pop-Location
+if ($npmVersionExit -ne 0) {
+    Write-Host "  [FAILED] npm version exited $npmVersionExit" -ForegroundColor Red
+    exit 1
+}
 
 $cfg = [System.IO.File]::ReadAllText($cfgFile)
 $cfg = $cfg -replace '"version":\s*"[^"]+"', "`"version`": `"$Version`""
 [System.IO.File]::WriteAllText($cfgFile, $cfg, [System.Text.UTF8Encoding]::new($false))
+
+$cargo = [System.IO.File]::ReadAllText($cargoFile)
+$cargo = $cargo -replace '(?m)(^version\s*=\s*)"[^"]+"', "`$1`"$Version`""
+[System.IO.File]::WriteAllText($cargoFile, $cargo, [System.Text.UTF8Encoding]::new($false))
+
+$cargoLock = [System.IO.File]::ReadAllText($cargoLockFile)
+$cargoLock = $cargoLock -replace '(?ms)(name = "better-discovery"\r?\nversion = )"[^"]+"', "`$1`"$Version`""
+[System.IO.File]::WriteAllText($cargoLockFile, $cargoLock, [System.Text.UTF8Encoding]::new($false))
 
 Write-Host "     [OK] Version updated" -ForegroundColor Green
 
@@ -118,10 +132,15 @@ Write-Host "     latest.json" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  >> Committing version bump..." -ForegroundColor Cyan
 Push-Location $ScriptDir
-git add package.json src-tauri/tauri.conf.json
+git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
 git commit -m "chore: bump version to $Version"
 git push
 $pushExit = $LASTEXITCODE
+if ($pushExit -eq 0) {
+    git tag -a "v$Version" -m "BETTER DISCOVERY v$Version"
+    git push origin "v$Version"
+    $pushExit = $LASTEXITCODE
+}
 Pop-Location
 if ($pushExit -ne 0) {
     Write-Host "  [FAILED] git push exited $pushExit" -ForegroundColor Red

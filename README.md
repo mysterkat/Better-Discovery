@@ -1,14 +1,18 @@
 # BETTER DISCOVERY
 
+Autonomous research orchestration is documented in
+[`docs/RESEARCH_ORCHESTRATOR.md`](docs/RESEARCH_ORCHESTRATOR.md). The dedicated
+Codex operating prompt is in
+[`docs/AUTONOMOUS_RESEARCH_PROMPT.md`](docs/AUTONOMOUS_RESEARCH_PROMPT.md).
+
+The Data Import tab builds canonical Dukascopy tick datasets and publishes
+compatible discovery bars. Research Lab performs local bid/ask replay, exports
+Monte Carlo ledgers, and compares local results with native MT5 reports. MCP is
+optional and exists only for autonomous Codex control of these same services.
+
 Standalone Windows desktop app (Tauri v2 + React + FastAPI sidecar with embedded
-Python) that wraps the existing Monte Carlo / pattern-discovery toolkit at
-`C:\Users\micha\Desktop\MONTE CARLO\`.
-
-## Hard rule
-
-`C:\Users\micha\Desktop\MONTE CARLO\` is READ-ONLY. This app imports from it via
-`sys.path` insertion. No file in that tree may be created, edited, renamed,
-moved, or deleted.
+Python) containing the Monte Carlo and pattern-discovery toolkit under
+`backend/toolkit`.
 
 ## Stack
 
@@ -49,7 +53,3 @@ scripts\build.ps1
 ```
 
 Produces a Windows installer under `src-tauri\target\release\bundle\`.
-
-## Status
-
-Phase 1 (scaffold) in progress. See the delivery brief for the full phased plan.

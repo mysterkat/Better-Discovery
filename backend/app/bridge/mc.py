@@ -282,8 +282,19 @@ def load_daily_pnl(data_source: str, file_path: str) -> Any:
 
     data_source: "tradingview" → CSV export, "mt5_html" → MT5 Strategy Tester HTML report.
     """
-    mc = _get_mc()
     np = _np()
+    if data_source == "local_ledger":
+        pd = _pd()
+        frame = pd.read_parquet(file_path) if str(file_path).lower().endswith(".parquet") else pd.read_csv(file_path)
+        required = {"exit_time", "net_pnl"}
+        missing = required - set(frame.columns)
+        if missing:
+            raise ValueError(f"local replay ledger missing columns: {sorted(missing)}")
+        frame["exit_time"] = pd.to_datetime(frame["exit_time"], utc=True, errors="coerce")
+        frame["net_pnl"] = pd.to_numeric(frame["net_pnl"], errors="coerce")
+        daily = frame.dropna(subset=["exit_time", "net_pnl"]).groupby(frame["exit_time"].dt.date)["net_pnl"].sum()
+        return np.asarray(daily, dtype=float)
+    mc = _get_mc()
     if data_source == "mt5_html":
         df = mc.load_mt5_html(file_path)
     else:
@@ -301,6 +312,8 @@ def compute_regime_from_file(data_source: str, file_path: str) -> dict[str, Any]
     The pools are used by the runners for regime-conditional bootstrap sampling.
     """
     try:
+        if data_source == "local_ledger":
+            return _compute_local_regime(file_path)
         mc = _get_mc()
         if data_source == "mt5_html":
             df = mc.load_mt5_html(file_path)
@@ -341,6 +354,33 @@ def compute_regime_from_file(data_source: str, file_path: str) -> dict[str, Any]
         return result
     except Exception:
         return None
+
+
+def _compute_local_regime(file_path: str) -> dict[str, Any] | None:
+    pd = _pd()
+    np = _np()
+    frame = pd.read_parquet(file_path) if str(file_path).lower().endswith(".parquet") else pd.read_csv(file_path)
+    if not {"regime", "exit_time", "net_pnl"}.issubset(frame.columns) or frame.empty:
+        return None
+    frame["regime"] = pd.to_numeric(frame["regime"], errors="coerce").fillna(4).clip(0, 4).astype(int)
+    counts = np.zeros((5, 5), dtype=float)
+    values = frame["regime"].to_numpy()
+    for previous, current in zip(values[:-1], values[1:]):
+        counts[previous, current] += 1
+    for row in range(5):
+        counts[row] = counts[row] / counts[row].sum() if counts[row].sum() else np.full(5, 0.2)
+    stationary = np.bincount(values, minlength=5).astype(float)
+    stationary = stationary / stationary.sum()
+    frame["exit_time"] = pd.to_datetime(frame["exit_time"], utc=True, errors="coerce")
+    pools: dict[str, list[float]] = {}
+    for regime, group in frame.dropna(subset=["exit_time"]).groupby("regime"):
+        daily = group.groupby(group["exit_time"].dt.date)["net_pnl"].sum()
+        pools[str(int(regime))] = [float(value) for value in daily]
+    return {
+        "trans_matrix": counts.tolist(), "stationary_dist": stationary.tolist(),
+        "labels": ["TrendUp", "TrendDn", "Squeeze", "VolatileRange", "Choppy"],
+        "regime_pnl_pools": pools,
+    }
 
 
 def _build_predrawn(

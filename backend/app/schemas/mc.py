@@ -30,6 +30,7 @@ class MCRunAllRequest(BaseModel):
     data_source: str = "tradingview"
     pnl_csv_path: Optional[str] = None       # TradingView CSV path
     file_path_html: Optional[str] = None     # MT5 Strategy Tester HTML path
+    local_ledger_path: Optional[str] = None  # Local replay CSV/Parquet ledger
     pnl_split: str = "test"
     global_params: dict[str, Any] = Field(default_factory=dict)
     phase1_params: dict[str, Any] = Field(default_factory=dict)
@@ -38,6 +39,19 @@ class MCRunAllRequest(BaseModel):
     longterm_params: dict[str, Any] = Field(default_factory=dict)
     wait: bool = False
     wait_timeout_s: float = 120.0
+
+
+class MCCompareRequest(BaseModel):
+    """Run identical Monte Carlo settings against local and MT5 trade sources."""
+    local_ledger_path: str
+    mt5_report_path: str
+    global_params: dict[str, Any] = Field(default_factory=dict)
+    phase1_params: dict[str, Any] = Field(default_factory=dict)
+    phase2_params: dict[str, Any] = Field(default_factory=dict)
+    funded_params: dict[str, Any] = Field(default_factory=dict)
+    longterm_params: dict[str, Any] = Field(default_factory=dict)
+    max_trade_count_delta_pct: float = Field(default=5.0, ge=0)
+    max_net_profit_delta_pct: float = Field(default=10.0, ge=0)
 
 
 class MCAdvancedRequest(BaseModel):

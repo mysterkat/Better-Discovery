@@ -48,3 +48,6 @@ Thumbs.db
 
 # Local-only doc backups
 *.local.bak.md
+
+# Runtime discovery settings contain machine-specific paths and seeds
+backend/toolkit/_app_override.json

@@ -1,641 +1,194 @@
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  checkMt5,
-  fetchMt5DataMany,
-  getCurrentImport,
-  getDefaultFolder,
-  calcCandles,
-  installMt5Helper,
-  applyMt5Setup,
-  type TfSpec,
-  type Mt5FileResult,
-  type Mt5SymbolResult,
-  type Mt5CheckResult,
-  type CurrentImport,
-  type Mt5InstallResult,
-  type Mt5ApplySetupResult,
+  fetchProviderData,
+  getMarketDataProviders,
+  listMarketDatasets,
+  type MarketDataProvider,
+  type MarketDataset,
 } from "../api/data";
-import { useJobs } from "../state/jobs";
 import JobProgress from "../components/JobProgress";
+import { useJobs } from "../state/jobs";
 
-const PREFIX_OPTIONS = [
-  { value: "m", label: "m — Minute" },
-  { value: "h", label: "h — Hour" },
-  { value: "d", label: "d — Daily" },
-  { value: "W", label: "W — Weekly" },
-  { value: "M", label: "M — Monthly" },
-];
+const TIMEFRAMES = ["m1", "m5", "m10", "m15", "m30", "h1", "h4", "d1"];
 
-const TF_TIME_OPTS: Record<string, number[]> = {
-  m: [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30],
-  h: [1, 2, 3, 4, 6, 8, 12],
-  d: [1],
-  W: [1],
-  M: [1],
-};
-
-interface TfRow {
-  prefix: "m" | "h" | "d" | "W" | "M";
-  time_value: number;
-  trading_days: string;
-  candles: number | null;
-}
-
-function defaultTfRow(prefix: "m" | "h" | "d" | "W" | "M" = "m"): TfRow {
-  return { prefix, time_value: 5, trading_days: "250", candles: null };
+function dateInput(daysAgo: number): string {
+  const value = new Date();
+  value.setUTCDate(value.getUTCDate() - daysAgo);
+  return value.toISOString().slice(0, 10);
 }
 
 export default function DataImportTab() {
-  const [mt5Status, setMt5Status] = useState<Mt5CheckResult | null>(null);
-  const [checking, setChecking] = useState(false);
-  const [symbol, setSymbol] = useState("XAUUSD");
-  const [nTf, setNTf] = useState(3);
-  const [rows, setRows] = useState<TfRow[]>([
-    defaultTfRow("m"),
-    defaultTfRow("m"),
-    defaultTfRow("h"),
-  ]);
-  const [defaultFolder, setDefaultFolder] = useState("");
-  const [overrideOnce, setOverrideOnce] = useState(false);
-  const [overrideFolder, setOverrideFolder] = useState("");
+  const [providers, setProviders] = useState<MarketDataProvider[]>([]);
+  const [datasets, setDatasets] = useState<MarketDataset[]>([]);
+  const [provider, setProvider] = useState<"dukascopy">("dukascopy");
+  const [symbols, setSymbols] = useState("XAUUSD");
+  const [timeframes, setTimeframes] = useState<string[]>(["m1", "m5", "m10", "m15", "h1"]);
+  const [dateFrom, setDateFrom] = useState(dateInput(30));
+  const [dateTo, setDateTo] = useState(dateInput(0));
+  const [includeTicks, setIncludeTicks] = useState(true);
+  const [publishDiscovery, setPublishDiscovery] = useState(true);
+  const [priceDigits, setPriceDigits] = useState("XAUUSD:3");
   const [jobId, setJobId] = useState<string | null>(null);
-  const [jobResult, setJobResult] = useState<unknown>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
-  const [currentImport, setCurrentImport] = useState<CurrentImport | null>(null);
-  const [confirmReplace, setConfirmReplace] = useState(false);
-  // ── v0.7.0: BD indicator stack install + chart auto-setup ─────────────────
-  const [installState, setInstallState] = useState<Mt5InstallResult | null>(null);
-  const [installing, setInstalling] = useState(false);
-  const [setupState, setSetupState] = useState<Mt5ApplySetupResult | null>(null);
-  const [applying, setApplying] = useState(false);
+  const setActiveJob = useJobs((state) => state.setActive);
+  const job = useJobs((state) => jobId ? state.jobs[jobId] : undefined);
+  const running = starting || job?.status === "pending" || job?.status === "running";
 
-  const job = useJobs((s) => (jobId ? s.jobs[jobId] : undefined));
-  const setActiveJob = useJobs((s) => s.setActive);
-  const isRunning = !!jobId && (job?.status === "running" || job?.status === "pending");
-
-  const refreshCurrentImport = useCallback(() => {
-    getCurrentImport().then(setCurrentImport).catch(() => {});
+  const refresh = () => listMarketDatasets().then(setDatasets).catch(() => undefined);
+  useEffect(() => {
+    getMarketDataProviders().then(setProviders).catch((reason: unknown) => setError(String(reason)));
+    refresh();
+    const active = useJobs.getState().activeByKind.market_data_fetch;
+    if (active) setJobId(active);
   }, []);
 
-  useEffect(() => {
-    getDefaultFolder().then(setDefaultFolder).catch(() => {});
-    refreshCurrentImport();
-    // Recover any in-flight MT5 fetch from a previous mount of this tab.
-    const stored = useJobs.getState().activeByKind["mt5_fetch"];
-    if (stored) {
-      const existing = useJobs.getState().jobs[stored];
-      if (!existing || (existing.status !== "done" && existing.status !== "failed" && existing.status !== "cancelled")) {
-        setJobId(stored);
-      }
-    }
-  }, [refreshCurrentImport]);
-
-  // Sync row array length when nTf changes.
-  useEffect(() => {
-    setRows((prev) => {
-      if (nTf > prev.length) {
-        return [...prev, ...Array.from({ length: nTf - prev.length }, () => defaultTfRow())];
-      }
-      return prev.slice(0, nTf);
-    });
-  }, [nTf]);
-
-  const handleCheck = async () => {
-    setChecking(true);
-    try {
-      const r = await checkMt5();
-      setMt5Status(r);
-      // v0.7.0: when MT5 connection succeeds for the first time in this
-      // session, kick off the BD indicator install in the background. The
-      // copy itself is idempotent (mtime-based) so re-runs are cheap.
-      if (r.ok && installState === null) {
-        void handleInstall();
-      }
-    } catch (e) {
-      setMt5Status({ ok: false, error: e instanceof Error ? e.message : String(e) });
-    } finally {
-      setChecking(false);
-    }
-  };
-
-  const handleInstall = async () => {
-    setInstalling(true);
-    try {
-      const r = await installMt5Helper();
-      setInstallState(r);
-    } catch (e) {
-      setInstallState({ ok: false, error: e instanceof Error ? e.message : String(e) });
-    } finally {
-      setInstalling(false);
-    }
-  };
-
-  const handleApplySetup = async () => {
-    setApplying(true);
-    try {
-      const tfs = rows.map((r) => `${r.prefix.toUpperCase()}${r.time_value}`);
-      const allSyms = symbol.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
-      const r = await applyMt5Setup({
-        symbol: allSyms[0] || symbol,
-        symbols: allSyms.length > 1 ? allSyms : undefined,
-        timeframes: tfs,
-        wait_for_ack_s: 10.0,
-      });
-      setSetupState(r);
-    } catch (e) {
-      setSetupState({ ok: false, error: e instanceof Error ? e.message : String(e) });
-    } finally {
-      setApplying(false);
-    }
-  };
-
-  const updateRow = useCallback(
-    async (idx: number, patch: Partial<TfRow>) => {
-      setRows((prev) => {
-        const next = [...prev];
-        next[idx] = { ...next[idx], ...patch };
-        return next;
-      });
-    },
-    [],
+  const parsedSymbols = useMemo(
+    () => symbols.split(/[\s,]+/).map((value) => value.trim().toUpperCase()).filter(Boolean),
+    [symbols],
   );
 
-  const recalcCandles = useCallback(
-    async (idx: number, row: TfRow) => {
-      const days = parseInt(row.trading_days, 10);
-      if (!isNaN(days) && days > 0) {
-        try {
-          const n = await calcCandles(row.prefix, row.time_value, days);
-          setRows((prev) => {
-            const next = [...prev];
-            if (next[idx]) next[idx] = { ...next[idx], candles: n };
-            return next;
-          });
-        } catch {
-          // ignore — backend not ready
-        }
-      }
-    },
-    [],
-  );
-
-  const handlePrefixChange = (idx: number, prefix: TfRow["prefix"]) => {
-    const opts = TF_TIME_OPTS[prefix];
-    const time_value = opts[0];
-    const row = { ...rows[idx], prefix, time_value };
-    updateRow(idx, { prefix, time_value }).then(() => recalcCandles(idx, row));
+  const toggleTimeframe = (timeframe: string) => {
+    setTimeframes((current) => current.includes(timeframe)
+      ? current.filter((value) => value !== timeframe)
+      : [...current, timeframe]);
   };
 
-  const handleTimeChange = (idx: number, time_value: number) => {
-    const row = { ...rows[idx], time_value };
-    updateRow(idx, { time_value }).then(() => recalcCandles(idx, row));
-  };
-
-  const handleDaysChange = (idx: number, trading_days: string) => {
-    updateRow(idx, { trading_days, candles: null });
-  };
-
-  const handleDaysBlur = (idx: number) => {
-    recalcCandles(idx, rows[idx]);
-  };
-
-  const performFetch = async (clearExisting: boolean) => {
-    const folder = overrideOnce && overrideFolder.trim()
-      ? overrideFolder.trim()
-      : defaultFolder;
-    const tf_specs: TfSpec[] = rows.map((r) => ({
-      prefix: r.prefix,
-      time_value: r.time_value,
-      trading_days: Math.max(1, parseInt(r.trading_days, 10) || 1),
-    }));
-    const symbols = symbol.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+  const run = async () => {
+    if (!parsedSymbols.length || !timeframes.length) {
+      setError("Select at least one symbol and timeframe.");
+      return;
+    }
     setStarting(true);
     setError(null);
-    setJobId(null);
-    setJobResult(null);
     try {
-      const ref = await fetchMt5DataMany({
-        symbols: symbols.length ? symbols : ["XAUUSD"],
-        save_folder: folder,
-        tf_specs,
-        clear_existing: clearExisting,
+      const result = await fetchProviderData({
+        provider,
+        symbols: parsedSymbols,
+        timeframes,
+        date_from: `${dateFrom}T00:00:00Z`,
+        date_to: `${dateTo}T23:59:59Z`,
+        include_ticks: includeTicks,
+        write_discovery_csv: publishDiscovery,
+        price_digits: Object.fromEntries(priceDigits.split(/[\s,]+/).map((part) => part.split(":"))
+          .filter((pair) => pair.length === 2 && Number.isFinite(Number(pair[1])))
+          .map(([name, digits]) => [name.toUpperCase(), Number(digits)])),
       });
-      setJobId(ref.job_id);
-      setActiveJob("mt5_fetch", ref.job_id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setJobId(result.job_id);
+      setActiveJob("market_data_fetch", result.job_id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setStarting(false);
     }
   };
 
-  const handleRun = async () => {
-    if (!mt5Status?.ok) {
-      setError("Connect to MT5 first.");
-      return;
+  const resume = async (dataset: MarketDataset) => {
+    setStarting(true);
+    setError(null);
+    try {
+      const result = await fetchProviderData({
+        provider: "dukascopy",
+        symbols: dataset.symbols,
+        timeframes: dataset.timeframes,
+        date_from: dataset.requested_from,
+        date_to: dataset.requested_to,
+        include_ticks: dataset.import_options?.include_ticks ?? true,
+        write_discovery_csv: dataset.import_options?.write_discovery_csv ?? true,
+        price_digits: dataset.import_options?.price_digits ?? {},
+        resume_dataset_id: dataset.dataset_id,
+      });
+      setJobId(result.job_id);
+      setActiveJob("market_data_fetch", result.job_id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setStarting(false);
     }
-    // Only the canonical hist_data folder is auto-cleared. If the user is
-    // pointing at a custom folder via "override once", skip the confirmation
-    // and don't touch their custom folder.
-    const usingDefaultFolder = !(overrideOnce && overrideFolder.trim());
-    if (usingDefaultFolder && currentImport?.exists) {
-      setConfirmReplace(true);
-      return;
-    }
-    void performFetch(false);
   };
-
-  const handleConfirmReplace = () => {
-    setConfirmReplace(false);
-    void performFetch(true);
-  };
-
-  const handleCancelReplace = () => {
-    setConfirmReplace(false);
-  };
-
-  const handleJobDone = (result: unknown) => {
-    setJobResult(result);
-    if (overrideOnce) {
-      setOverrideOnce(false);
-      setOverrideFolder("");
-    }
-    // Refresh the "current import" snapshot so subsequent fetches see the
-    // new files for the confirmation logic and the discovery auto-detect.
-    refreshCurrentImport();
-  };
-
-  const outputFolder = overrideOnce && overrideFolder.trim() ? overrideFolder.trim() : defaultFolder;
-  // Distinct symbols currently on disk, parsed from `{symbol}_{tf}.csv` filenames —
-  // list_current_import returns symbol=null when a multi-instrument basket is present.
-  const importedSymbols = currentImport?.timeframes
-    ? Array.from(new Set(currentImport.timeframes.map((tf) => tf.filename.split("_")[0].toUpperCase()))).join(", ")
-    : "";
-  const isDone = !!jobId && (job?.status === "done" || job?.status === "failed");
 
   return (
     <div className="tab-content">
       <div className="tab-header">
         <h2>Data Import</h2>
-        <p className="tab-subtitle">
-          Connect to MetaTrader 5 and pull historical candle data. Output CSVs land in the
-          hist_data folder and are immediately available to Pattern Discovery.
-        </p>
+        <p className="tab-subtitle">Build an immutable tick dataset and publish compatible bars to Pattern Discovery.</p>
       </div>
 
-      {/* MT5 Connection */}
       <div className="form-section">
-        <div className="section-label">MetaTrader 5 Connection</div>
-        <div className="action-row" style={{ marginTop: 6 }}>
-          <button className="btn btn-secondary" onClick={handleCheck} disabled={checking}>
-            {checking ? "Checking…" : "⟳ Test Connection"}
-          </button>
-          {mt5Status && (
-            <span className={`status-badge ${mt5Status.ok ? "status-badge--ok" : "status-badge--err"}`}>
-              {mt5Status.ok
-                ? `● Connected — ${mt5Status.terminal}${mt5Status.account ? ` (${mt5Status.account})` : ""}`
-                : `✗ ${mt5Status.error}`}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* v0.7.0: BD indicator stack + chart auto-setup */}
-      {mt5Status?.ok && (
-        <div className="form-section">
-          <div className="section-label">BD Indicator Stack</div>
-          <div className="action-row" style={{ marginTop: 6, flexWrap: "wrap", gap: 8 }}>
-            <button
-              className="btn btn-secondary"
-              onClick={handleInstall}
-              disabled={installing}
-              title="Copy the 12 BD_*.mq5 indicators + BD_AutoSetup helper EA into the live MT5 install. Idempotent."
-            >
-              {installing ? "Installing…" : "⟳ Install / Update Indicators"}
-            </button>
-            <button
-              className="btn btn-secondary"
-              onClick={handleApplySetup}
-              disabled={
-                applying ||
-                !installState?.ok ||
-                installState?.metaeditor !== "found" ||
-                !symbol.trim()
-              }
-              title="Tell BD_AutoSetup (must be attached to a chart in MT5) to open charts for the symbol+timeframes above with the BD indicator stack."
-            >
-              {applying ? "Applying…" : "↻ Open Charts in MT5"}
-            </button>
+        <div className="section-label">Source</div>
+        <div className="form-grid-2">
+          <div className="field">
+            <label className="field-label">Provider</label>
+            <select className="field-input" value={provider} onChange={(event) => setProvider(event.target.value as "dukascopy")} disabled={running}>
+              {providers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </select>
+            <span className="field-hint">{providers.find((item) => item.id === provider)?.venue}</span>
           </div>
-
-          {installState && (
-            <div style={{ marginTop: 8 }}>
-              {!installState.ok && (
-                <span className="status-badge status-badge--err">
-                  ✗ Install failed — {installState.error}
-                </span>
-              )}
-              {installState.ok && (
-                <>
-                  <span className="status-badge status-badge--ok">
-                    ● Indicators installed
-                    {installState.indicators &&
-                      ` (${installState.indicators.copied.length} copied, ${installState.indicators.skipped.length} unchanged)`}
-                  </span>
-                  {installState.metaeditor === "missing" && (
-                    <div className="field-hint" style={{ marginTop: 6, color: "var(--warn-text, #c08020)" }}>
-                      ⚠️ MetaEditor not found next to terminal64.exe. Open MT5
-                      → press F4 once so MetaEditor compiles the freshly
-                      installed BD_*.mq5 sources, then return here.
-                    </div>
-                  )}
-                  {installState.next_steps?.map((s, i) => (
-                    <div key={i} className="field-hint" style={{ marginTop: 6 }}>
-                      → {s}
-                    </div>
-                  ))}
-                  {installState.compiled?.some((c) => !c.ok) && (
-                    <div className="field-hint" style={{ marginTop: 6, color: "var(--err-text, #c04040)" }}>
-                      ⚠️ {installState.compiled.filter((c) => !c.ok).map((c) => c.name).join(", ")} failed
-                      to compile. Open MetaEditor and check the log.
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          )}
-
-          {setupState && (
-            <div style={{ marginTop: 8 }}>
-              {setupState.ok && setupState.acked ? (
-                <span className="status-badge status-badge--ok">
-                  ● {setupState.ack?.opened.length ?? 0} chart(s) opened in MT5
-                </span>
-              ) : (
-                <span className="status-badge status-badge--err">
-                  ✗ {setupState.error}
-                </span>
-              )}
-              {setupState.ack?.errors && setupState.ack.errors.length > 0 && (
-                <div className="field-hint" style={{ marginTop: 6, color: "var(--warn-text, #c08020)" }}>
-                  ⚠️ Helper EA reported {setupState.ack.errors.length} issue(s):
-                  <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
-                    {setupState.ack.errors.map((e, i) => (
-                      <li key={i} style={{ listStyle: "disc" }}>{e}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Symbol */}
-      <div className="form-section">
-        <div className="field">
-          <label className="field-label">Symbol(s)</label>
-          <input
-            className="field-input"
-            value={symbol}
-            onChange={(e) => setSymbol(e.target.value)}
-            placeholder="XAUUSD, XAGUSD, DXY"
-            disabled={isRunning}
-          />
-          <span className="field-hint">
-            One MT5 symbol, or several comma-separated for a multi-instrument basket
-            (e.g. <code>XAUUSD, XAGUSD, DXY</code>). Each must match Market Watch exactly;
-            they all fetch into the same folder so cross-instrument discovery can use them.
-          </span>
+          <div className="field">
+            <label className="field-label">Symbols</label>
+            <input className="field-input" value={symbols} onChange={(event) => setSymbols(event.target.value)} disabled={running} />
+            <span className="field-hint">Dukascopy instrument names, comma separated.</span>
+          </div>
+          <div className="field">
+            <label className="field-label">Price digits override</label>
+            <input className="field-input" value={priceDigits} onChange={(event) => setPriceDigits(event.target.value)} disabled={running} />
+            <span className="field-hint">Only needed for non-FX symbols. Format: XAUUSD:3, BTCUSD:1</span>
+          </div>
         </div>
       </div>
 
-      {/* Number of timeframes */}
       <div className="form-section">
-        <div className="field">
-          <label className="field-label">Number of Timeframes</label>
-          <input
-            className="field-input field-sm"
-            type="number"
-            min={1}
-            max={10}
-            value={nTf}
-            onChange={(e) => setNTf(Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1)))}
-            disabled={isRunning}
-          />
+        <div className="section-label">History Window</div>
+        <div className="form-grid-2">
+          <div className="field"><label className="field-label">From (UTC)</label><input className="field-input" type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} disabled={running} /></div>
+          <div className="field"><label className="field-label">To (UTC)</label><input className="field-input" type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} disabled={running} /></div>
         </div>
+      </div>
 
-        {/* TF rows */}
-        <div className="tf-rows">
-          {rows.map((row, idx) => (
-            <div key={idx} className="tf-row">
-              <span className="tf-row-label">TF {idx + 1}</span>
-
-              {/* Prefix */}
-              <select
-                className="field-input tf-select"
-                value={row.prefix}
-                onChange={(e) => handlePrefixChange(idx, e.target.value as TfRow["prefix"])}
-                disabled={isRunning}
-              >
-                {PREFIX_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>{o.label}</option>
-                ))}
-              </select>
-
-              {/* Time value */}
-              <select
-                className="field-input tf-select"
-                value={row.time_value}
-                onChange={(e) => handleTimeChange(idx, parseInt(e.target.value, 10))}
-                disabled={isRunning || row.prefix === "d" || row.prefix === "W" || row.prefix === "M"}
-              >
-                {(TF_TIME_OPTS[row.prefix] || [1]).map((v) => (
-                  <option key={v} value={v}>{v}</option>
-                ))}
-              </select>
-
-              {/* Trading days */}
-              <div className="tf-days-wrap">
-                <input
-                  className="field-input tf-days-input"
-                  type="number"
-                  min={1}
-                  value={row.trading_days}
-                  onChange={(e) => handleDaysChange(idx, e.target.value)}
-                  onBlur={() => handleDaysBlur(idx)}
-                  placeholder="days"
-                  disabled={isRunning}
-                />
-                <span className="tf-days-label">trading days</span>
-              </div>
-
-              {/* Candle estimate */}
-              <span className="tf-candles">
-                {row.candles != null ? `≈ ${row.candles.toLocaleString()} candles` : "—"}
-              </span>
-            </div>
+      <div className="form-section">
+        <div className="section-label">Bar Timeframes</div>
+        <div className="timeframe-grid">
+          {TIMEFRAMES.map((timeframe) => (
+            <label className="check-option" key={timeframe}>
+              <input type="checkbox" checked={timeframes.includes(timeframe)} onChange={() => toggleTimeframe(timeframe)} disabled={running} />
+              <span>{timeframe.toUpperCase()}</span>
+            </label>
           ))}
         </div>
+        <div className="toggle-stack">
+          <label className="toggle-label"><input type="checkbox" checked={includeTicks} onChange={(event) => setIncludeTicks(event.target.checked)} disabled={running} /> Retain bid/ask ticks for local replay</label>
+          <label className="toggle-label"><input type="checkbox" checked={publishDiscovery} onChange={(event) => setPublishDiscovery(event.target.checked)} disabled={running} /> Publish bars to the default Pattern Discovery folder</label>
+        </div>
       </div>
 
-      {/* Output folder */}
-      <div className="form-section">
-        <div className="section-label">Output Folder</div>
-        <div className="folder-display">{outputFolder || "Loading…"}</div>
-        <div className="action-row" style={{ marginTop: 8 }}>
-          <label className="toggle-label">
-            <span className="toggle-wrap">
-              <input
-                type="checkbox"
-                className="toggle-input"
-                checked={overrideOnce}
-                onChange={(e) => setOverrideOnce(e.target.checked)}
-                disabled={isRunning}
-              />
-              <span className="toggle-track" />
-            </span>
-            Override once (resets after run)
-          </label>
-        </div>
-        {overrideOnce && (
-          <div className="field" style={{ marginTop: 8 }}>
-            <input
-              className="field-input"
-              value={overrideFolder}
-              onChange={(e) => setOverrideFolder(e.target.value)}
-              placeholder="C:\path\to\folder"
-              disabled={isRunning}
-            />
-          </div>
-        )}
-      </div>
-
-      {/* Current import status */}
-      {currentImport && currentImport.exists && (
-        <div className="form-section">
-          <div className="section-label">Currently Imported</div>
-          <div className="current-import-banner">
-            <strong>{currentImport.symbol || importedSymbols || "—"}</strong>
-            {" · "}
-            {currentImport.timeframes.map((tf) => tf.label).join(", ")}
-            <span className="field-hint" style={{ marginLeft: 8 }}>
-              ({currentImport.timeframes.length} file{currentImport.timeframes.length === 1 ? "" : "s"})
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Run */}
       <div className="action-row">
-        <button
-          className="btn btn-primary"
-          onClick={handleRun}
-          disabled={starting || isRunning || !mt5Status?.ok}
-        >
-          {starting ? "Starting…" : "↓ Fetch Data from MT5"}
-        </button>
-        {isDone && (
-          <button className="btn btn-secondary" onClick={() => { setJobId(null); setJobResult(null); setError(null); }}>
-            New Run
-          </button>
-        )}
+        <button className="btn btn-primary" onClick={run} disabled={running}>{running ? "Importing..." : "Import Market Data"}</button>
       </div>
-
       {error && <div className="alert alert-error">{error}</div>}
+      <JobProgress jobId={jobId} onDone={refresh} onError={setError} />
 
-      <JobProgress
-        jobId={jobId}
-        onDone={handleJobDone}
-        onError={(msg) => setError(msg)}
-      />
-
-      {/* Results */}
-      {jobResult != null && (() => {
-        const r = jobResult as {
-          ok: boolean; save_folder?: string;
-          per_symbol?: Mt5SymbolResult[];
-          files?: Mt5FileResult[];   // legacy single-symbol shape
-        };
-        // Normalise single + basket into one per-symbol list.
-        const groups: Mt5SymbolResult[] = r.per_symbol
-          ?? [{ symbol: "", ok: r.ok, files: r.files }];
-        return (
-          <div className="result-section" style={{ marginTop: 16 }}>
-            <div className="section-label">Download Results</div>
-            <div className="stat-row">
-              <div className="stat-card">
-                <span className="stat-label">Saved to</span>
-                <span className="stat-value" style={{ fontSize: 12 }}>{r.save_folder ?? "—"}</span>
-              </div>
-              <div className="stat-card">
-                <span className="stat-label">Symbols</span>
-                <span className="stat-value" style={{ fontSize: 12 }}>{groups.length}</span>
-              </div>
-            </div>
-            {groups.map((g, gi) => (
-              <div key={gi} style={{ marginTop: 10 }}>
-                {g.symbol && (
-                  <div className="section-label" style={{ fontSize: 12 }}>
-                    {g.symbol}{g.error ? " ✗" : ""}
-                  </div>
-                )}
-                {g.error && <div className="tf-result-error">{g.error}</div>}
-                <div className="tf-result-list">
-                  {(g.files ?? []).map((f, i) => (
-                    <div key={i} className={`tf-result-row ${f.ok ? "tf-result-ok" : "tf-result-err"}`}>
-                      <span className="tf-result-status">{f.ok ? "✓" : "✗"}</span>
-                      <span className="tf-result-label">{f.label.toUpperCase()}</span>
-                      {f.ok ? (
-                        <>
-                          <span className="tf-result-candles">{f.candles.toLocaleString()} candles</span>
-                          <span className="tf-result-path">{f.path}</span>
-                        </>
-                      ) : (
-                        <span className="tf-result-error">{f.error}</span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        );
-      })()}
-
-      {/* Replace-existing confirmation */}
-      {confirmReplace && currentImport && (
-        <div className="confirm-modal-backdrop" onClick={handleCancelReplace}>
-          <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
-            <h3 className="confirm-modal-title">Replace existing import?</h3>
-            <p className="confirm-modal-body">
-              The hist_data folder currently contains an import of{" "}
-              <strong>{currentImport.symbol || importedSymbols || "—"}</strong>
-              {" "}({currentImport.timeframes.length} file
-              {currentImport.timeframes.length === 1 ? "" : "s"}).
-              Continuing will <strong>delete it</strong> before fetching{" "}
-              <strong>{symbol.trim() || "XAUUSD"}</strong> ({rows.length} timeframe
-              {rows.length === 1 ? "" : "s"}).
-            </p>
-            <ul className="confirm-modal-list">
-              {currentImport.timeframes.map((tf) => (
-                <li key={tf.filename}>
-                  <code>{tf.filename}</code>
-                </li>
+      <div className="form-section">
+        <div className="section-label">Dataset Catalog</div>
+        <div className="dataset-table-wrap">
+          <table className="data-table">
+            <thead><tr><th>Dataset</th><th>Provider</th><th>Symbols</th><th>Timeframes</th><th>State</th><th>Files</th><th>Action</th></tr></thead>
+            <tbody>
+              {datasets.map((dataset) => (
+                <tr key={dataset.dataset_id}>
+                  <td title={dataset.dataset_id}>{dataset.dataset_id}</td><td>{dataset.provider}</td>
+                  <td>{dataset.symbols.join(", ")}</td><td>{dataset.timeframes.map((value) => value.toUpperCase()).join(", ")}</td>
+                  <td><span className={`status-badge ${dataset.state === "complete" ? "status-badge--ok" : dataset.state === "failed" ? "status-badge--err" : ""}`}>{dataset.state}</span></td>
+                  <td>{dataset.files.length}</td>
+                  <td>{dataset.state !== "complete" && dataset.import_options?.storage_layout === "daily_ticks_monthly_bars"
+                    ? <button className="btn btn-secondary btn-sm" onClick={() => resume(dataset)} disabled={running}>Resume</button>
+                    : "-"}</td>
+                </tr>
               ))}
-            </ul>
-            <div className="confirm-modal-actions">
-              <button className="btn btn-secondary" onClick={handleCancelReplace}>
-                Cancel
-              </button>
-              <button className="btn btn-danger" onClick={handleConfirmReplace}>
-                Yes, delete and fetch
-              </button>
-            </div>
-          </div>
+              {!datasets.length && <tr><td colSpan={7}>No canonical datasets imported.</td></tr>}
+            </tbody>
+          </table>
         </div>
-      )}
+      </div>
     </div>
   );
 }

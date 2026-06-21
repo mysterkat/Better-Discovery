@@ -110,34 +110,28 @@ export default function DiscoveryResults() {
 
           {overview && patterns.length > 0 && (
             <div className="results-grid" style={{ marginBottom: 16 }}>
-              {overview.avg_test_wr != null && (
+              {overview.avg_ea_test_wr != null && (
                 <div className="result-card">
-                  <span className="result-key">Avg Test WR</span>
-                  <span className="result-val">{overview.avg_test_wr.toFixed(1)}%</span>
+                  <span className="result-key">Avg EA-OOS WR</span>
+                  <span className="result-val">{overview.avg_ea_test_wr.toFixed(1)}%</span>
                 </div>
               )}
-              {overview.avg_test_pf != null && (
+              {overview.avg_ea_test_pf != null && (
                 <div className="result-card">
-                  <span className="result-key">Avg Test PF</span>
-                  <span className="result-val">{overview.avg_test_pf.toFixed(2)}</span>
+                  <span className="result-key">Avg EA-OOS PF</span>
+                  <span className="result-val">{overview.avg_ea_test_pf.toFixed(2)}</span>
                 </div>
               )}
-              {overview.avg_train_wr != null && (
+              {overview.avg_ea_test_expectancy_r != null && (
                 <div className="result-card">
-                  <span className="result-key">Avg Train WR</span>
-                  <span className="result-val">{overview.avg_train_wr.toFixed(1)}%</span>
+                  <span className="result-key">Avg EA-OOS Exp R</span>
+                  <span className="result-val">{overview.avg_ea_test_expectancy_r.toFixed(3)}</span>
                 </div>
               )}
-              {overview.avg_train_pf != null && (
+              {typeof overview.total_ea_test_trades === "number" && (
                 <div className="result-card">
-                  <span className="result-key">Avg Train PF</span>
-                  <span className="result-val">{overview.avg_train_pf.toFixed(2)}</span>
-                </div>
-              )}
-              {typeof overview.total_test_trades === "number" && (
-                <div className="result-card">
-                  <span className="result-key">Total Test Trades</span>
-                  <span className="result-val">{overview.total_test_trades}</span>
+                  <span className="result-key">Total EA-OOS Trades</span>
+                  <span className="result-val">{overview.total_ea_test_trades}</span>
                 </div>
               )}
             </div>
@@ -188,7 +182,7 @@ export default function DiscoveryResults() {
 
 // ─── Patterns table ─────────────────────────────────────────────────────────
 
-type SortKey = "rank" | "test_score" | "test_wr" | "test_pf" | "test_trades" | "consistency";
+type SortKey = "rank" | "ea_test_wr" | "ea_test_wilson_wr" | "ea_test_pf" | "ea_test_expectancy_r" | "ea_test_trades";
 
 function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
   const [sortKey, setSortKey] = useState<SortKey>("rank");
@@ -281,11 +275,11 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
             <th>ID</th>
             <th>Dir</th>
             <th>Seed</th>
-            <th className="sortable num" onClick={() => toggleSort("test_score")}>Score</th>
-            <th className="sortable num" onClick={() => toggleSort("test_wr")}>Test WR%</th>
-            <th className="sortable num" onClick={() => toggleSort("test_pf")}>Test PF</th>
-            <th className="sortable num" onClick={() => toggleSort("test_trades")}>Trades</th>
-            <th className="sortable num" onClick={() => toggleSort("consistency")}>Consist</th>
+            <th className="sortable num" onClick={() => toggleSort("ea_test_wr")}>EA WR%</th>
+            <th className="sortable num" onClick={() => toggleSort("ea_test_wilson_wr")}>Wilson%</th>
+            <th className="sortable num" onClick={() => toggleSort("ea_test_pf")}>EA PF</th>
+            <th className="sortable num" onClick={() => toggleSort("ea_test_expectancy_r")}>Exp R</th>
+            <th className="sortable num" onClick={() => toggleSort("ea_test_trades")}>Trades</th>
             <th>Actions</th>
           </tr>
         </thead>
@@ -318,11 +312,11 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
                 </td>
                 <td>{p.direction}</td>
                 <td>{p.seed}</td>
-                <td className="num">{fmt(p.test_score)}</td>
-                <td className="num">{fmt(p.test_wr, 1)}</td>
-                <td className="num">{fmt(p.test_pf)}</td>
-                <td className="num">{p.test_trades}</td>
-                <td className="num">{fmt(p.consistency)}</td>
+                <td className="num">{fmt(p.ea_test_wr, 1)}</td>
+                <td className="num">{fmt(p.ea_test_wilson_wr, 1)}</td>
+                <td className="num">{fmt(p.ea_test_pf)}</td>
+                <td className="num">{fmt(p.ea_test_expectancy_r, 3)}</td>
+                <td className="num">{p.ea_test_trades}</td>
                 <td>
                   <button
                     className="btn-mini"
@@ -370,6 +364,11 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
                       <div><span className="kv-key">Train PF</span><span>{fmt(p.train_pf)}</span></div>
                       <div><span className="kv-key">Train trades</span><span>{p.train_trades ?? "—"}</span></div>
                       <div><span className="kv-key">Train/day</span><span>{fmt(p.train_per_day)}</span></div>
+                      <div><span className="kv-key">EA-OOS breakeven WR</span><span>{fmt(p.ea_test_breakeven_wr, 1)}%</span></div>
+                      <div><span className="kv-key">Cluster OOS WR</span><span>{fmt(p.test_wr, 1)}%</span></div>
+                      <div><span className="kv-key">Cluster OOS PF</span><span>{fmt(p.test_pf)}</span></div>
+                      <div><span className="kv-key">Cluster OOS trades</span><span>{p.test_trades}</span></div>
+                      <div><span className="kv-key">Time consistency</span><span>{fmt(p.consistency)}</span></div>
                       <div><span className="kv-key">Overall WR</span><span>{fmt(p.overall_wr, 1)}%</span></div>
                       <div><span className="kv-key">Recent WR</span><span>{fmt(p.recent_wr, 1)}%</span></div>
                       <div><span className="kv-key">Implied R:R</span><span>{fmt(p.implied_rr)}</span></div>

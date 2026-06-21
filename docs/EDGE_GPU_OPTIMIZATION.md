@@ -40,3 +40,24 @@ The alignment is causal: external data is reindexed to the primary bar timeline 
 3. Compare `performance_profile_seed*.json`, EA-OOS PF, trade count, and stability.
 4. Add one external data family at a time: DXY first, then XAGUSD, then indices/rates.
 5. Treat improvement as real only when it survives multiple seeds and walk-forward splits.
+
+## Discovery-to-MT5 fidelity
+
+Discovery now treats the exported feature box as the deployable strategy and
+hard-rejects candidates unless all of these hold out of sample:
+
+- enough exported-box trades (`MIN_TEST_TRADES_PER_DAY`)
+- enough cluster/shape-gated trades (`MIN_GATED_TEST_TRADES`)
+- exported-box PF at least `MIN_EA_TEST_PF`
+- exported-box expectancy at least `MIN_EA_TEST_EXPECTANCY_R`
+- exported-box Wilson WR above its realized payoff-ratio breakeven WR
+
+Higher-timeframe features use the previous fully completed HTF candle in both
+Python and the EA. Discrete optimizer intervals are exported inward
+(`ceil(lower)..floor(upper)`) so MT5 admits exactly the integer feature states
+tested by discovery. The EA also uses the same rolling regime thresholds,
+volume moving-average convention, and automatic slowest-TF `htf_div` source.
+
+These stricter gates can legitimately produce zero patterns. That is a valid
+research result and is preferable to exporting a strategy whose attractive
+statistics exist only in training.
