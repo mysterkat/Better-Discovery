@@ -84,8 +84,8 @@ $bundleDir  = Join-Path $ScriptDir "src-tauri\target\release\bundle"
 $nsisDir    = Join-Path $bundleDir "nsis"
 $latestJson = Join-Path $bundleDir "latest.json"
 
-$installer = Get-ChildItem $nsisDir -Filter "*-setup.exe"     | Select-Object -First 1
-$sigFile   = Get-ChildItem $nsisDir -Filter "*-setup.exe.sig" | Select-Object -First 1
+$installer = Get-ChildItem $nsisDir -Filter "*_${Version}_x64-setup.exe"     | Select-Object -First 1
+$sigFile   = Get-ChildItem $nsisDir -Filter "*_${Version}_x64-setup.exe.sig" | Select-Object -First 1
 
 if (-not $installer) {
     Write-Host "  [ERROR] Installer (-setup.exe) not found in $nsisDir" -ForegroundColor Red
