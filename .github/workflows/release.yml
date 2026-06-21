@@ -90,7 +90,15 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri -- build --verbose
+        shell: pwsh
+        run: |
+          npm run tauri -- build --verbose 2>&1 | Tee-Object -FilePath tauri-build.log
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tauri build failed with exit code $LASTEXITCODE"
+          }
+          if (Select-String -Path tauri-build.log -SimpleMatch "does not match the public key") {
+            throw "Updater signing key does not match plugins.updater.pubkey"
+          }
 
       - name: Locate artifacts, rename to safe filenames, build latest.json
         id: artifacts
