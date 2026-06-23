@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,9 +40,68 @@ class LocalReplayService:
         return pd.concat((pd.read_parquet(path) for path in files), ignore_index=True)
 
     @staticmethod
-    def _tick_batches(files: list[str]):
+    def _as_utc(value: Any) -> pd.Timestamp | None:
+        if value is None:
+            return None
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is None:
+            return ts.tz_localize(timezone.utc)
+        return ts.tz_convert(timezone.utc)
+
+    @classmethod
+    def _select_overlapping_files(
+        cls, files: list[Any], date_from: pd.Timestamp | None, date_to: pd.Timestamp | None,
+    ) -> list[Any]:
+        if date_from is None or date_to is None:
+            return files
+        selected = []
+        for item in files:
+            first = cls._as_utc(item.first_time)
+            last = cls._as_utc(item.last_time)
+            if first is None or last is None:
+                continue
+            if first < date_to and last >= date_from:
+                selected.append(item)
+        return selected
+
+    @staticmethod
+    def _filter_range(
+        frame: pd.DataFrame,
+        date_from: pd.Timestamp | None,
+        date_to: pd.Timestamp | None,
+    ) -> pd.DataFrame:
+        if frame.empty or date_from is None or date_to is None or "time" not in frame:
+            return frame
+        times = pd.to_datetime(frame["time"], utc=True)
+        mask = (times >= date_from) & (times < date_to)
+        filtered = frame.loc[mask].copy().reset_index(drop=True)
+        if filtered.empty:
+            return filtered
+        filtered["time"] = times.loc[mask].to_numpy()
+        return filtered
+
+    def _read_range(
+        self, files: list[str], date_from: pd.Timestamp | None, date_to: pd.Timestamp | None,
+    ) -> pd.DataFrame:
+        frame = self._read(files)
+        return self._filter_range(frame, date_from, date_to)
+
+    def _tick_batches(
+        self, files: list[str], date_from: pd.Timestamp | None, date_to: pd.Timestamp | None,
+    ):
         for path in files:
-            yield pd.read_parquet(path, columns=["time", "bid", "ask"])
+            frame = pd.read_parquet(path, columns=["time", "bid", "ask"])
+            yield self._filter_range(frame, date_from, date_to)
+
+    def _validate_requested_range(self, manifest, date_from: pd.Timestamp, date_to: pd.Timestamp) -> None:
+        coverage_from = self._as_utc(manifest.requested_from)
+        coverage_to = self._as_utc(manifest.requested_to)
+        assert coverage_from is not None and coverage_to is not None
+        if date_from < coverage_from or date_to > coverage_to:
+            raise ValueError(
+                f"requested range {date_from.isoformat()} to {date_to.isoformat()} is outside "
+                f"dataset coverage {coverage_from.isoformat()} to {coverage_to.isoformat()}"
+            )
 
     def run(self, request: ReplayRequest) -> dict[str, Any]:
         manifest = self.catalog.load(request.dataset_id)
@@ -49,21 +109,27 @@ class LocalReplayService:
             raise ValueError(f"dataset {request.dataset_id} is not complete")
         symbol = request.symbol.upper()
         timeframe = request.timeframe.lower()
+        date_from = self._as_utc(request.date_from)
+        date_to = self._as_utc(request.date_to)
         strategy = StrategySpec.from_set(request.set_path)
-        tick_files = sorted(
+        tick_files_all = sorted(
             (f for f in manifest.files if f.kind == "ticks" and f.symbol == symbol),
             key=lambda item: (item.first_time or "", item.path),
         )
-        tick_paths = [f.path for f in tick_files]
-        bar_paths = [
-            f.path for f in manifest.files
-            if f.kind == "bars" and f.symbol == symbol and f.timeframe == timeframe
+        bar_file_records = [
+            f for f in manifest.files if f.kind == "bars" and f.symbol == symbol and f.timeframe == timeframe
         ]
-        if not tick_paths:
+        if not tick_files_all:
             raise ValueError("dataset has no retained ticks for this symbol")
-        if not bar_paths:
+        if not bar_file_records:
             raise ValueError(f"dataset has no {timeframe} bars for {symbol}")
-        bars = self._read(sorted(bar_paths))
+        if date_from is not None and date_to is not None:
+            self._validate_requested_range(manifest, date_from, date_to)
+        tick_files = self._select_overlapping_files(tick_files_all, date_from, date_to)
+        bar_files = self._select_overlapping_files(bar_file_records, date_from, date_to)
+        tick_paths = [f.path for f in tick_files]
+        bar_paths = [f.path for f in bar_files]
+        bars = self._read_range(sorted(bar_paths), date_from, date_to)
         signal_bars: dict[str, pd.DataFrame] = {}
         missing_signals: list[str] = []
         for slot in range(1, 5):
@@ -71,12 +137,13 @@ class LocalReplayService:
             signal_timeframe = MQL_TIMEFRAMES.get(raw_timeframe)
             if not signal_timeframe or signal_timeframe == timeframe:
                 continue
-            paths = [
-                f.path for f in manifest.files
+            signal_files = [
+                f for f in manifest.files
                 if f.kind == "bars" and f.symbol == symbol and f.timeframe == signal_timeframe
             ]
+            paths = [item.path for item in self._select_overlapping_files(signal_files, date_from, date_to)]
             if paths:
-                signal_bars[f"tf{slot}"] = self._read(paths)
+                signal_bars[f"tf{slot}"] = self._read_range(paths, date_from, date_to)
             else:
                 missing_signals.append(signal_timeframe)
         symbol_quality = manifest.quality.get("symbols", {}).get(symbol, {})
@@ -91,7 +158,7 @@ class LocalReplayService:
                 + ", ".join(sorted(set(missing_signals)))
             )
         ledger, metrics, features = run_replay_stream(
-            self._tick_batches(tick_paths), bars, strategy, request, point_size,
+            self._tick_batches(tick_paths, date_from, date_to), bars, strategy, request, point_size,
             signal_bars=signal_bars, total_ticks=sum(item.rows for item in tick_files),
         )
 

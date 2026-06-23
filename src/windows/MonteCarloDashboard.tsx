@@ -37,6 +37,7 @@ import {
   type ChartTheme,
 } from "../components/charts/mcDashboard/theme";
 import { useSettings } from "../state/settings";
+import { downloadMonteCarloHtml } from "../lib/mcExport";
 
 type PhaseId = "phase1" | "phase2" | "funded" | "longterm";
 
@@ -57,6 +58,7 @@ export default function MonteCarloDashboard() {
   const [job,   setJob]   = useState<JobRef | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState<PhaseId>("phase1");
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [disclaimerDismissed, setDisclaimerDismissed] = useState<boolean>(() => {
     try { return localStorage.getItem("mc-disclaimer-dismissed") === "1"; }
     catch { return false; }
@@ -104,6 +106,16 @@ export default function MonteCarloDashboard() {
 
   const result = job?.result as AllPhasesResult | null | undefined;
 
+  const exportAllTabs = () => {
+    if (!result) return;
+    try {
+      const filename = downloadMonteCarloHtml(jobId, result as unknown as Record<string, unknown>);
+      setExportStatus(`Exported ${filename}`);
+    } catch (e) {
+      setExportStatus(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   return (
     <div className="mc-dash">
       <div className="mc-dash-header">
@@ -113,7 +125,15 @@ export default function MonteCarloDashboard() {
             Bootstrap resampling — single job, four phases sharing the same random paths
           </p>
         </div>
-        {jobId && <span className="job-id-badge">{jobId.slice(0, 8)}</span>}
+        <div className="mc-dash-header-actions">
+          {exportStatus && <span className="mc-export-status" role="status">{exportStatus}</span>}
+          {job?.status === "done" && result && (
+            <button className="btn btn-secondary btn-sm" type="button" onClick={exportAllTabs} title="Export every Monte Carlo results tab to one HTML report">
+              Export HTML
+            </button>
+          )}
+          {jobId && <span className="job-id-badge">{jobId.slice(0, 8)}</span>}
+        </div>
       </div>
 
       {!disclaimerDismissed && (() => {

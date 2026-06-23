@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import httpx
 import pandas as pd
 
 from app.market_data.models import MarketDataImportRequest
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from app.market_data.service import MarketDataService
+from app.market_data.providers import DukascopyProvider
 
 
 def test_market_data_request_normalizes_symbols_and_timeframes() -> None:
@@ -139,3 +141,53 @@ def test_failed_import_resumes_without_refetching_retained_days(tmp_path: Path, 
     result = service.import_data(_request(resume_dataset_id=failed.dataset_id))
     assert result["state"] == "complete"
     assert _FakeProvider.calls == ["2025-02-01"]
+
+
+def test_provider_returns_exhausted_503_for_gap_audit(monkeypatch) -> None:
+    provider = DukascopyProvider()
+    calls = 0
+
+    def unavailable(url: str) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(provider.client, "get", unavailable)
+    monkeypatch.setattr("app.market_data.providers.time_module.sleep", lambda _seconds: None)
+    response = provider._get_hour("https://example.invalid/hour.bi5")
+    provider.close()
+    assert response.status_code == 503
+    assert calls == provider.hourly_attempts
+
+
+def test_provider_skips_saturday_without_network(monkeypatch) -> None:
+    provider = DukascopyProvider()
+    monkeypatch.setattr(
+        provider, "_get_hour", lambda _url: pytest.fail("Saturday should not request hour files")
+    )
+    frame = provider.fetch_day(
+        "XAUUSD",
+        datetime(2025, 1, 4, tzinfo=timezone.utc).date(),
+        datetime(2025, 1, 4, tzinfo=timezone.utc),
+        datetime(2025, 1, 5, tzinfo=timezone.utc),
+    )
+    provider.close()
+    assert frame.empty
+
+
+def test_provider_marks_exhausted_transport_failure_for_gap_audit(monkeypatch) -> None:
+    provider = DukascopyProvider()
+    calls = 0
+
+    def timeout(url: str):
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("timeout", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(provider.client, "get", timeout)
+    monkeypatch.setattr("app.market_data.providers.time_module.sleep", lambda _seconds: None)
+    response = provider._get_hour("https://example.invalid/hour.bi5")
+    provider.close()
+    assert response.status_code == 503
+    assert response.headers["X-BD-Transport-Gap"] == "ReadTimeout"
+    assert calls == provider.hourly_attempts

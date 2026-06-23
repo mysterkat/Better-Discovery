@@ -6,6 +6,7 @@ import lzma
 import ssl
 import struct
 import time as time_module
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Iterator
 
@@ -36,6 +37,8 @@ class DukascopyProvider:
     venue = "Dukascopy historical data feed"
     base_url = "https://datafeed.dukascopy.com/datafeed"
     record = struct.Struct(">3I2f")
+    hourly_workers = 6
+    hourly_attempts = 4
 
     def __init__(self, price_digits: dict[str, int] | None = None) -> None:
         self.price_digits = {**DUKASCOPY_DIGITS, **(price_digits or {})}
@@ -43,7 +46,7 @@ class DukascopyProvider:
             truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             if truststore is not None else ssl.create_default_context()
         )
-        self.client = httpx.Client(timeout=30.0, follow_redirects=True, verify=tls)
+        self.client = httpx.Client(timeout=15.0, follow_redirects=True, verify=tls)
 
     def close(self) -> None:
         self.client.close()
@@ -59,32 +62,65 @@ class DukascopyProvider:
 
     def _get_hour(self, url: str) -> httpx.Response:
         last_error: Exception | None = None
-        for attempt in range(4):
+        for attempt in range(self.hourly_attempts):
             try:
                 response = self.client.get(url)
                 if response.status_code < 500:
+                    return response
+                if response.status_code == 503 and attempt == self.hourly_attempts - 1:
+                    # Dukascopy also uses 503 for unavailable/empty hour files.
+                    # Preserve it after the full retry budget so the caller can
+                    # record a gap instead of aborting a multi-year import.
                     return response
                 last_error = httpx.HTTPStatusError(
                     f"transient provider response {response.status_code}",
                     request=response.request, response=response,
                 )
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            except httpx.TransportError as exc:
                 last_error = exc
-            if attempt < 3:
+            if attempt < self.hourly_attempts - 1:
                 time_module.sleep(0.5 * (2 ** attempt))
         assert last_error is not None
+        if isinstance(last_error, httpx.TransportError):
+            return httpx.Response(
+                503,
+                request=httpx.Request("GET", url),
+                headers={"X-BD-Transport-Gap": type(last_error).__name__},
+            )
         raise last_error
 
     def fetch_day(self, symbol: str, day: date, start: datetime, end: datetime) -> pd.DataFrame:
         rows: list[tuple[datetime, float, float, float, float]] = []
+        missing_hours: list[dict[str, str]] = []
         scale = float(10 ** self.digits(symbol))
         day_start = datetime.combine(day, time.min, tzinfo=timezone.utc)
-        for hour_no in range(24):
-            hour = day_start + timedelta(hours=hour_no)
-            if hour + timedelta(hours=1) <= start or hour >= end:
-                continue
-            response = self._get_hour(self._hour_url(symbol, hour))
-            if response.status_code in (403, 404):
+        # Dukascopy's empty closed-market hours may take ~10 seconds to return
+        # a transient-looking 503. Avoid known closures, then fetch the day's
+        # remaining independent hour files with a conservative bounded pool.
+        if day.weekday() == 5:  # Saturday
+            hours: list[datetime] = []
+        else:
+            first_hour = 20 if day.weekday() == 6 else 0  # Sunday reopen varies with DST
+            hours = [
+                day_start + timedelta(hours=hour_no)
+                for hour_no in range(first_hour, 24)
+                if day_start + timedelta(hours=hour_no + 1) > start
+                and day_start + timedelta(hours=hour_no) < end
+            ]
+        with ThreadPoolExecutor(max_workers=min(self.hourly_workers, len(hours) or 1)) as pool:
+            responses = list(pool.map(lambda hour: self._get_hour(self._hour_url(symbol, hour)), hours))
+        for hour, response in zip(hours, responses, strict=True):
+            if response.status_code in (403, 404, 503):
+                expected_open = (
+                    hour.weekday() < 4
+                    or (hour.weekday() == 4 and hour.hour < 21)
+                    or (hour.weekday() == 6 and hour.hour >= 22)
+                )
+                if response.status_code == 503 and expected_open:
+                    missing_hours.append({
+                        "hour": hour.isoformat(),
+                        "reason": response.headers.get("X-BD-Transport-Gap", "HTTP 503"),
+                    })
                 continue
             response.raise_for_status()
             if not response.content:
@@ -100,6 +136,7 @@ class DukascopyProvider:
                 if start <= timestamp < end:
                     rows.append((timestamp, bid_i / scale, ask_i / scale, bid_volume, ask_volume))
         frame = pd.DataFrame(rows, columns=["time", "bid", "ask", "bid_volume", "ask_volume"])
+        frame.attrs["missing_hours"] = missing_hours
         if frame.empty:
             return frame
         frame["time"] = pd.to_datetime(frame["time"], utc=True)
@@ -107,7 +144,9 @@ class DukascopyProvider:
         frame["spread"] = frame["ask"] - frame["bid"]
         frame["flags"] = 0
         frame["source"] = self.name
-        return frame.sort_values("time").drop_duplicates("time", keep="last").reset_index(drop=True)
+        result = frame.sort_values("time").drop_duplicates("time", keep="last").reset_index(drop=True)
+        result.attrs["missing_hours"] = missing_hours
+        return result
 
     def days(self, start: datetime, end: datetime) -> Iterator[date]:
         current = _utc(start).date()

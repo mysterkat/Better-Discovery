@@ -45,13 +45,15 @@ def aggregate_ticks(ticks: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     return bars.reset_index()
 
 
-def _tick_quality(ticks: pd.DataFrame) -> dict[str, int]:
+def _tick_quality(ticks: pd.DataFrame) -> dict[str, Any]:
     duplicate_ticks = int(ticks["time"].duplicated().sum()) if not ticks.empty else 0
     crossed = int((ticks["ask"] < ticks["bid"]).sum()) if not ticks.empty else 0
     nonpositive = int((ticks[["bid", "ask"]] <= 0).any(axis=1).sum()) if not ticks.empty else 0
     return {
         "tick_rows": len(ticks), "duplicate_tick_times": duplicate_ticks,
         "crossed_quotes": crossed, "nonpositive_quotes": nonpositive,
+        "missing_hour_files": len(ticks.attrs.get("missing_hours", [])),
+        "missing_hours": list(ticks.attrs.get("missing_hours", [])),
     }
 
 
@@ -123,6 +125,23 @@ class MarketDataService:
                 for day in days:
                     months[_month_key(day)].append(day)
                 for month, month_days in months.items():
+                    month_days_complete = all(
+                        f"{symbol}:{day.isoformat()}" in completed for day in month_days
+                    )
+                    month_bars_complete = all(
+                        any(
+                            item.kind == "bars"
+                            and item.symbol == symbol
+                            and item.timeframe == timeframe
+                            and Path(item.path).stem == month
+                            and Path(item.path).is_file()
+                            for item in manifest.files
+                        )
+                        for timeframe in request.timeframes
+                    )
+                    if month_days_complete and month_bars_complete:
+                        completed_days += len(month_days)
+                        continue
                     monthly_bars: dict[str, list[pd.DataFrame]] = {
                         timeframe: [] for timeframe in request.timeframes
                     }
@@ -190,12 +209,25 @@ class MarketDataService:
                 }
                 totals = {
                     key: sum(int(stats.get(key, 0)) for stats in symbol_stats)
-                    for key in ("tick_rows", "duplicate_tick_times", "crossed_quotes", "nonpositive_quotes")
+                    for key in (
+                        "tick_rows", "duplicate_tick_times", "crossed_quotes",
+                        "nonpositive_quotes", "missing_hour_files",
+                    )
                 }
+                missing_hour_details = [
+                    {"day": day.isoformat(), **gap}
+                    for day in days
+                    for gap in day_quality.get(f"{symbol}:{day.isoformat()}", {}).get(
+                        "missing_hours", []
+                    )
+                ]
                 all_quality[symbol] = {
-                    **totals, "bar_rows": bar_rows,
+                    **totals, "missing_hour_details": missing_hour_details, "bar_rows": bar_rows,
                     "passed": totals["tick_rows"] > 0 and not any(
-                        totals[key] for key in ("duplicate_tick_times", "crossed_quotes", "nonpositive_quotes")
+                        totals[key] for key in (
+                            "duplicate_tick_times", "crossed_quotes", "nonpositive_quotes",
+                            "missing_hour_files",
+                        )
                     ),
                     "price_digits": provider.digits(symbol),
                     "point_size": 10 ** (-provider.digits(symbol)),

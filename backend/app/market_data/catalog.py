@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +23,17 @@ def _hash(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _replace(source: Path, target: Path) -> None:
+    for attempt in range(6):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.1 * (2 ** attempt))
 
 
 def _range(frame: pd.DataFrame) -> tuple[str | None, str | None]:
@@ -44,7 +56,7 @@ class MarketDataCatalog:
         target = folder / "manifest.json"
         temp = target.with_suffix(".json.tmp")
         temp.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
-        os.replace(temp, target)
+        _replace(temp, target)
         return target
 
     def load(self, dataset_id: str) -> DatasetManifest:
@@ -70,7 +82,7 @@ class MarketDataCatalog:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_suffix(path.suffix + ".tmp")
         frame.to_parquet(temp, index=False, compression="zstd")
-        os.replace(temp, path)
+        _replace(temp, path)
         first, last = _range(frame)
         item = DatasetFile(
             kind=kind, symbol=symbol, timeframe=timeframe, path=str(path), rows=len(frame),
@@ -109,7 +121,7 @@ class MarketDataCatalog:
                 pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"]).to_csv(
                     temp, index=False
                 )
-            os.replace(temp, path)
+            _replace(temp, path)
         finally:
             temp.unlink(missing_ok=True)
         item = DatasetFile(
@@ -154,7 +166,7 @@ class MarketDataCatalog:
             if existing.is_file() and pattern.match(existing.name):
                 existing.unlink()
         for temp, target in temporary:
-            os.replace(temp, target)
+            _replace(temp, target)
         return [str(target) for _, target in temporary]
 
     def complete(self, manifest: DatasetManifest, quality: dict) -> DatasetManifest:

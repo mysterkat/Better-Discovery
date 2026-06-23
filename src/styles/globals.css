@@ -1700,6 +1700,19 @@ kbd {
   font-size: 20px;
   font-weight: 700;
 }
+.mc-dash-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.mc-export-status {
+  max-width: 360px;
+  color: var(--text2);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
 .mc-dash-sub {
   margin: 0;
   font-size: 12px;

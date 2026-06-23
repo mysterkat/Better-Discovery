@@ -36,7 +36,7 @@ export async function getBaseUrl(): Promise<string> {
   }
 
   _port = DEV_FALLBACK_PORT;
-  return `http://127.0.0.1:${DEV_FALLBACK_PORT}`;
+  return `http://${window.location.hostname}:${DEV_FALLBACK_PORT}`;
 }
 
 /** Invalidate the cached port (called when a fresh backend-ready event fires). */
