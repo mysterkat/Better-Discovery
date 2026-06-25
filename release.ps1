@@ -101,7 +101,7 @@ Write-Host ""
 Write-Host "  >> Generating latest.json..." -ForegroundColor Cyan
 
 $sig     = [System.IO.File]::ReadAllText($sigFile.FullName).Trim()
-$assetName = [Uri]::EscapeDataString($installer.Name -replace ' ', '.')
+$assetName = [Uri]::EscapeDataString(($installer.Name -replace ' ', '.'))
 $exeUrl  = "https://github.com/mysterkat/better-discovery-releases/releases/download/v$Version/$assetName"
 $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
