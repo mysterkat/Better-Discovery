@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import lzma
+import os
 import ssl
 import struct
 import time as time_module
@@ -26,6 +27,28 @@ DUKASCOPY_DIGITS: dict[str, int] = {
 }
 
 
+def _env_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(min_value, min(max_value, value))
+
+
+def _env_float(name: str, default: float, *, min_value: float, max_value: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return max(min_value, min(max_value, value))
+
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -42,11 +65,22 @@ class DukascopyProvider:
 
     def __init__(self, price_digits: dict[str, int] | None = None) -> None:
         self.price_digits = {**DUKASCOPY_DIGITS, **(price_digits or {})}
+        self.hourly_workers = _env_int(
+            "BD_DUKASCOPY_HOURLY_WORKERS", self.hourly_workers,
+            min_value=1, max_value=48,
+        )
+        self.hourly_attempts = _env_int(
+            "BD_DUKASCOPY_HOURLY_ATTEMPTS", self.hourly_attempts,
+            min_value=1, max_value=10,
+        )
+        timeout = _env_float(
+            "BD_DUKASCOPY_HTTP_TIMEOUT", 15.0, min_value=3.0, max_value=120.0,
+        )
         tls = (
             truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             if truststore is not None else ssl.create_default_context()
         )
-        self.client = httpx.Client(timeout=15.0, follow_redirects=True, verify=tls)
+        self.client = httpx.Client(timeout=timeout, follow_redirects=True, verify=tls)
 
     def close(self) -> None:
         self.client.close()
