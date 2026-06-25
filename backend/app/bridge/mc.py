@@ -293,7 +293,14 @@ def load_daily_pnl(data_source: str, file_path: str) -> Any:
         frame["exit_time"] = pd.to_datetime(frame["exit_time"], utc=True, errors="coerce")
         frame["net_pnl"] = pd.to_numeric(frame["net_pnl"], errors="coerce")
         daily = frame.dropna(subset=["exit_time", "net_pnl"]).groupby(frame["exit_time"].dt.date)["net_pnl"].sum()
-        return np.asarray(daily, dtype=float)
+        if daily.empty:
+            return np.asarray([], dtype=float)
+        calendar = pd.date_range(
+            start=pd.to_datetime(daily.index.min()),
+            end=pd.to_datetime(daily.index.max()),
+            freq="D",
+        ).date
+        return np.asarray(daily.reindex(calendar, fill_value=0.0), dtype=float)
     mc = _get_mc()
     if data_source == "mt5_html":
         df = mc.load_mt5_html(file_path)
@@ -846,6 +853,39 @@ def _flatten_records(value: Any, rename: dict[str, str]) -> Any:
     ]
 
 
+def _records_from_result(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict) and isinstance(value.get("records"), list):
+        return [row for row in value["records"] if isinstance(row, dict)]
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    return []
+
+
+def _combined_days_to_funded(p1: dict[str, Any], p2: dict[str, Any]) -> float:
+    """Return median elapsed days for attempts that pass both phases."""
+    fallback = float(p1.get("days_p50", 0.0)) + float(p2.get("days_p50", 0.0))
+
+    p1_records = _records_from_result(p1.get("results_df"))
+    p2_records = _records_from_result(p2.get("results_df"))
+    if not p1_records or not p2_records:
+        return fallback
+
+    p1_passed = [row for row in p1_records if bool(row.get("passed"))]
+    combined: list[float] = []
+    for p1_row, p2_row in zip(p1_passed, p2_records):
+        if not bool(p2_row.get("passed")):
+            continue
+        try:
+            combined.append(float(p1_row["days"]) + float(p2_row["days"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    if not combined:
+        return fallback
+    np = _np()
+    return float(np.percentile(np.asarray(combined, dtype=float), 50))
+
+
 def _build_verdict(
     p1: dict[str, Any],
     p2: dict[str, Any],
@@ -941,7 +981,7 @@ def _build_verdict(
             "dominant_fail":     p2_dom_name,
             "dominant_fail_pct": p2_dom_pct,
         },
-        "combined_days_to_funded": float(p1.get("days_p50", 0.0)) + float(p2.get("days_p50", 0.0)),
+        "combined_days_to_funded": _combined_days_to_funded(p1, p2),
         "funded": {
             "payout_rate":              payout_rate,
             "expected_monthly_usd":     expected_monthly,

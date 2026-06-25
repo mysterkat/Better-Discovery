@@ -51,6 +51,7 @@ Dependencies:
 import sys
 import warnings
 import pathlib
+import re
 
 import numpy as np
 import pandas as pd
@@ -244,6 +245,14 @@ def load_mt5_html(filepath):
         content = path.read_text(encoding="utf-8", errors="replace")
 
     soup = BeautifulSoup(content, "html.parser")
+    report_start = report_end = None
+    period_match = re.search(
+        r"\((\d{4}\.\d{2}\.\d{2})\s*-\s*(\d{4}\.\d{2}\.\d{2})\)",
+        soup.get_text(" ", strip=True),
+    )
+    if period_match:
+        report_start = pd.to_datetime(period_match.group(1), format="%Y.%m.%d", errors="coerce")
+        report_end = pd.to_datetime(period_match.group(2), format="%Y.%m.%d", errors="coerce")
 
     # -----------------------------------------------------------------------
     # Locate the Deals section header (<th> containing "Deals"),
@@ -373,6 +382,10 @@ def load_mt5_html(filepath):
     # Parse timestamp
     df["time"] = pd.to_datetime(df["time"], format="%Y.%m.%d %H:%M:%S", errors="coerce")
     df["trade_date"] = df["time"].dt.date
+    if pd.notna(report_start):
+        df.attrs["calendar_start"] = report_start.date()
+    if pd.notna(report_end):
+        df.attrs["calendar_end"] = report_end.date()
 
     df = df.dropna(subset=["profit"]).reset_index(drop=True)
 
@@ -381,7 +394,9 @@ def load_mt5_html(filepath):
     _net_total        = float(df["net_profit"].sum())
 
     print("[INFO] Loaded", len(df), "closed trades from", path.name)
-    print("[INFO] Date range:", str(df["trade_date"].min()), "->", str(df["trade_date"].max()))
+    if df.attrs.get("calendar_start") and df.attrs.get("calendar_end"):
+        print("[INFO] Report period:", str(df.attrs["calendar_start"]), "->", str(df.attrs["calendar_end"]))
+    print("[INFO] Trade date range:", str(df["trade_date"].min()), "->", str(df["trade_date"].max()))
     print("[INFO] Total P&L:  $" + str(round(df["profit"].sum(), 2)))
     print("[INFO] Win rate:    " + str(round((df["profit"] > 0).mean() * 100, 1)) + "%")
     print(
@@ -396,7 +411,9 @@ def load_mt5_html(filepath):
 def get_daily_pnl(df, scale):
     """
     Aggregate trades to daily P&L and scale to the target account size.
-    Each element = one trading day (days with no trades are excluded).
+    Each element = one calendar day when trade dates are available. Days with
+    no closed trades are included as 0 P&L, so MC "days to pass" is elapsed
+    calendar time rather than a count of trade-active days.
 
     Prefers the ``net_profit`` column when present (MT5 source — includes
     commission + swap). Falls back to ``profit`` for sources where the
@@ -406,12 +423,19 @@ def get_daily_pnl(df, scale):
     profits_raw = df[pnl_col].to_numpy(dtype=float) * scale
     has_dates   = "trade_date" in df.columns and df["trade_date"].notna().any()
     if has_dates:
-        return (
+        daily = (
             df.assign(ps=profits_raw)
             .groupby("trade_date")["ps"]
             .sum()
-            .to_numpy(dtype=float)
         )
+        start = df.attrs.get("calendar_start") or daily.index.min()
+        end = df.attrs.get("calendar_end") or daily.index.max()
+        calendar = pd.date_range(
+            start=pd.to_datetime(start),
+            end=pd.to_datetime(end),
+            freq="D",
+        ).date
+        return daily.reindex(calendar, fill_value=0.0).to_numpy(dtype=float)
     return profits_raw
 
 
