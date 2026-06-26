@@ -7,6 +7,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from ..hypothesis.models import HypothesisDiscoveryRequest
+from ..hypothesis.service import HypothesisResearchService
 from ..research.models import BacktestSpec, MT5Environment, PromotionPolicy
 from ..research.service import RESEARCH
 from ..local_replay.models import ReplayRequest
@@ -16,6 +18,7 @@ from ..jobs.runners import run_in_thread
 from ..schemas.common import JobRef
 
 router = APIRouter(prefix="/research")
+HYPOTHESIS = HypothesisResearchService()
 
 
 @router.post("/local-replay", response_model=JobRef)
@@ -32,6 +35,23 @@ def local_replay(req: ReplayRequest) -> JobRef:
 def local_robustness(req: RobustnessRequest) -> JobRef:
     job = JOBS.create(kind="local_robustness", meta={"ledger": req.ledger_path})
     run_in_thread(job, lambda: RESEARCH.run_local_robustness(req))
+    return JobRef(job_id=job.job_id, status=job.status)
+
+
+@router.post("/hypothesis-discovery", response_model=JobRef)
+def hypothesis_discovery(req: HypothesisDiscoveryRequest) -> JobRef:
+    job = JOBS.create(
+        kind="hypothesis_discovery",
+        meta={
+            "dataset_id": req.dataset_id,
+            "symbol": req.symbol,
+            "timeframe": req.timeframe,
+            "max_variants": req.max_variants,
+            "target_profit_pct": req.challenge.target_profit_pct,
+            "max_attempt_days": req.challenge.max_attempt_days,
+        },
+    )
+    run_in_thread(job, lambda: HYPOTHESIS.run_discovery(req))
     return JobRef(job_id=job.job_id, status=job.status)
 
 

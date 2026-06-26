@@ -6,7 +6,9 @@ import pandas as pd
 import pytest
 
 from app.hypothesis.bar_engine import run_bar_replay, run_bar_replay_fast_metrics
-from app.hypothesis.models import HypothesisBarRequest, HypothesisSpec
+from app.hypothesis.challenge import evaluate_challenge
+from app.hypothesis.grammar import generate_hypotheses
+from app.hypothesis.models import FTMOChallengeConfig, HypothesisBarRequest, HypothesisDiscoveryRequest, HypothesisSpec
 from app.hypothesis.service import HypothesisResearchService
 from app.hypothesis.signals import apply_signal_rules
 
@@ -251,3 +253,74 @@ def test_campaign_policy_override_controls_gate() -> None:
         {"min_trades": 15, "min_profit_factor": 1.15},
     )
     assert gate["decision"] == "promote"
+
+
+def test_hypothesis_grammar_is_deterministic_and_mixed_by_family() -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        families=("time_series_breakout", "trend_pullback"),
+        max_variants=10,
+    )
+
+    first = generate_hypotheses(request)
+    second = generate_hypotheses(request)
+
+    assert [item.fingerprint for item in first] == [item.fingerprint for item in second]
+    assert {item.lineage for item in first} == {"time_series_breakout", "trend_pullback"}
+
+
+def test_ftmo_challenge_replay_passes_fast_target_hit() -> None:
+    ledger = pd.DataFrame({
+        "entry_time": pd.date_range("2025-01-01T00:00:00Z", periods=5, freq="4h"),
+        "exit_time": pd.date_range("2025-01-01T01:00:00Z", periods=5, freq="4h"),
+        "net_pnl": [100.0] * 5,
+        "initial_risk": [100.0] * 5,
+    })
+    config = FTMOChallengeConfig(
+        max_attempt_days=3,
+        start_frequency="1D",
+        risk_fractions=(0.02,),
+        internal_daily_stop_pcts=(4.0,),
+        max_trades_per_day_options=(10,),
+    )
+
+    result = evaluate_challenge(
+        ledger,
+        risk_fraction=0.02,
+        internal_daily_stop_pct=4.0,
+        max_trades_per_day=10,
+        config=config,
+    )
+
+    assert result["summary"]["pass_count"] == 1
+    assert result["summary"]["best_days_to_target"] is not None
+    assert result["summary"]["best_days_to_target"] < 1.0
+
+
+def test_ftmo_challenge_replay_fails_daily_loss() -> None:
+    ledger = pd.DataFrame({
+        "entry_time": [pd.Timestamp("2025-01-01T00:00:00Z")],
+        "exit_time": [pd.Timestamp("2025-01-01T00:15:00Z")],
+        "net_pnl": [-300.0],
+        "initial_risk": [100.0],
+    })
+    config = FTMOChallengeConfig(
+        max_attempt_days=3,
+        start_frequency="1D",
+        risk_fractions=(0.02,),
+        internal_daily_stop_pcts=(4.0,),
+        max_trades_per_day_options=(10,),
+    )
+
+    result = evaluate_challenge(
+        ledger,
+        risk_fraction=0.02,
+        internal_daily_stop_pct=4.0,
+        max_trades_per_day=10,
+        config=config,
+    )
+
+    assert result["summary"]["prop_fail_count"] == 1
+    assert result["attempts"][0]["fail_reason"] == "daily_loss"

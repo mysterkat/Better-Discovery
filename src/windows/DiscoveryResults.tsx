@@ -11,6 +11,56 @@ import IndicatorsTable from "../components/IndicatorsTable";
 import { renderValue, titleCase } from "../lib/format";
 import { useSettings } from "../state/settings";
 
+interface HypothesisCandidate {
+  strategy_id: string;
+  strategy_fingerprint: string;
+  lineage: string;
+  hypothesis: string;
+  parameters: Record<string, unknown>;
+  trades: number;
+  net_profit: number;
+  profit_factor: number | null;
+  max_drawdown_pct: number;
+  challenge_score: number;
+  challenge_pass_count: number;
+  challenge_pass_rate: number;
+  challenge_active_pass_rate: number;
+  challenge_prop_fail_count: number;
+  challenge_prop_fail_rate: number;
+  median_days_to_target: number | null;
+  best_days_to_target: number | null;
+  risk_fraction: number;
+  internal_daily_stop_pct: number;
+  max_trades_per_day: number;
+}
+
+interface HypothesisDiscoveryResult {
+  experiment_id: string;
+  dataset_id: string;
+  symbol: string;
+  timeframe: string;
+  variants_generated: number;
+  variants_tested: number;
+  artifact_folder: string;
+  summary_csv: string;
+  summary_json: string;
+  top_candidates: HypothesisCandidate[];
+}
+
+function isHypothesisResult(value: unknown): value is HypothesisDiscoveryResult {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return Array.isArray(candidate.top_candidates) && typeof candidate.variants_generated === "number";
+}
+
+function formatNumber(value: number | null | undefined, digits = 2): string {
+  return typeof value === "number" && isFinite(value) ? value.toFixed(digits) : "-";
+}
+
+function formatPct(value: number | null | undefined, digits = 1): string {
+  return typeof value === "number" && isFinite(value) ? `${(value * 100).toFixed(digits)}%` : "-";
+}
+
 export default function DiscoveryResults() {
   const params = new URLSearchParams(window.location.search);
   const jobId = params.get("jobId") ?? "";
@@ -43,7 +93,11 @@ export default function DiscoveryResults() {
     return () => clearInterval(timer);
   }, [jobId]);
 
-  const result = job?.result as Record<string, unknown> | null | undefined;
+  const rawResult = job?.result;
+  const hypothesisResult = isHypothesisResult(rawResult) ? rawResult : null;
+  const result = rawResult && typeof rawResult === "object"
+    ? rawResult as Record<string, unknown>
+    : null;
   // Internal-only fields the user shouldn't see as cards or in the
   // collapsible "Details" sections.
   const HIDDEN_KEYS = new Set(["ok", "overrides_applied", "patterns", "overview"]);
@@ -62,7 +116,7 @@ export default function DiscoveryResults() {
   return (
     <div className="results-window">
       <div className="results-header">
-        <h1>Pattern Discovery Results</h1>
+        <h1>{hypothesisResult ? "FTMO Hypothesis Results" : "Pattern Discovery Results"}</h1>
         {jobId && <span className="job-id-badge">{jobId.slice(0, 8)}</span>}
       </div>
 
@@ -77,7 +131,11 @@ export default function DiscoveryResults() {
         <div className="alert alert-error">Discovery failed: {job.error}</div>
       )}
 
-      {job?.status === "done" && result && (
+      {job?.status === "done" && hypothesisResult && (
+        <HypothesisResults result={hypothesisResult} />
+      )}
+
+      {job?.status === "done" && result && !hypothesisResult && (
         <>
           {/* Lead with the headline outcome so the user sees pass/fail before scanning cards. */}
           {patternsFound === 0 && (
@@ -177,6 +235,127 @@ export default function DiscoveryResults() {
         </div>
       )}
     </div>
+  );
+}
+
+function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const best = result.top_candidates[0] ?? null;
+
+  return (
+    <>
+      {!result.top_candidates.length && (
+        <div className="alert alert-warn">
+          <strong>No hypothesis variant survived the minimum trade filter.</strong>{" "}
+          Use a longer dataset, lower the minimum trades, or add more variants.
+        </div>
+      )}
+
+      {best && (
+        <div className="alert alert-success" style={{ marginBottom: 16 }}>
+          <strong>Top candidate:</strong>{" "}
+          {best.strategy_id} - active pass rate {formatPct(best.challenge_active_pass_rate)}
+          {best.median_days_to_target != null && <> - median {formatNumber(best.median_days_to_target, 1)} days</>}
+        </div>
+      )}
+
+      <div className="results-grid" style={{ marginBottom: 16 }}>
+        <div className="result-card"><span className="result-key">Generated</span><span className="result-val">{result.variants_generated}</span></div>
+        <div className="result-card"><span className="result-key">Tested</span><span className="result-val">{result.variants_tested}</span></div>
+        <div className="result-card"><span className="result-key">Dataset</span><span className="result-val result-val-truncate" title={result.dataset_id}>{result.dataset_id}</span></div>
+        <div className="result-card"><span className="result-key">Symbol</span><span className="result-val">{result.symbol} {result.timeframe.toUpperCase()}</span></div>
+        {best && (
+          <>
+            <div className="result-card"><span className="result-key">Best Pass Rate</span><span className="result-val">{formatPct(best.challenge_active_pass_rate)}</span></div>
+            <div className="result-card"><span className="result-key">Prop Fail Rate</span><span className="result-val">{formatPct(best.challenge_prop_fail_rate)}</span></div>
+          </>
+        )}
+      </div>
+
+      <div className="action-row" style={{ marginBottom: 16 }}>
+        <button className="btn btn-secondary btn-sm" onClick={() => openFolder(result.artifact_folder).catch(() => undefined)} title={result.artifact_folder}>
+          Open artifact folder
+        </button>
+        <button className="btn btn-secondary btn-sm" onClick={() => openFolder(result.summary_csv).catch(() => undefined)} title={result.summary_csv}>
+          Open summary CSV
+        </button>
+      </div>
+
+      {result.top_candidates.length > 0 && (
+        <>
+          <div className="section-label">Top Hypotheses ({result.top_candidates.length})</div>
+          <table className="patterns-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Strategy</th>
+                <th>Family</th>
+                <th className="num">Score</th>
+                <th className="num">Pass</th>
+                <th className="num">Fails</th>
+                <th className="num">Median Days</th>
+                <th className="num">Risk</th>
+                <th className="num">Trades</th>
+                <th className="num">PF</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.top_candidates.map((candidate, index) => (
+                <Fragment key={candidate.strategy_id}>
+                  <tr>
+                    <td>{index + 1}</td>
+                    <td>
+                      <button
+                        className="link-btn"
+                        onClick={() => setExpanded(expanded === candidate.strategy_id ? null : candidate.strategy_id)}
+                      >
+                        {candidate.strategy_id}
+                      </button>
+                    </td>
+                    <td>{titleCase(candidate.lineage)}</td>
+                    <td className="num">{formatNumber(candidate.challenge_score, 1)}</td>
+                    <td className="num">{formatPct(candidate.challenge_active_pass_rate)}</td>
+                    <td className="num">{formatPct(candidate.challenge_prop_fail_rate)}</td>
+                    <td className="num">{formatNumber(candidate.median_days_to_target, 1)}</td>
+                    <td className="num">{formatPct(candidate.risk_fraction, 2)}</td>
+                    <td className="num">{candidate.trades}</td>
+                    <td className="num">{formatNumber(candidate.profit_factor)}</td>
+                  </tr>
+                  {expanded === candidate.strategy_id && (
+                    <tr className="row-detail">
+                      <td colSpan={10}>
+                        <div className="pattern-detail-grid">
+                          <div><span className="kv-key">Hypothesis</span><span>{candidate.hypothesis}</span></div>
+                          <div><span className="kv-key">Pass count</span><span>{candidate.challenge_pass_count}</span></div>
+                          <div><span className="kv-key">Prop fail count</span><span>{candidate.challenge_prop_fail_count}</span></div>
+                          <div><span className="kv-key">Best days</span><span>{formatNumber(candidate.best_days_to_target, 1)}</span></div>
+                          <div><span className="kv-key">Internal daily stop</span><span>{formatNumber(candidate.internal_daily_stop_pct, 1)}%</span></div>
+                          <div><span className="kv-key">Max trades/day</span><span>{candidate.max_trades_per_day}</span></div>
+                          <div><span className="kv-key">Net profit</span><span>{formatNumber(candidate.net_profit, 2)}</span></div>
+                          <div><span className="kv-key">Max DD</span><span>{formatNumber(candidate.max_drawdown_pct, 2)}%</span></div>
+                          <div className="full-row"><span className="kv-key">Fingerprint</span><span className="mono small">{candidate.strategy_fingerprint}</span></div>
+                          <div className="full-row"><span className="kv-key">Parameters</span><pre className="raw-json">{JSON.stringify(candidate.parameters, null, 2)}</pre></div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      <details className="nested-section">
+        <summary>Artifacts</summary>
+        <pre className="raw-json">{JSON.stringify({
+          artifact_folder: result.artifact_folder,
+          summary_csv: result.summary_csv,
+          summary_json: result.summary_json,
+          experiment_id: result.experiment_id,
+        }, null, 2)}</pre>
+      </details>
+    </>
   );
 }
 

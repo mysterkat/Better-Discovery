@@ -413,6 +413,45 @@ button { font-family: inherit; }
 .btn-accent:not(:disabled):hover { opacity: 0.88; }
 .btn-danger { background: #c0392b; color: #fff; border-color: #c0392b; }
 .btn-danger:not(:disabled):hover { background: #a83224; border-color: #a83224; }
+.btn-sm { padding: 6px 11px; font-size: 12px; }
+
+.discovery-tab { max-width: 900px; }
+
+.segmented-control {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2);
+  overflow: hidden;
+}
+.segmented-control button {
+  min-width: 150px;
+  padding: 8px 14px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+.segmented-control button:last-child { border-right: 0; }
+.segmented-control button:hover:not(:disabled) { background: var(--bg3); color: var(--text); }
+.segmented-control button.active {
+  background: var(--accent2);
+  color: #fff;
+}
+.segmented-control button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.hypothesis-family-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.hypothesis-grid {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
 
 /* ── Current import banner ─────────────────────────────────────────── */
 .current-import-banner {
@@ -422,6 +461,11 @@ button { font-family: inherit; }
   border-radius: 6px;
   font-size: 13px;
   color: var(--text);
+}
+.current-import-banner.banner-warn {
+  background: rgba(210,153,34,.10);
+  border-color: rgba(210,153,34,.30);
+  color: var(--warn);
 }
 
 /* ── Confirmation modal ────────────────────────────────────────────── */

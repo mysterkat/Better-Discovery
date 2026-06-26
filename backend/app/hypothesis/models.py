@@ -22,7 +22,7 @@ class HypothesisSpec(BaseModel):
     strategy_id: str = Field(min_length=3, max_length=80)
     lineage: Lineage
     hypothesis: str = Field(min_length=20, max_length=1000)
-    timeframe: Literal["m15"] = "m15"
+    timeframe: Literal["m5", "m15"] = "m15"
     context_timeframes: tuple[Literal["h1", "h4"], ...] = ("h1", "h4")
     parameters: dict[str, int | float | str | bool]
 
@@ -73,3 +73,78 @@ class HypothesisBarResult(BaseModel):
     ledger_csv: str
     metrics: dict[str, Any]
     gate: dict[str, Any]
+
+
+class FTMOChallengeConfig(BaseModel):
+    initial_balance: float = Field(default=10_000.0, gt=0)
+    target_profit_pct: float = Field(default=10.0, gt=0)
+    daily_loss_pct: float = Field(default=5.0, gt=0)
+    max_loss_pct: float = Field(default=10.0, gt=0)
+    max_attempt_days: int = Field(default=10, ge=1, le=120)
+    start_frequency: str = Field(default="1D", min_length=2, max_length=12)
+    risk_fractions: tuple[float, ...] = (0.01, 0.015, 0.02)
+    internal_daily_stop_pcts: tuple[float, ...] = (2.0, 3.0, 4.0)
+    max_trades_per_day_options: tuple[int, ...] = (2, 4, 8)
+
+    @model_validator(mode="after")
+    def validate_grid(self) -> "FTMOChallengeConfig":
+        if not self.risk_fractions:
+            raise ValueError("risk_fractions cannot be empty")
+        if not self.internal_daily_stop_pcts:
+            raise ValueError("internal_daily_stop_pcts cannot be empty")
+        if not self.max_trades_per_day_options:
+            raise ValueError("max_trades_per_day_options cannot be empty")
+        if any(value <= 0 or value > 0.05 for value in self.risk_fractions):
+            raise ValueError("risk_fractions must be within (0, 0.05]")
+        if any(value <= 0 or value > self.daily_loss_pct for value in self.internal_daily_stop_pcts):
+            raise ValueError("internal_daily_stop_pcts must be within daily_loss_pct")
+        if any(value <= 0 for value in self.max_trades_per_day_options):
+            raise ValueError("max_trades_per_day_options must be positive")
+        return self
+
+
+class HypothesisDiscoveryRequest(BaseModel):
+    dataset_id: str
+    symbol: str = "XAUUSD"
+    timeframe: Literal["m5", "m15"] = "m15"
+    date_from: datetime
+    date_to: datetime
+    families: tuple[Lineage, ...] | None = None
+    max_variants: int = Field(default=300, ge=1, le=5_000)
+    min_closed_trades: int = Field(default=15, ge=1)
+    top_n: int = Field(default=25, ge=1, le=250)
+    lot_size: float = Field(default=0.1, gt=0)
+    contract_size: float = Field(default=100.0, gt=0)
+    commission_per_lot_round_turn: float = Field(default=7.0, ge=0)
+    slippage_price_units: float = Field(default=0.05, ge=0)
+    challenge: FTMOChallengeConfig = Field(default_factory=FTMOChallengeConfig)
+
+    @staticmethod
+    def _utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def validate_request(self) -> "HypothesisDiscoveryRequest":
+        self.symbol = self.symbol.upper()
+        self.date_from = self._utc(self.date_from)
+        self.date_to = self._utc(self.date_to)
+        if self.symbol != "XAUUSD":
+            raise ValueError("hypothesis discovery is currently locked to XAUUSD")
+        if self.date_to <= self.date_from:
+            raise ValueError("date_to must be after date_from")
+        return self
+
+
+class HypothesisDiscoveryResult(BaseModel):
+    experiment_id: str
+    dataset_id: str
+    symbol: str
+    timeframe: str
+    variants_generated: int
+    variants_tested: int
+    artifact_folder: str
+    summary_csv: str
+    summary_json: str
+    top_candidates: list[dict[str, Any]]

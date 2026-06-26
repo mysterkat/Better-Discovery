@@ -42,6 +42,45 @@ export async function startDiscovery(
   return api<JobRef>("POST", "/discovery/start", { overrides });
 }
 
+export type HypothesisFamily =
+  | "time_series_breakout"
+  | "session_range_breakout"
+  | "trend_pullback"
+  | "volatility_expansion"
+  | "regime_mean_reversion";
+
+export interface HypothesisDiscoveryRequest {
+  dataset_id: string;
+  symbol: "XAUUSD";
+  timeframe: "m5" | "m15";
+  date_from: string;
+  date_to: string;
+  families?: HypothesisFamily[];
+  max_variants: number;
+  min_closed_trades: number;
+  lot_size?: number;
+  contract_size?: number;
+  commission_per_lot_round_turn?: number;
+  slippage_price_units?: number;
+  challenge: {
+    initial_balance?: number;
+    target_profit_pct: number;
+    daily_loss_pct: number;
+    max_loss_pct: number;
+    max_attempt_days: number;
+    start_frequency: string;
+    risk_fractions: number[];
+    internal_daily_stop_pcts: number[];
+    max_trades_per_day_options: number[];
+  };
+}
+
+export async function startHypothesisDiscovery(
+  request: HypothesisDiscoveryRequest,
+): Promise<JobRef> {
+  return startDiscovery({ engine: "hypothesis", ...request });
+}
+
 export async function getDiscoveryResults(jobId: string): Promise<JobRef> {
   return api<JobRef>("GET", `/discovery/results/${jobId}`);
 }

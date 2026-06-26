@@ -11,8 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from pydantic import ValidationError
 
 from ..bridge import discovery as disc_bridge
+from ..hypothesis.models import HypothesisDiscoveryRequest
+from ..hypothesis.service import HypothesisResearchService
 from ..jobs.manager import JOBS
 from ..jobs.runners import run_in_thread
 from ..paths import DEFAULT_DISC_OUTPUT, USER_DATA
@@ -20,6 +23,7 @@ from ..schemas.common import JobRef
 from ..schemas.discovery import DiscoveryStartRequest
 
 router = APIRouter()
+HYPOTHESIS = HypothesisResearchService()
 
 
 @router.get("/discovery/defaults")
@@ -37,8 +41,29 @@ def discovery_params() -> list:
 
 @router.post("/discovery/start", response_model=JobRef)
 def discovery_start(req: DiscoveryStartRequest) -> JobRef:
+    overrides = dict(req.overrides)
+    mode = str(overrides.get("engine", "")).lower()
+    if mode == "hypothesis" or "dataset_id" in overrides:
+        overrides.pop("engine", None)
+        try:
+            request = HypothesisDiscoveryRequest.model_validate(overrides)
+        except ValidationError as exc:
+            raise HTTPException(422, exc.errors()) from exc
+        job = JOBS.create(
+            kind="hypothesis_discovery",
+            meta={
+                "dataset_id": request.dataset_id,
+                "symbol": request.symbol,
+                "timeframe": request.timeframe,
+                "max_variants": request.max_variants,
+                "target_profit_pct": request.challenge.target_profit_pct,
+                "max_attempt_days": request.challenge.max_attempt_days,
+            },
+        )
+        run_in_thread(job, lambda: HYPOTHESIS.run_discovery(request))
+        return JobRef(job_id=job.job_id, status=job.status)
     job = JOBS.create(kind="discovery", meta={"overrides": req.overrides})
-    run_in_thread(job, lambda: disc_bridge.run_discovery(dict(req.overrides)))
+    run_in_thread(job, lambda: disc_bridge.run_discovery(overrides))
     return JobRef(job_id=job.job_id, status=job.status)
 
 

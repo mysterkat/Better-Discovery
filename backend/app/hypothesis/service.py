@@ -10,8 +10,16 @@ from ..market_data.catalog import MarketDataCatalog
 from ..paths import DEFAULT_RESEARCH
 from ..research.store import ExperimentStore
 from .bar_engine import run_bar_replay
-from .models import HypothesisBarRequest, HypothesisBarResult
-from .signals import build_signal_frame
+from .challenge import evaluate_challenge_grid
+from .grammar import generate_hypotheses
+from .models import (
+    HypothesisBarRequest,
+    HypothesisBarResult,
+    HypothesisDiscoveryRequest,
+    HypothesisDiscoveryResult,
+    HypothesisSpec,
+)
+from .signals import apply_signal_rules, build_base_frame, build_signal_frame
 
 
 class HypothesisResearchService:
@@ -145,6 +153,180 @@ class HypothesisResearchService:
             (folder / "result.json").write_text(
                 json.dumps(metadata, indent=2, default=str), encoding="utf-8"
             )
+            self.store.finish(experiment_id, result)
+            return result
+        except Exception as exc:
+            self.store.fail(experiment_id, str(exc))
+            raise
+
+    def _replay_request(
+        self,
+        request: HypothesisDiscoveryRequest,
+        strategy: HypothesisSpec,
+    ) -> HypothesisBarRequest:
+        return HypothesisBarRequest(
+            dataset_id=request.dataset_id,
+            strategy=strategy,
+            date_from=request.date_from,
+            date_to=request.date_to,
+            dataset_role="development",
+            initial_balance=request.challenge.initial_balance,
+            lot_size=request.lot_size,
+            contract_size=request.contract_size,
+            commission_per_lot_round_turn=request.commission_per_lot_round_turn,
+            slippage_price_units=request.slippage_price_units,
+            promotion_policy={
+                "min_trades": request.min_closed_trades,
+                "min_profit_factor": 1.0,
+                "max_drawdown_pct": 100.0,
+                "min_positive_month_fraction": 0.0,
+                "min_positive_years": 0,
+            },
+        )
+
+    @staticmethod
+    def _candidate_row(
+        strategy: HypothesisSpec,
+        metrics: dict[str, Any],
+        challenge: dict[str, Any],
+    ) -> dict[str, Any]:
+        best = challenge["best"]["summary"]
+        compact_challenge = {
+            "best": best,
+            "grid_summaries": [item["summary"] for item in challenge["grid"]],
+        }
+        return {
+            "strategy_id": strategy.strategy_id,
+            "strategy_fingerprint": strategy.fingerprint,
+            "lineage": strategy.lineage,
+            "hypothesis": strategy.hypothesis,
+            "parameters": strategy.parameters,
+            "trades": metrics["trades"],
+            "net_profit": metrics["net_profit"],
+            "profit_factor": metrics["profit_factor"],
+            "expected_payoff": metrics["expected_payoff"],
+            "max_drawdown_pct": metrics["max_drawdown_pct"],
+            "challenge_score": best["score"],
+            "challenge_start_windows": best["start_windows"],
+            "challenge_active_starts": best["active_starts"],
+            "challenge_pass_count": best["pass_count"],
+            "challenge_pass_rate": best["pass_rate"],
+            "challenge_active_pass_rate": best["active_pass_rate"],
+            "challenge_prop_fail_count": best["prop_fail_count"],
+            "challenge_prop_fail_rate": best["prop_fail_rate"],
+            "median_days_to_target": best["median_days_to_target"],
+            "best_days_to_target": best["best_days_to_target"],
+            "median_trades_to_target": best["median_trades_to_target"],
+            "risk_fraction": best["risk_fraction"],
+            "internal_daily_stop_pct": best["internal_daily_stop_pct"],
+            "max_trades_per_day": best["max_trades_per_day"],
+            "challenge": compact_challenge,
+        }
+
+    def run_discovery(self, request: HypothesisDiscoveryRequest) -> dict[str, Any]:
+        manifest = self.catalog.load(request.dataset_id)
+        if manifest.state != "complete":
+            raise ValueError(f"dataset {request.dataset_id} is not complete")
+        experiment_id = self.store.create(
+            "hypothesis_discovery",
+            request.model_dump(mode="json"),
+            dataset_role="development",
+        )
+        try:
+            bars = self._bars(
+                manifest,
+                request.symbol,
+                request.timeframe,
+                request.date_from,
+                request.date_to,
+            )
+            if bars.empty:
+                raise ValueError("no primary bars in requested range")
+            warmup_from = pd.Timestamp(request.date_from) - pd.Timedelta(days=120)
+            warm_bars = self._bars(
+                manifest,
+                request.symbol,
+                request.timeframe,
+                warmup_from,
+                request.date_to,
+            )
+            contexts = {
+                timeframe: self._bars(manifest, request.symbol, timeframe, warmup_from, request.date_to)
+                for timeframe in ("h1", "h4")
+            }
+            base_frame = build_base_frame(warm_bars, contexts)
+            specs = generate_hypotheses(request)
+            rows: list[dict[str, Any]] = []
+            top_ledgers: dict[str, pd.DataFrame] = {}
+
+            for strategy in specs:
+                replay_request = self._replay_request(request, strategy)
+                signals = apply_signal_rules(base_frame, strategy)
+                signals = signals.loc[
+                    (signals.index >= pd.Timestamp(request.date_from))
+                    & (signals.index < pd.Timestamp(request.date_to))
+                ]
+                ledger, metrics = run_bar_replay(bars, signals, replay_request)
+                if metrics["trades"] < request.min_closed_trades:
+                    continue
+                challenge = evaluate_challenge_grid(ledger, request.challenge)
+                row = self._candidate_row(strategy, metrics, challenge)
+                rows.append(row)
+                top_ledgers[strategy.strategy_id] = ledger
+
+            rows.sort(
+                key=lambda item: (
+                    item["challenge_score"],
+                    item["challenge_pass_count"],
+                    -(item["median_days_to_target"] or 999.0),
+                    item["profit_factor"] or 0.0,
+                ),
+                reverse=True,
+            )
+
+            folder = self.output / "hypothesis_discovery" / experiment_id
+            folder.mkdir(parents=True, exist_ok=False)
+            summary_json = folder / "summary.json"
+            summary_csv = folder / "summary.csv"
+            request_path = folder / "request.json"
+            request_path.write_text(
+                json.dumps(request.model_dump(mode="json"), indent=2, default=str),
+                encoding="utf-8",
+            )
+            compact_rows = [
+                {key: value for key, value in row.items() if key != "challenge"}
+                for row in rows
+            ]
+            pd.DataFrame(compact_rows).to_csv(summary_csv, index=False)
+            top_candidates = rows[: request.top_n]
+            top_folder = folder / "top_ledgers"
+            top_folder.mkdir(exist_ok=True)
+            for row in top_candidates:
+                ledger = top_ledgers[row["strategy_id"]]
+                ledger.to_csv(top_folder / f"{row['strategy_id']}.csv", index=False)
+            summary_payload = {
+                "experiment_id": experiment_id,
+                "request": request.model_dump(mode="json"),
+                "variants_generated": len(specs),
+                "variants_tested": len(rows),
+                "top_candidates": top_candidates,
+            }
+            summary_json.write_text(
+                json.dumps(summary_payload, indent=2, default=str),
+                encoding="utf-8",
+            )
+            result = HypothesisDiscoveryResult(
+                experiment_id=experiment_id,
+                dataset_id=request.dataset_id,
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+                variants_generated=len(specs),
+                variants_tested=len(rows),
+                artifact_folder=str(folder),
+                summary_csv=str(summary_csv),
+                summary_json=str(summary_json),
+                top_candidates=top_candidates,
+            ).model_dump(mode="json")
             self.store.finish(experiment_id, result)
             return result
         except Exception as exc:
