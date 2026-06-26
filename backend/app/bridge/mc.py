@@ -278,11 +278,12 @@ def _ensure_runners() -> None:
 
 
 def load_daily_pnl(data_source: str, file_path: str) -> Any:
-    """Load a trade file and return a daily P&L numpy array.
+    """Load a trade file and return a daily P&L array with FTMO open-day flags.
 
     data_source: "tradingview" → CSV export, "mt5_html" → MT5 Strategy Tester HTML report.
     """
     np = _np()
+    mc = _get_mc()
     if data_source == "local_ledger":
         pd = _pd()
         frame = pd.read_parquet(file_path) if str(file_path).lower().endswith(".parquet") else pd.read_csv(file_path)
@@ -294,19 +295,33 @@ def load_daily_pnl(data_source: str, file_path: str) -> Any:
         frame["net_pnl"] = pd.to_numeric(frame["net_pnl"], errors="coerce")
         daily = frame.dropna(subset=["exit_time", "net_pnl"]).groupby(frame["exit_time"].dt.date)["net_pnl"].sum()
         if daily.empty:
-            return np.asarray([], dtype=float)
+            return mc.make_daily_pnl_series([], [], source="empty_local_ledger")
+        open_col = next((c for c in ("open_time", "entry_time", "time_open", "entry_at") if c in frame.columns), None)
+        if open_col:
+            frame[open_col] = pd.to_datetime(frame[open_col], utc=True, errors="coerce")
+            open_daily = frame.dropna(subset=[open_col]).groupby(frame[open_col].dt.date).size().astype(bool)
+            trade_day_source = open_col
+            if open_daily.empty:
+                open_daily = frame.dropna(subset=["exit_time"]).groupby(frame["exit_time"].dt.date).size().astype(bool)
+                trade_day_source = "exit_time_fallback"
+        else:
+            open_daily = frame.dropna(subset=["exit_time"]).groupby(frame["exit_time"].dt.date).size().astype(bool)
+            trade_day_source = "exit_time_fallback"
+        start = min(pd.to_datetime(daily.index.min()), pd.to_datetime(open_daily.index.min()))
+        end = max(pd.to_datetime(daily.index.max()), pd.to_datetime(open_daily.index.max()))
         calendar = pd.date_range(
-            start=pd.to_datetime(daily.index.min()),
-            end=pd.to_datetime(daily.index.max()),
+            start=start,
+            end=end,
             freq="D",
         ).date
-        return np.asarray(daily.reindex(calendar, fill_value=0.0), dtype=float)
-    mc = _get_mc()
+        pnl = np.asarray(daily.reindex(calendar, fill_value=0.0), dtype=float)
+        flags = np.asarray(open_daily.reindex(calendar, fill_value=False), dtype=bool)
+        return mc.make_daily_pnl_series(pnl, flags, calendar, source=trade_day_source)
     if data_source == "mt5_html":
         df = mc.load_mt5_html(file_path)
     else:
         df = mc.load_tradingview_csv(file_path)
-    return np.asarray(mc.get_daily_pnl(df, scale=1.0), dtype=float)
+    return mc.get_daily_pnl(df, scale=1.0)
 
 
 def compute_regime_from_file(data_source: str, file_path: str) -> dict[str, Any] | None:
@@ -405,17 +420,35 @@ def _build_predrawn(
     Block 1 is the i.i.d. fallback. Always returns a contiguous float32 array.
     """
     import numpy as _np
-    arr = _np.asarray(daily_pnl, dtype=_np.float32)
+    if hasattr(mc, "_coerce_daily_inputs"):
+        arr_raw, flags_raw = mc._coerce_daily_inputs(daily_pnl)
+    else:
+        arr_raw = _np.asarray(daily_pnl, dtype=float)
+        flags_raw = arr_raw != 0.0
+    arr = _np.asarray(arr_raw, dtype=_np.float32)
+    flags = _np.asarray(flags_raw, dtype=bool)
+    if flags.shape != arr.shape:
+        flags = arr != 0.0
     n   = len(arr)
     block_size = max(1, int(block_size))
     if block_size == 1 or n <= block_size:
-        return rng.choice(arr, size=(n_sims, max_days), replace=True).astype(_np.float32)
+        idx = rng.integers(0, n, size=(n_sims, max_days))
+        pnl_out = arr[idx].astype(_np.float32)
+        flag_out = flags[idx]
+        return mc.make_daily_pnl_series(pnl_out, flag_out, source="predrawn_bootstrap", dtype=_np.float32)
     n_blocks = max_days // block_size + 1
     starts   = rng.integers(0, n - block_size + 1, size=(n_sims, n_blocks))
     out      = _np.empty((n_sims, n_blocks * block_size), dtype=_np.float32)
+    flag_out = _np.empty((n_sims, n_blocks * block_size), dtype=bool)
     for b in range(block_size):
         out[:, b::block_size] = arr[starts + b]
-    return out[:, :max_days]
+        flag_out[:, b::block_size] = flags[starts + b]
+    return mc.make_daily_pnl_series(
+        out[:, :max_days],
+        flag_out[:, :max_days],
+        source="predrawn_block_bootstrap",
+        dtype=_np.float32,
+    )
 
 
 def _wilson_ci(passed: int, total: int, z: float = 1.96) -> tuple[float, float]:

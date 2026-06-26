@@ -223,12 +223,13 @@ function Phase1Panel({ data, regime, extras }: { data: EvalPhaseResult; regime: 
     { label: "Profit Target",  value: pctOf(data.profit_pct, data.balance) },
     { label: "Max Daily Loss", value: pctOf(data.daily_dd_pct, data.balance) + " — daily reset" },
     { label: "Max Loss",       value: pctOf(data.total_dd_pct, data.balance) + " — fixed floor" },
-    { label: "Min Days",       value: String(data.min_days) },
+    { label: "Min Trade Days", value: String(data.min_days) },
     { label: "Pass Rate",      value: pct(data.pass_rate),
       tone: data.pass_rate >= 50 ? "good" : "bad" },
     // fix 1a: median + avg days side-by-side (median P50 is more robust for right-skewed distributions)
-    { label: "Median (P50)",   value: data.days_p50 > 0 ? data.days_p50.toFixed(1) + "d" : "N/A" },
-    { label: "Average",        value: data.avg_days > 0 ? data.avg_days.toFixed(1) + "d" : "N/A" },
+    { label: "Elapsed Median", value: data.days_p50 > 0 ? data.days_p50.toFixed(1) + "d" : "N/A" },
+    { label: "Elapsed Average", value: data.avg_days > 0 ? data.avg_days.toFixed(1) + "d" : "N/A" },
+    { label: "Trade Days P50", value: (data.trading_days_p50 ?? 0) > 0 ? Number(data.trading_days_p50).toFixed(1) + "d" : "N/A" },
   ];
   if (globalV && globalV.kelly_fraction != null) {
     const kv = String(globalV.kelly_verdict ?? "").toLowerCase();
@@ -324,14 +325,15 @@ function Phase2Panel({ data, extras }: { data: EvalPhaseResult; extras: Record<s
           { label: "Profit Target",  value: pctOf(data.profit_pct, data.balance) },
           { label: "Max Daily Loss", value: pctOf(data.daily_dd_pct, data.balance) },
           { label: "Max Loss",       value: pctOf(data.total_dd_pct, data.balance) },
-          { label: "Min Days",       value: String(data.min_days) },
+          { label: "Min Trade Days", value: String(data.min_days) },
           { label: "P2 Pass Rate",   value: pct(data.pass_rate),
             tone: data.pass_rate >= 50 ? "good" : "bad" },
           { label: "Combined",       value: pct(data.combined_pass_rate ?? 0),
             tone: (data.combined_pass_rate ?? 0) >= 20 ? "good" : "alt" },
           // fix 1a: median + avg days side-by-side for phase 2
-          { label: "Median (P50)",   value: data.days_p50 > 0 ? data.days_p50.toFixed(1) + "d" : "N/A" },
-          { label: "Average",        value: data.avg_days > 0 ? data.avg_days.toFixed(1) + "d" : "N/A" },
+          { label: "Elapsed Median", value: data.days_p50 > 0 ? data.days_p50.toFixed(1) + "d" : "N/A" },
+          { label: "Elapsed Average", value: data.avg_days > 0 ? data.avg_days.toFixed(1) + "d" : "N/A" },
+          { label: "Trade Days P50", value: (data.trading_days_p50 ?? 0) > 0 ? Number(data.trading_days_p50).toFixed(1) + "d" : "N/A" },
           ...(combinedDays != null
             ? [{ label: "P1+P2 Median Days", value: `${combinedDays} days` }]
             : []),
@@ -416,6 +418,8 @@ function FundedPanel({ data, extras }: { data: FundedResult; extras: Record<stri
     { label: "Avg Payouts",     value: data.avg_payout_count.toFixed(2) },
     { label: "First Payout",    value: data.avg_first_payout_day > 0
       ? data.avg_first_payout_day.toFixed(1) + "d" : "N/A" },
+    { label: "1st Payout Trades", value: (data.avg_first_payout_trading_day ?? 0) > 0
+      ? Number(data.avg_first_payout_trading_day).toFixed(1) + "d" : "N/A" },
   ];
 
   if (fundedV?.expected_monthly_usd != null) {
@@ -617,7 +621,7 @@ function EquityFan(props: EquityFanProps) {
     const l = baseLayout(t, title);
     return {
       ...l,
-      xaxis: { ...l.xaxis, title: { text: "Trading Day #", font: { color: t.text2 } } },
+      xaxis: { ...l.xaxis, title: { text: "Elapsed Day #", font: { color: t.text2 } } },
       yaxis: { ...l.yaxis, title: { text: "Account Equity ($)", font: { color: t.text2 } }, rangemode: "nonnegative" },
       hovermode: "x unified",
       height: 380,
@@ -760,7 +764,7 @@ function LongtermEquityFan({ paths, balance, ruinFloor, ruinPct, theme: t, bench
     const l = baseLayout(t, `Long-term — ${paths[0]?.length ?? 0}-Day Equity Fan`);
     return {
       ...l,
-      xaxis: { ...l.xaxis, title: { text: "Trading Day #", font: { color: t.text2 } } },
+      xaxis: { ...l.xaxis, title: { text: "Elapsed Day #", font: { color: t.text2 } } },
       yaxis: { ...l.yaxis, title: { text: "Account Equity ($)", font: { color: t.text2 } }, rangemode: "nonnegative" },
       hovermode: "x unified",
       height: 420,
@@ -1018,7 +1022,7 @@ function FailReasonsBar({ pcts, title, theme: t }: {
   );
 }
 
-function DaysHistogram({ records, avgDays, minDays, title, theme: t }: {
+function DaysHistogram({ records, avgDays, minDays: _minDays, title, theme: t }: {
   records: Array<{ passed?: boolean; days?: number }>;
   avgDays: number; minDays: number; title: string; theme: ChartTheme;
 }) {
@@ -1031,27 +1035,22 @@ function DaysHistogram({ records, avgDays, minDays, title, theme: t }: {
     type: "histogram", x: days, nbinsx: 30,
     marker: { color: t.pass, opacity: 0.8 },
     histnorm: "percent",
-    hovertemplate: "Day %{x}: %{y:.1f}%<extra></extra>",
+    hovertemplate: "Elapsed day %{x}: %{y:.1f}%<extra></extra>",
   } as Data];
   return (
     <Plot data={data}
       layout={{ ...baseLayout(t, title),
-                xaxis: { ...baseLayout(t).xaxis, title: { text: "Trading Days", font: { color: t.text2 } } },
+                xaxis: { ...baseLayout(t).xaxis, title: { text: "Elapsed Days", font: { color: t.text2 } } },
                 yaxis: { ...baseLayout(t).yaxis, title: { text: "Probability (%)", font: { color: t.text2 } } },
                 bargap: 0.06, height: 320,
                 shapes: [
                   { type: "line", x0: avgDays, x1: avgDays, yref: "paper", y0: 0, y1: 1,
                     line: { color: t.accent2, dash: "dash", width: 1.5 } },
-                  { type: "line", x0: minDays, x1: minDays, yref: "paper", y0: 0, y1: 1,
-                    line: { color: t.alt, dash: "dot", width: 1.5 } },
                 ],
                 annotations: [
                   { x: avgDays, y: 1, xref: "x", yref: "paper",
                     text: `Avg: ${avgDays.toFixed(1)}d`,
                     font: { color: t.accent2, size: 11 }, showarrow: false, yshift: 12 },
-                  { x: minDays, y: 1, xref: "x", yref: "paper",
-                    text: `Min: ${minDays}d`,
-                    font: { color: t.alt, size: 11 }, showarrow: false, yshift: -2 },
                 ],
               } as Partial<Layout>}
       config={PLOT_CONFIG} style={{ width: "100%" }} useResizeHandler
@@ -1072,7 +1071,7 @@ function SurvivalCurve({ survival, theme: t }: { survival: number[]; theme: Char
   return (
     <Plot data={data}
       layout={{ ...baseLayout(t, "Funded — Survival Curve"),
-                xaxis: { ...baseLayout(t).xaxis, title: { text: "Trading Day #", font: { color: t.text2 } } },
+                xaxis: { ...baseLayout(t).xaxis, title: { text: "Elapsed Day #", font: { color: t.text2 } } },
                 yaxis: { ...baseLayout(t).yaxis, title: { text: "% of Accounts Still Active", font: { color: t.text2 } },
                          range: [0, 105] },
                 shapes: [
@@ -1196,7 +1195,7 @@ function FirstPayoutHistogram({ records, theme: t }: {
   return (
     <Plot data={data}
       layout={{ ...baseLayout(t, "Funded — Days to First Payout"),
-                xaxis: { ...baseLayout(t).xaxis, title: { text: "Trading Day", font: { color: t.text2 } } },
+                xaxis: { ...baseLayout(t).xaxis, title: { text: "Elapsed Day", font: { color: t.text2 } } },
                 yaxis: { ...baseLayout(t).yaxis, title: { text: "Count", font: { color: t.text2 } } },
                 shapes: [{ type: "line", x0: avg, x1: avg, yref: "paper", y0: 0, y1: 1,
                            line: { color: t.alt, dash: "dash", width: 1.5 } }],
@@ -1223,7 +1222,7 @@ function BreachDayHistogram({ records, theme: t }: {
   return (
     <Plot data={data}
       layout={{ ...baseLayout(t, "Funded — Breach Day Distribution"),
-                xaxis: { ...baseLayout(t).xaxis, title: { text: "Trading Day of Breach", font: { color: t.text2 } } },
+                xaxis: { ...baseLayout(t).xaxis, title: { text: "Elapsed Day of Breach", font: { color: t.text2 } } },
                 yaxis: { ...baseLayout(t).yaxis, title: { text: "Count", font: { color: t.text2 } } },
                 shapes: [{ type: "line", x0: avg, x1: avg, yref: "paper", y0: 0, y1: 1,
                            line: { color: t.alt, dash: "dash", width: 1.5 } }],

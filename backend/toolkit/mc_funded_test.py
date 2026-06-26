@@ -154,6 +154,61 @@ def clean_numeric(series):
     )
 
 
+class DailyPnlSeries(np.ndarray):
+    """Daily P&L array carrying FTMO trade-open day metadata."""
+
+    def __new__(cls, pnl, trade_open_flags=None, calendar_dates=None, source="", dtype=float):
+        obj = np.asarray(pnl, dtype=dtype).view(cls)
+        if trade_open_flags is None:
+            trade_open_flags = _default_trade_open_flags(obj)
+        flags = np.asarray(trade_open_flags, dtype=bool)
+        if flags.shape != obj.shape:
+            raise ValueError("trade_open_flags must have the same shape as pnl")
+        obj.trade_open_flags = flags
+        obj.calendar_dates = list(calendar_dates) if calendar_dates is not None else None
+        obj.trade_day_source = source
+        return obj
+
+    def __array_finalize__(self, obj):
+        if obj is None:
+            return
+        self.trade_open_flags = getattr(obj, "trade_open_flags", None)
+        self.calendar_dates = getattr(obj, "calendar_dates", None)
+        self.trade_day_source = getattr(obj, "trade_day_source", "")
+
+
+def _default_trade_open_flags(pnl):
+    """Fallback when a caller provides only numbers: non-zero P&L implies a trade day."""
+    arr = np.asarray(pnl, dtype=float)
+    return arr != 0.0
+
+
+def make_daily_pnl_series(pnl, trade_open_flags=None, calendar_dates=None, source="", dtype=float):
+    return DailyPnlSeries(pnl, trade_open_flags, calendar_dates, source, dtype=dtype)
+
+
+def _coerce_trade_open_flags(source, pnl):
+    flags = getattr(source, "trade_open_flags", None)
+    if flags is None:
+        flags = getattr(source, "trading_day_flags", None)
+    flags_arr = None if flags is None else np.asarray(flags, dtype=bool)
+    if flags_arr is None or flags_arr.shape != np.asarray(pnl).shape:
+        flags_arr = _default_trade_open_flags(pnl)
+    return flags_arr
+
+
+def _coerce_daily_inputs(daily_pnl):
+    pnl = np.asarray(daily_pnl, dtype=float)
+    return pnl, _coerce_trade_open_flags(daily_pnl, pnl)
+
+
+def _first_present_column(df, names):
+    for name in names:
+        if name in df.columns:
+            return name
+    return None
+
+
 def load_tradingview_csv(filepath):
     path = pathlib.Path(filepath)
     if not path.exists():
@@ -181,9 +236,16 @@ def load_tradingview_csv(filepath):
     }
     df = raw.rename(columns=rename_map).copy()
 
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
     if "type" in df.columns:
-        mask = df["type"].str.lower().str.contains("exit|close|sell|cover", na=False)
-        df   = df[mask].copy()
+        trade_type = df["type"].astype(str).str.lower()
+        mask = trade_type.str.contains("exit|close|sell|cover", na=False)
+        if "date" in df.columns:
+            entry_mask = trade_type.str.contains("entry|buy|long|short", na=False) & ~mask
+            df["_open_time"] = df["date"].where(entry_mask).ffill()
+        df = df[mask].copy()
 
     if df.empty:
         sys.exit("[ERROR] No exit trades found. Check CSV format.")
@@ -196,8 +258,10 @@ def load_tradingview_csv(filepath):
         sys.exit("[ERROR] Could not find profit column. Available: " + str(list(df.columns)))
 
     if "date" in df.columns:
-        df["date"]       = pd.to_datetime(df["date"], errors="coerce")
         df["trade_date"] = df["date"].dt.date
+        if "_open_time" in df.columns:
+            df["open_time"] = df["_open_time"]
+            df["open_date"] = pd.to_datetime(df["open_time"], errors="coerce").dt.date
     else:
         df["trade_date"] = None
 
@@ -329,6 +393,8 @@ def load_mt5_html(filepath):
                  "profit", "balance", "comment"]
 
     df = pd.DataFrame(rows, columns=col_names[:len(rows[0])])
+    direction_lc = df["direction"].astype(str).str.lower()
+    df["_open_time_raw"] = df["time"].where(direction_lc == "in").ffill()
 
     # Extract regime from entry ("in") rows before filtering them out.
     # The EA writes "R:X" in the comment of the entry deal, not the exit deal.
@@ -382,6 +448,9 @@ def load_mt5_html(filepath):
     # Parse timestamp
     df["time"] = pd.to_datetime(df["time"], format="%Y.%m.%d %H:%M:%S", errors="coerce")
     df["trade_date"] = df["time"].dt.date
+    if "_open_time_raw" in df.columns:
+        df["open_time"] = pd.to_datetime(df["_open_time_raw"], format="%Y.%m.%d %H:%M:%S", errors="coerce")
+        df["open_date"] = df["open_time"].dt.date
     if pd.notna(report_start):
         df.attrs["calendar_start"] = report_start.date()
     if pd.notna(report_end):
@@ -412,8 +481,9 @@ def get_daily_pnl(df, scale):
     """
     Aggregate trades to daily P&L and scale to the target account size.
     Each element = one calendar day when trade dates are available. Days with
-    no closed trades are included as 0 P&L, so MC "days to pass" is elapsed
-    calendar time rather than a count of trade-active days.
+    no closed trades are included as 0 P&L. The returned array also carries
+    ``trade_open_flags`` metadata so FTMO minimum trading days are counted only
+    on days where at least one position was opened.
 
     Prefers the ``net_profit`` column when present (MT5 source — includes
     commission + swap). Falls back to ``profit`` for sources where the
@@ -423,20 +493,45 @@ def get_daily_pnl(df, scale):
     profits_raw = df[pnl_col].to_numpy(dtype=float) * scale
     has_dates   = "trade_date" in df.columns and df["trade_date"].notna().any()
     if has_dates:
+        work = df.assign(ps=profits_raw)
         daily = (
-            df.assign(ps=profits_raw)
+            work
             .groupby("trade_date")["ps"]
             .sum()
         )
-        start = df.attrs.get("calendar_start") or daily.index.min()
-        end = df.attrs.get("calendar_end") or daily.index.max()
+        open_col = _first_present_column(df, ("open_date", "entry_date", "opened_date"))
+        if open_col is not None and df[open_col].notna().any():
+            open_daily = df.dropna(subset=[open_col]).groupby(open_col).size().astype(bool)
+            trade_day_source = open_col
+        else:
+            open_daily = df.dropna(subset=["trade_date"]).groupby("trade_date").size().astype(bool)
+            trade_day_source = "trade_date_fallback"
+
+        start_candidates = [
+            df.attrs.get("calendar_start"),
+            daily.index.min() if len(daily) else None,
+            open_daily.index.min() if len(open_daily) else None,
+        ]
+        end_candidates = [
+            df.attrs.get("calendar_end"),
+            daily.index.max() if len(daily) else None,
+            open_daily.index.max() if len(open_daily) else None,
+        ]
+        start = min(pd.to_datetime(v) for v in start_candidates if v is not None)
+        end = max(pd.to_datetime(v) for v in end_candidates if v is not None)
         calendar = pd.date_range(
             start=pd.to_datetime(start),
             end=pd.to_datetime(end),
             freq="D",
         ).date
-        return daily.reindex(calendar, fill_value=0.0).to_numpy(dtype=float)
-    return profits_raw
+        pnl_values = daily.reindex(calendar, fill_value=0.0).to_numpy(dtype=float)
+        trade_open_flags = open_daily.reindex(calendar, fill_value=False).to_numpy(dtype=bool)
+        return make_daily_pnl_series(pnl_values, trade_open_flags, calendar, source=trade_day_source)
+    return make_daily_pnl_series(
+        profits_raw,
+        np.ones(len(profits_raw), dtype=bool),
+        source="no_dates_assume_each_sample_is_trade_day",
+    )
 
 
 # =============================================================================
@@ -517,15 +612,21 @@ def _run_eval_phase_vec(pnl_mat, balance, profit_target_pct, max_daily_dd_pct,
 
     # ── equity matrix ──────────────────────────────────────────────────────
     # shape: (n_sims, max_sim_days); pnl_mat may be float32 — promote to f64.
-    pnl = np.asarray(pnl_mat[:n_sims], dtype=np.float64)
+    pnl_full = np.asarray(pnl_mat, dtype=np.float64)
+    trade_full = _coerce_trade_open_flags(pnl_mat, pnl_full)
+    pnl = pnl_full[:n_sims]
+    trade_open = trade_full[:n_sims]
     if pnl.shape[1] < max_sim_days:
         # Pad with resampled columns (shouldn't normally happen, but be safe).
         pad = max_sim_days - pnl.shape[1]
         pnl = np.hstack([pnl, pnl[:, :pad]])
+        trade_open = np.hstack([trade_open, trade_open[:, :pad]])
     pnl = pnl[:, :max_sim_days]
+    trade_open = trade_open[:, :max_sim_days]
 
     cum_pnl    = np.cumsum(pnl, axis=1)               # (n_sims, max_sim_days)
     equity_mat = balance + cum_pnl                     # (n_sims, max_sim_days)
+    ftmo_trade_counts = np.cumsum(trade_open, axis=1)  # days with >=1 opened trade
 
     # ── daily DD breach: pnl[i,t] < -eff_daily_loss ───────────────────────
     # Because daily floor = equity_before + pnl >= equity_before - daily_loss
@@ -547,10 +648,8 @@ def _run_eval_phase_vec(pnl_mat, balance, profit_target_pct, max_daily_dd_pct,
     total_dd_breach  = equity_mat < floor_mat          # (n_sims, max_sim_days)
     any_breach       = daily_dd_breach | total_dd_breach
 
-    # ── profit target (with min_days gate) ────────────────────────────────
-    profit_ok = cum_pnl >= profit_tgt_abs              # (n_sims, max_sim_days)
-    if min_days > 0:
-        profit_ok[:, :min_days] = False
+    # ── profit target (with FTMO min trading-day gate) ─────────────────────
+    profit_ok = (cum_pnl >= profit_tgt_abs) & (ftmo_trade_counts >= int(min_days))
 
     # ── first-event index per sim ──────────────────────────────────────────
     def _first_true(mask):
@@ -599,12 +698,15 @@ def _run_eval_phase_vec(pnl_mat, balance, profit_target_pct, max_daily_dd_pct,
     # ── build results list matching run_eval_phase output ─────────────────
     final_eq_idx = np.minimum(days_arr - 1, max_sim_days - 1)
     final_equity = equity_mat[rows, final_eq_idx]
+    final_trade_days = ftmo_trade_counts[rows, final_eq_idx]
 
     results = [
         {
             "passed"      : bool(passed[i]),
             "fail_reason" : None if passed[i] else fail_reason[i],
             "days"        : int(days_arr[i]),
+            "elapsed_days": int(days_arr[i]),
+            "trading_days": int(final_trade_days[i]),
             "final_equity": float(final_equity[i]),
         }
         for i in range(n_sims)
@@ -630,8 +732,10 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
         Fixed floor = balance x (1 - max_total_dd_pct). Never changes.
 
     Min trading days:
-        Each element in daily_pnl represents one trading day.
-        Must accumulate min_days before the profit target check is run.
+        ``days`` is elapsed simulation/calendar days. FTMO trading days are
+        counted separately from ``trade_open_flags`` metadata: a day counts
+        only when at least one position was opened. Profit target can pass
+        only after ``trading_days >= min_days``.
 
     intraday_dd_factor:
         Safety factor applied to BOTH the daily and total DD limits before
@@ -662,6 +766,8 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
         retained on the returned ``curves`` list (others are dropped to save
         memory). When 0, all curves are returned (legacy behaviour).
     """
+    daily_pnl, daily_trade_open = _coerce_daily_inputs(daily_pnl)
+
     # v0.9.x #25 — vectorised fast path for the common production case:
     # predrawn path matrix available, no Markov sampling needed.
     # Falls back to the Python loop below for Markov or live-RNG paths.
@@ -699,6 +805,10 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
     curves  = []
     _trailing = dd_style in ("trailing_eod", "trailing_intraday")
     _keep_n   = max(0, int(keep_curves))
+    predrawn_trade_open = None
+    if predrawn_pnl is not None:
+        predrawn_arr = np.asarray(predrawn_pnl, dtype=float)
+        predrawn_trade_open = _coerce_trade_open_flags(predrawn_pnl, predrawn_arr)
 
     # v0.6.0: ~200 progress ticks per phase (4× finer than before) for a
     # smoother progress bar. Cheap — just a print every ~50 sims at default n.
@@ -710,7 +820,8 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
         if _i and (_i % 500 == 0):
             check_cancelled()
         equity        = balance
-        days_traded   = 0
+        elapsed_days  = 0
+        trading_days  = 0
         passed        = False
         fail_reason   = None
         eq_path       = [equity]
@@ -738,13 +849,19 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
                 pool = regime_pnl_pools.get(current_regime, [])
                 if len(pool) >= 5:
                     day_pnl = float(rng.choice(pool))
+                    day_has_open_trade = day_pnl != 0.0
                 else:
-                    day_pnl = float(rng.choice(daily_pnl))
+                    idx = int(rng.integers(0, len(daily_pnl)))
+                    day_pnl = float(daily_pnl[idx])
+                    day_has_open_trade = bool(daily_trade_open[idx])
             elif predrawn_pnl is not None:
                 _d = min(_day, predrawn_pnl.shape[1] - 1)
                 day_pnl = float(predrawn_pnl[_i % len(predrawn_pnl), _d])
+                day_has_open_trade = bool(predrawn_trade_open[_i % len(predrawn_trade_open), _d]) if predrawn_trade_open is not None else day_pnl != 0.0
             else:
-                day_pnl = float(rng.choice(daily_pnl))
+                idx = int(rng.integers(0, len(daily_pnl)))
+                day_pnl = float(daily_pnl[idx])
+                day_has_open_trade = bool(daily_trade_open[idx])
 
             # --- apply P&L and check rules (unchanged logic) ---
             day_open     = equity          # midnight snapshot for this day
@@ -754,7 +871,9 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
                 candidate = day_open * (1.0 - max_total_dd_pct * intraday_dd_factor)
                 if candidate > current_floor:
                     current_floor = candidate
-            days_traded += 1
+            elapsed_days += 1
+            if day_has_open_trade:
+                trading_days += 1
             equity      += day_pnl
             equity       = max(equity, 0.0)
             eq_path.append(equity)
@@ -772,7 +891,7 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
                 break
 
             # profit target reached and min days met
-            if (equity - balance) >= profit_target_abs and days_traded >= min_days:
+            if (equity - balance) >= profit_target_abs and trading_days >= min_days:
                 passed = True
                 break
 
@@ -793,7 +912,9 @@ def run_eval_phase(daily_pnl, balance, profit_target_pct, max_daily_dd_pct,
         results.append({
             "passed"      : passed,
             "fail_reason" : fail_reason if not passed else None,
-            "days"        : days_traded,
+            "days"        : elapsed_days,
+            "elapsed_days": elapsed_days,
+            "trading_days": trading_days,
             "final_equity": equity,
         })
         # Curve retention: legacy (keep all) when keep_curves==0, else first N.
@@ -2456,6 +2577,11 @@ def _eval_phase_stats(results, n_total):
     }
     pass_df   = df_r[df_r["passed"]]
     days_arr  = pass_df["days"].values if len(pass_df) else np.array([0])
+    trade_days_arr = (
+        pass_df["trading_days"].values
+        if len(pass_df) and "trading_days" in pass_df.columns
+        else np.array([0])
+    )
     return {
         "pass_rate"              : pass_rate,
         "n_passed"               : n_passed,
@@ -2470,6 +2596,11 @@ def _eval_phase_stats(results, n_total):
         "days_p50"               : float(np.percentile(days_arr, 50)) if len(days_arr) else 0.0,
         "days_p90"               : float(np.percentile(days_arr, 90)) if len(days_arr) else 0.0,
         "days_worst"             : int(days_arr.max()) if len(days_arr) else 0,
+        "avg_trading_days"       : float(trade_days_arr.mean()) if len(trade_days_arr) else 0.0,
+        "trading_days_p10"       : float(np.percentile(trade_days_arr, 10)) if len(trade_days_arr) else 0.0,
+        "trading_days_p50"       : float(np.percentile(trade_days_arr, 50)) if len(trade_days_arr) else 0.0,
+        "trading_days_p90"       : float(np.percentile(trade_days_arr, 90)) if len(trade_days_arr) else 0.0,
+        "trading_days_worst"     : int(trade_days_arr.max()) if len(trade_days_arr) else 0,
         "results_df"             : df_r,
     }
 
@@ -2496,7 +2627,6 @@ def run_mc_phase1(daily_pnl: np.ndarray, *, balance=100_000, profit_pct=0.10,
     ``run_eval_phase`` docstring. When ``keep_curves > 0`` the result dict
     additionally contains ``equity_curves`` (padded to ``max_days+1``).
     """
-    daily_pnl = np.asarray(daily_pnl, dtype=float)
     rng = _make_rng(seed)
     if trans_matrix is None and regime_transition is not None:
         trans_matrix = regime_transition
@@ -2539,7 +2669,6 @@ def run_mc_phase2(daily_pnl, *, balance=100_000, profit_pct=0.05,
     ``intraday_dd_factor``, ``dd_style``, ``consistency_max_daily_pct`` and
     ``keep_curves`` semantics.
     """
-    daily_pnl = np.asarray(daily_pnl, dtype=float)
     rng = _make_rng(seed)
     results, curves = run_eval_phase(
         daily_pnl, balance, profit_pct, daily_dd_pct, total_dd_pct,
@@ -2641,7 +2770,7 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
             ``survival``      — list len ``max_days+1``, fraction of sims
                                  still active at day d (no breach yet).
     """
-    daily_pnl      = np.asarray(daily_pnl, dtype=float)
+    daily_pnl, daily_trade_open = _coerce_daily_inputs(daily_pnl)
     if rng is None:
         rng = _make_rng(None)
     if max_days is None or max_days <= 0:
@@ -2655,6 +2784,10 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
     _track_consistency = consistency_max_daily_pct is not None
     # Effective per-day-recompute total-DD fraction (with intraday tightener).
     _eff_total_dd  = total_dd_pct * intraday_dd_factor
+    predrawn_trade_open = None
+    if predrawn_pnl is not None:
+        predrawn_arr = np.asarray(predrawn_pnl, dtype=float)
+        predrawn_trade_open = _coerce_trade_open_flags(predrawn_pnl, predrawn_arr)
 
     results = []
     consistency_breaches = 0
@@ -2669,12 +2802,15 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
         current_floor     = total_floor
         days_active       = 0
         days_since_payout = 0
+        trading_days_active = 0
+        trading_days_since_payout = 0
         payout_count      = 0
         total_earnings    = 0.0
         breach            = False
         breach_reason     = None
         breach_day        = None
         first_payout_day  = None
+        first_payout_trading_day = None
         keep_this         = (_keep_n == 0) or (_i < _keep_n)
         eq_path = [equity] if keep_this else None
         fl_path = [current_floor] if keep_this else None
@@ -2690,15 +2826,21 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
             if predrawn_pnl is not None:
                 _d = min(_day, predrawn_pnl.shape[1] - 1)
                 day_pnl = float(predrawn_pnl[_i % len(predrawn_pnl), _d])
+                day_has_open_trade = bool(predrawn_trade_open[_i % len(predrawn_trade_open), _d]) if predrawn_trade_open is not None else day_pnl != 0.0
             elif use_markov:
                 current_regime = int(rng.choice(5, p=trans_matrix[current_regime]))
                 pool = regime_pnl_pools.get(current_regime, [])
                 if len(pool) >= 5:
                     day_pnl = float(rng.choice(pool))
+                    day_has_open_trade = day_pnl != 0.0
                 else:
-                    day_pnl = float(rng.choice(daily_pnl))
+                    idx = int(rng.integers(0, len(daily_pnl)))
+                    day_pnl = float(daily_pnl[idx])
+                    day_has_open_trade = bool(daily_trade_open[idx])
             else:
-                day_pnl = float(rng.choice(daily_pnl))
+                idx = int(rng.integers(0, len(daily_pnl)))
+                day_pnl = float(daily_pnl[idx])
+                day_has_open_trade = bool(daily_trade_open[idx])
             day_open           = equity
             # Trailing DD: ratchet the floor UP at the start of each new day
             # if the previous EOD equity supports a higher floor. Never down.
@@ -2708,6 +2850,9 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
                     current_floor = candidate
             days_active       += 1
             days_since_payout += 1
+            if day_has_open_trade:
+                trading_days_active += 1
+                trading_days_since_payout += 1
             equity            += day_pnl
             equity             = max(equity, 0.0)
             if _track_consistency:
@@ -2726,11 +2871,11 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
 
             profit_above = equity - balance
             sched_hit = (payout_mode in ("schedule", "both")
-                         and days_since_payout >= payout_cadence_days
+                         and trading_days_since_payout >= payout_cadence_days
                          and profit_above > 0)
             thr_hit   = (payout_mode in ("threshold", "both")
                          and profit_above >= balance * payout_threshold)
-            elig      = days_since_payout >= min_days_payout
+            elig      = trading_days_since_payout >= min_days_payout
             # Gate the FIRST payout by an absolute days-from-start threshold.
             first_gate_ok = (
                 first_payout_day is not None
@@ -2742,6 +2887,7 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
                 payout_count   += 1
                 if first_payout_day is None:
                     first_payout_day = days_active
+                    first_payout_trading_day = trading_days_active
                 if compound_profits:
                     # v0.6.0 compound mode: nothing withdrawn — full profit
                     # stays in the account. Floor ratchets up to a fresh % of
@@ -2763,11 +2909,14 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
                     if candidate > current_floor:
                         current_floor = candidate
                 days_since_payout = 0
+                trading_days_since_payout = 0
             if keep_this:
                 eq_path.append(equity); fl_path.append(current_floor)
 
-        # Survival: each day from 0..days_active inclusive counts as "active".
-        survival_counts[: days_active + 1] += 1
+        # Survival[d] means still active after day d. A breach on day N is not
+        # active at the end of day N, so count only through N-1 for breaches.
+        survival_to = max(days_active - 1, 0) if breach else days_active
+        survival_counts[: survival_to + 1] += 1
 
         # Optional consistency-rule post-check (funded variant: separate counter).
         cons_breach = False
@@ -2786,7 +2935,9 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
             "payout_count"       : payout_count,
             "total_earnings"     : total_earnings,
             "first_payout_day"   : first_payout_day,
+            "first_payout_trading_day": first_payout_trading_day,
             "days_active"        : days_active,
+            "trading_days_active": trading_days_active,
             "consistency_breach" : cons_breach,
         })
 
@@ -2805,6 +2956,7 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
     }
     paid_df = df_r[df_r["payout_count"] > 0]
     fpd_arr = paid_df["first_payout_day"].dropna().values
+    fptd_arr = paid_df["first_payout_trading_day"].dropna().values if "first_payout_trading_day" in paid_df.columns else []
     out: dict = {
         "breach_rate"          : breach_rate,
         "payout_rate"          : payout_rate,
@@ -2812,7 +2964,9 @@ def _run_funded_loop(daily_pnl, *, balance=100_000, daily_dd_pct=0.05,
         "avg_total_earnings"   : float(df_r["total_earnings"].mean()),
         "avg_payout_count"     : float(df_r["payout_count"].mean()),
         "avg_first_payout_day" : float(fpd_arr.mean()) if len(fpd_arr) else 0.0,
+        "avg_first_payout_trading_day": float(fptd_arr.mean()) if len(fptd_arr) else 0.0,
         "avg_days_active"      : float(df_r["days_active"].mean()),
+        "avg_trading_days_active": float(df_r["trading_days_active"].mean()) if "trading_days_active" in df_r.columns else 0.0,
         "consistency_breaches" : int(consistency_breaches),
         "consistency_breach_rate": (consistency_breaches / max(n_sims, 1)) * 100,
         "results_df"           : df_r,
@@ -3094,10 +3248,10 @@ def lot_size_sweep(daily_pnl_per_lot_unit, base_lot, *, lots=None, **p1_kwargs) 
     """Scale daily_pnl by lot ratio and run Phase 1 per lot; return DataFrame(lot, pass_rate, median_days, p95_total_dd)."""
     if lots is None:
         lots = [base_lot * f for f in (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)]
-    daily_pnl = np.asarray(daily_pnl_per_lot_unit, dtype=float)
+    daily_pnl, trade_open_flags = _coerce_daily_inputs(daily_pnl_per_lot_unit)
     rows = []
     for lot in lots:
-        scaled = daily_pnl * (lot / base_lot)
+        scaled = make_daily_pnl_series(daily_pnl * (lot / base_lot), trade_open_flags)
         r      = run_mc_phase1(scaled, **p1_kwargs)
         df_r   = r["results_df"]
         pass_df = df_r[df_r["passed"]]

@@ -92,6 +92,11 @@ export interface EvalPhaseResult {
   days_p50: number;
   days_p90: number;
   days_worst: number;
+  avg_trading_days?: number;
+  trading_days_p10?: number;
+  trading_days_p50?: number;
+  trading_days_p90?: number;
+  trading_days_worst?: number;
   results_df: PhaseResultsDF;
   equity_curves?: number[][];
   // Echoed parameters used by the dashboard KPI table.
@@ -114,7 +119,9 @@ export interface FundedResult {
   avg_total_earnings: number;
   avg_payout_count: number;
   avg_first_payout_day: number;
+  avg_first_payout_trading_day?: number;
   avg_days_active: number;
+  avg_trading_days_active?: number;
   results_df: PhaseResultsDF;
   equity_curves?: number[][];
   floor_curves?: number[][];
