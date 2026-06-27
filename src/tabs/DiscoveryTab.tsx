@@ -165,10 +165,11 @@ export default function DiscoveryTab() {
   }, [selectedDatasetId, timeframe, xauusdDatasets]);
 
   const selectedDataset = xauusdDatasets.find((dataset) => dataset.dataset_id === selectedDatasetId) ?? null;
-  const datasetReady = !!selectedDataset
-    && selectedDataset.timeframes.includes(timeframe)
-    && selectedDataset.timeframes.includes("h1")
-    && selectedDataset.timeframes.includes("h4");
+  const requiredTimeframes = useMemo(() => [timeframe, "h1", "h4"], [timeframe]);
+  const missingRequiredTimeframes = selectedDataset
+    ? requiredTimeframes.filter((value) => !selectedDataset.timeframes.includes(value))
+    : requiredTimeframes;
+  const datasetReady = !!selectedDataset && missingRequiredTimeframes.length === 0;
 
   const tfFilesUserSet = ["TF1_FILE", "TF2_FILE", "TF3_FILE", "TF4_FILE", "TF5_FILE"].some(
     (k) => (overrides[k]?.trim() || persistentDefaults[k]) != null,
@@ -591,8 +592,10 @@ export default function DiscoveryTab() {
         </div>
         {selectedDataset && (
           <div className={`current-import-banner ${datasetReady ? "" : "banner-warn"}`}>
-            <strong>{datasetReady ? "Ready:" : "Missing bars:"}</strong>{" "}
-            {selectedDataset.symbols.join(", ")} - {selectedDataset.timeframes.map((value) => value.toUpperCase()).join(", ")}
+            <strong>{datasetReady ? "Ready:" : "Missing required bars:"}</strong>{" "}
+            {datasetReady
+              ? `${selectedDataset.symbols.join(", ")} - ${selectedDataset.timeframes.map((value) => value.toUpperCase()).join(", ")}`
+              : `${missingRequiredTimeframes.map((value) => value.toUpperCase()).join(", ")} required; dataset has ${selectedDataset.timeframes.map((value) => value.toUpperCase()).join(", ") || "none"}`}
             <span className="field-hint" style={{ marginTop: 4 }}>
               {selectedDataset.requested_from.slice(0, 10)} to {selectedDataset.requested_to.slice(0, 10)}
             </span>

@@ -122,6 +122,25 @@ def test_mt5_csv_publish_creates_catalog_dataset(tmp_path: Path, monkeypatch) ->
     assert {"bid_open", "ask_open", "spread_mean"}.issubset(frame.columns)
 
 
+def test_mt5_import_rejects_partial_timeframe_result() -> None:
+    tf_specs = [
+        {"prefix": "m", "time_value": 5, "trading_days": 10},
+        {"prefix": "h", "time_value": 1, "trading_days": 10},
+        {"prefix": "h", "time_value": 4, "trading_days": 10},
+    ]
+    result = {
+        "ok": False,
+        "files": [
+            {"label": "m5", "ok": True, "candles": 100, "path": "xauusd_m5.csv"},
+            {"label": "h1", "ok": True, "candles": 10, "path": "xauusd_h1.csv"},
+            {"label": "h4", "ok": False, "candles": 0, "path": "", "error": "No data"},
+        ],
+    }
+
+    with pytest.raises(RuntimeError, match="H4: No data"):
+        mt5_import._validate_mt5_result(tf_specs, result)
+
+
 def _ticks(day: str, price: float) -> pd.DataFrame:
     times = pd.to_datetime([f"{day}T00:00:01Z", f"{day}T00:00:30Z"], utc=True)
     return pd.DataFrame({

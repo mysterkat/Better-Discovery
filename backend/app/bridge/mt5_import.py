@@ -290,6 +290,46 @@ def _mt5_csv_to_bars(path: Path) -> pd.DataFrame:
     return bars.sort_values("time").reset_index(drop=True)
 
 
+def _tf_label_from_spec(spec: dict[str, Any]) -> str:
+    prefix = str(spec["prefix"])
+    time_value = int(spec["time_value"])
+    if prefix in ("d", "D"):
+        return "d1"
+    if prefix == "W":
+        return "W1"
+    if prefix == "M":
+        return "M1"
+    return f"{prefix.lower()}{time_value}"
+
+
+def _validate_mt5_result(tf_specs: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    """Reject partial MT5 imports instead of publishing incomplete datasets."""
+    expected = [_tf_label_from_spec(spec).lower() for spec in tf_specs]
+    files = result.get("files") or []
+    by_label = {
+        str(item.get("label", "")).lower(): item
+        for item in files
+        if isinstance(item, dict)
+    }
+    problems: list[str] = []
+    for label in expected:
+        item = by_label.get(label)
+        display = label.upper()
+        if item is None:
+            problems.append(f"{display}: missing from MT5 result")
+            continue
+        if not item.get("ok", False):
+            problems.append(f"{display}: {item.get('error') or 'download failed'}")
+            continue
+        if not item.get("path"):
+            problems.append(f"{display}: no output file path")
+            continue
+        if int(item.get("candles") or 0) <= 0:
+            problems.append(f"{display}: no bars returned")
+    if problems:
+        raise RuntimeError("MT5 import incomplete: " + "; ".join(problems))
+
+
 def _publish_mt5_dataset(
     symbols: list[str],
     mt5_result: dict[str, Any],
@@ -397,6 +437,7 @@ def fetch_historical(
     )
     if not result.get("ok", False) and result.get("error") and not result.get("files"):
         raise RuntimeError(str(result["error"]))
+    _validate_mt5_result(tf_specs, result)
     if cleared is not None:
         result["cleared"] = cleared
     if publish_dataset:
@@ -437,6 +478,13 @@ def fetch_many_symbols(
                 "symbol": sym, "ok": False,
                 "error": f"{type(exc).__name__}: {exc}",
             })
+    failures = [
+        f"{item['symbol']}: {item.get('error')}"
+        for item in per_symbol
+        if not item.get("ok", False)
+    ]
+    if failures:
+        raise RuntimeError("MT5 basket import incomplete: " + "; ".join(failures))
     return {
         "ok": any(r.get("ok", False) for r in per_symbol),
         "save_folder": folder,
