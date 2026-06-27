@@ -68,6 +68,28 @@ def test_discovery_csv_is_staged_inside_dataset(tmp_path: Path) -> None:
     assert Path(item.path).is_file()
 
 
+def test_catalog_delete_removes_dataset_folder_and_current_pointer(tmp_path: Path) -> None:
+    catalog = MarketDataCatalog(tmp_path)
+    manifest = DatasetManifest(
+        dataset_id="sample", provider="dukascopy", venue="test", symbols=["XAUUSD"],
+        timeframes=["m1"], requested_from="2025-01-01", requested_to="2025-01-02",
+        created_at="2025-01-02T00:00:00Z",
+    )
+    catalog.save_manifest(manifest)
+    (catalog.folder("sample") / "payload.txt").write_text("data", encoding="utf-8")
+    (tmp_path / "current.json").write_text('{"dataset_id": "sample"}', encoding="utf-8")
+
+    result = catalog.delete("sample")
+
+    assert result["dataset_id"] == "sample"
+    assert not catalog.folder("sample").exists()
+    assert not (tmp_path / "current.json").exists()
+    with pytest.raises(FileNotFoundError):
+        catalog.delete("sample")
+    with pytest.raises(ValueError):
+        catalog.delete("..")
+
+
 def test_mt5_csv_publish_creates_catalog_dataset(tmp_path: Path, monkeypatch) -> None:
     import app.market_data.catalog as catalog_module
 

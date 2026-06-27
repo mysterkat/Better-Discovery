@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   checkMt5,
+  clearCurrentImport,
+  deleteMarketDataset,
   fetchMt5Data,
   fetchMt5DataMany,
   fetchProviderData,
@@ -62,6 +64,8 @@ export default function DataImportTab() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [clearingCurrentImport, setClearingCurrentImport] = useState(false);
+  const [deletingDatasetId, setDeletingDatasetId] = useState<string | null>(null);
   const setActiveJob = useJobs((state) => state.setActive);
   const job = useJobs((state) => jobId ? state.jobs[jobId] : undefined);
   const running = starting || job?.status === "pending" || job?.status === "running";
@@ -149,6 +153,23 @@ export default function DataImportTab() {
     }
   };
 
+  const clearMt5Import = async () => {
+    if (!currentImport?.exists) return;
+    const filenames = currentImport.timeframes.map((timeframe) => timeframe.filename).join(", ");
+    const ok = window.confirm(`Delete current MT5 hist_data CSVs?\n\n${filenames}`);
+    if (!ok) return;
+    setClearingCurrentImport(true);
+    setError(null);
+    try {
+      await clearCurrentImport();
+      refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setClearingCurrentImport(false);
+    }
+  };
+
   const runDukascopy = async () => {
     if (!parsedSymbols.length || !timeframes.length) {
       setError("Select at least one symbol and timeframe.");
@@ -199,6 +220,24 @@ export default function DataImportTab() {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setStarting(false);
+    }
+  };
+
+  const removeDataset = async (dataset: MarketDataset) => {
+    const detail = dataset.provider === "mt5"
+      ? "This removes the dataset catalog copy. If these files are currently published to hist_data, use Clear MT5 files separately."
+      : "This removes the dataset catalog copy and any retained tick/bar files for this import.";
+    const ok = window.confirm(`Remove dataset history?\n\n${dataset.dataset_id}\n\n${detail}`);
+    if (!ok) return;
+    setDeletingDatasetId(dataset.dataset_id);
+    setError(null);
+    try {
+      await deleteMarketDataset(dataset.dataset_id);
+      refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setDeletingDatasetId(null);
     }
   };
 
@@ -257,8 +296,19 @@ export default function DataImportTab() {
             </div>
             {currentImport?.exists && (
               <div className="current-import-banner" style={{ marginTop: 12 }}>
-                <strong>Current MT5 import:</strong>{" "}
-                {currentImport.symbol ?? "mixed symbols"} - {currentImport.timeframes.map((value) => value.label).join(", ")}
+                <div>
+                  <strong>Current MT5 import:</strong>{" "}
+                  {currentImport.symbol ?? "mixed symbols"} - {currentImport.timeframes.map((value) => value.label).join(", ")}
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={clearMt5Import}
+                  disabled={running || clearingCurrentImport}
+                  style={{ marginTop: 8 }}
+                >
+                  {clearingCurrentImport ? "Clearing..." : "Clear MT5 files"}
+                </button>
               </div>
             )}
           </div>
@@ -354,9 +404,20 @@ export default function DataImportTab() {
                   <td>{dataset.symbols.join(", ")}</td><td>{dataset.timeframes.map((value) => value.toUpperCase()).join(", ")}</td>
                   <td><span className={`status-badge ${dataset.state === "complete" ? "status-badge--ok" : dataset.state === "failed" ? "status-badge--err" : ""}`}>{dataset.state}</span></td>
                   <td>{dataset.files.length}</td>
-                  <td>{dataset.state !== "complete" && dataset.import_options?.storage_layout === "daily_ticks_monthly_bars"
-                    ? <button className="btn btn-secondary btn-sm" onClick={() => resume(dataset)} disabled={running}>Resume</button>
-                    : "-"}</td>
+                  <td>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      {dataset.state !== "complete" && dataset.import_options?.storage_layout === "daily_ticks_monthly_bars" && (
+                        <button className="btn btn-secondary btn-sm" onClick={() => resume(dataset)} disabled={running || deletingDatasetId === dataset.dataset_id}>Resume</button>
+                      )}
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => removeDataset(dataset)}
+                        disabled={running || deletingDatasetId === dataset.dataset_id}
+                      >
+                        {deletingDatasetId === dataset.dataset_id ? "Deleting..." : "Delete"}
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               ))}
               {!datasets.length && <tr><td colSpan={7}>No canonical datasets imported.</td></tr>}

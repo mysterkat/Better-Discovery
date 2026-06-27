@@ -106,6 +106,10 @@ export async function getCurrentImport(): Promise<CurrentImport> {
   return api<CurrentImport>("GET", "/data/current-import");
 }
 
+export async function clearCurrentImport(): Promise<{ deleted: string[]; kept: string[] }> {
+  return api<{ deleted: string[]; kept: string[] }>("DELETE", "/data/current-import");
+}
+
 export async function importCsv(path: string): Promise<DataPreview> {
   return api<DataPreview>("POST", "/data/import", { path });
 }
@@ -174,6 +178,10 @@ export function getMarketDataProviders(): Promise<MarketDataProvider[]> {
 
 export function listMarketDatasets(): Promise<MarketDataset[]> {
   return api("GET", "/data/datasets");
+}
+
+export function deleteMarketDataset(datasetId: string): Promise<{ dataset_id: string; deleted_path: string }> {
+  return api("DELETE", `/data/datasets/${encodeURIComponent(datasetId)}`);
 }
 
 export function fetchProviderData(req: ProviderFetchRequest): Promise<JobRef> {

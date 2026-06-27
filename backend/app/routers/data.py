@@ -67,6 +67,16 @@ def market_data_dataset(dataset_id: str) -> dict[str, Any]:
         raise HTTPException(404, str(exc)) from exc
 
 
+@router.delete("/data/datasets/{dataset_id}")
+def market_data_dataset_delete(dataset_id: str) -> dict[str, str]:
+    try:
+        return MARKET_DATA.delete_dataset(dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.post("/data/provider/fetch", response_model=JobRef)
 def market_data_fetch(req: MarketDataImportRequest) -> JobRef:
     """Import an immutable canonical dataset and publish discovery CSVs."""
@@ -150,6 +160,11 @@ def mt5_current_import() -> dict[str, Any]:
     currently active for Pattern Discovery to consume.
     """
     return mt5_bridge.list_current_import()
+
+
+@router.delete("/data/current-import")
+def mt5_clear_current_import() -> dict[str, Any]:
+    return mt5_bridge.clear_data_folder()
 
 
 @router.post("/data/mt5/install-helper")

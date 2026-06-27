@@ -269,5 +269,8 @@ class MarketDataService:
     def get_dataset(self, dataset_id: str) -> dict[str, Any]:
         return self.catalog.load(dataset_id).model_dump()
 
+    def delete_dataset(self, dataset_id: str) -> dict[str, str]:
+        return self.catalog.delete(dataset_id)
+
 
 MARKET_DATA = MarketDataService()

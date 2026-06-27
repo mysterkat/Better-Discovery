@@ -50,6 +50,13 @@ class MarketDataCatalog:
     def folder(self, dataset_id: str) -> Path:
         return self.root / dataset_id
 
+    def _safe_dataset_folder(self, dataset_id: str) -> Path:
+        root = self.root.resolve()
+        target = (self.root / dataset_id).resolve()
+        if target == root or not target.is_relative_to(root):
+            raise ValueError(f"unsafe market-data dataset id: {dataset_id}")
+        return target
+
     def save_manifest(self, manifest: DatasetManifest) -> Path:
         folder = self.folder(manifest.dataset_id)
         folder.mkdir(parents=True, exist_ok=True)
@@ -73,6 +80,22 @@ class MarketDataCatalog:
             except Exception:
                 continue
         return sorted(manifests, key=lambda item: item.created_at, reverse=True)
+
+    def delete(self, dataset_id: str) -> dict[str, str]:
+        folder = self._safe_dataset_folder(dataset_id)
+        manifest_path = folder / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"market-data dataset not found: {dataset_id}")
+        shutil.rmtree(folder)
+        current = self.root / "current.json"
+        if current.is_file():
+            try:
+                current_id = json.loads(current.read_text(encoding="utf-8")).get("dataset_id")
+            except Exception:
+                current_id = None
+            if current_id == dataset_id:
+                current.unlink(missing_ok=True)
+        return {"dataset_id": dataset_id, "deleted_path": str(folder)}
 
     def write_parquet(
         self, manifest: DatasetManifest, frame: pd.DataFrame, *, kind: str,
