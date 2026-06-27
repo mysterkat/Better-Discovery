@@ -41,6 +41,70 @@ def build_base_frame(
     return frame
 
 
+def _context_masks(
+    frame: pd.DataFrame,
+    mode: str,
+) -> tuple[pd.Series, pd.Series]:
+    h1_up = frame["h1_trend"] > 0
+    h1_down = frame["h1_trend"] < 0
+    h4_up = frame["h4_trend"] > 0
+    h4_down = frame["h4_trend"] < 0
+    all_ok = pd.Series(True, index=frame.index)
+    if mode == "trend_aligned":
+        return h1_up & h4_up, h1_down & h4_down
+    if mode == "avoid_h1_h4_opposite":
+        return ~h1_down & ~h4_down, ~h1_up & ~h4_up
+    if mode == "avoid_h4_opposite":
+        return ~h4_down, ~h4_up
+    if mode == "h1_turn_with_h4":
+        return h1_up & ~h4_down, h1_down & ~h4_up
+    if mode == "none":
+        return all_ok, all_ok
+    raise ValueError(f"unsupported context_filter: {mode}")
+
+
+def _previous_day_levels(frame: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    dates = pd.Series(frame.index.normalize(), index=frame.index)
+    daily = frame.groupby(dates).agg({"high": "max", "low": "min"})
+    return dates.map(daily["high"].shift(1)), dates.map(daily["low"].shift(1))
+
+
+def _day_open(frame: pd.DataFrame, opened: pd.Series) -> pd.Series:
+    dates = pd.Series(frame.index.normalize(), index=frame.index)
+    return opened.groupby(dates).transform("first")
+
+
+def _one_signal_per_day(mask: pd.Series, frame: pd.DataFrame) -> pd.Series:
+    dates = pd.Series(frame.index.normalize(), index=frame.index)
+    return mask & (mask.groupby(dates).cumsum() == 1)
+
+
+def _parse_weekdays(raw: str) -> set[int]:
+    values: set[int] = set()
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        value = int(item)
+        if value < 0 or value > 6:
+            raise ValueError("weekdays must use 0=Monday through 6=Sunday")
+        values.add(value)
+    return values or {0, 1, 2, 3, 4}
+
+
+def _regime_mask(frame: pd.DataFrame, mode: str) -> pd.Series:
+    regime = frame.get("regime", pd.Series(4, index=frame.index))
+    if mode == "any":
+        return pd.Series(True, index=frame.index)
+    if mode == "trend":
+        return regime.isin([0, 1])
+    if mode == "compression":
+        return regime == 2
+    if mode == "range_or_transition":
+        return regime.isin([3, 4])
+    raise ValueError(f"unsupported regime_mode: {mode}")
+
+
 def apply_signal_rules(base_frame: pd.DataFrame, strategy: HypothesisSpec) -> pd.DataFrame:
     frame = base_frame.copy()
     params = strategy.parameters
@@ -51,6 +115,7 @@ def apply_signal_rules(base_frame: pd.DataFrame, strategy: HypothesisSpec) -> pd
     trail_atr = pd.Series(0.0, index=frame.index, dtype=float)
     max_hold = pd.Series(0, index=frame.index, dtype="int32")
     close, high, low, atr = frame["close"], frame["high"], frame["low"], frame["atr14"]
+    opened = frame.get("open", close)
     h1_up = frame["h1_trend"] > 0
     h1_down = frame["h1_trend"] < 0
     h4_up = frame["h4_trend"] > 0
@@ -126,6 +191,255 @@ def apply_signal_rules(base_frame: pd.DataFrame, strategy: HypothesisSpec) -> pd
         direction[(zscore >= float(params["z_entry"])) & (frame["rsi14"] >= 100 - extreme) & flat_context] = -1
         stop_distance[:] = atr * float(params["atr_stop"])
         target_price[:] = mean
+        max_hold[:] = int(params["max_hold_bars"])
+
+    elif strategy.lineage == "liquidity_sweep_reclaim":
+        lookback = int(params["sweep_lookback"])
+        prior_high = high.shift(1).rolling(lookback, min_periods=lookback).max()
+        prior_low = low.shift(1).rolling(lookback, min_periods=lookback).min()
+        penetration = atr * float(params["penetration_atr"])
+        reclaim = atr * float(params["reclaim_buffer_atr"])
+        long_context, short_context = _context_masks(
+            frame, str(params.get("context_filter", "avoid_h4_opposite"))
+        )
+        close_location = (close - low) / frame["rng"].replace(0, np.nan)
+        upper_location = (high - close) / frame["rng"].replace(0, np.nan)
+        wick_min = float(params["wick_reject_min"])
+        raw_long = (
+            (low < prior_low - penetration)
+            & (close > prior_low + reclaim)
+            & (frame["lwk_pct"] >= wick_min)
+            & (close_location >= float(params.get("close_location_min", 0.45)))
+            & long_context
+        )
+        raw_short = (
+            (high > prior_high + penetration)
+            & (close < prior_high - reclaim)
+            & (frame["uwk_pct"] >= wick_min)
+            & (upper_location >= float(params.get("close_location_min", 0.45)))
+            & short_context
+        )
+        if bool(params.get("first_signal_per_day", False)):
+            raw_long = _one_signal_per_day(raw_long, frame)
+            raw_short = _one_signal_per_day(raw_short, frame)
+        direction[raw_long] = 1
+        direction[raw_short] = -1
+        stop_distance[:] = atr * float(params["atr_stop"])
+        target_distance[:] = stop_distance * float(params["reward_risk"])
+        max_hold[:] = int(params["max_hold_bars"])
+
+    elif strategy.lineage == "failed_breakout_reversal":
+        lookback = int(params["channel_bars"])
+        prior_high = high.shift(1).rolling(lookback, min_periods=lookback).max()
+        prior_low = low.shift(1).rolling(lookback, min_periods=lookback).min()
+        break_buffer = atr * float(params["break_atr"])
+        close_back = atr * float(params["close_back_atr"])
+        long_context, short_context = _context_masks(
+            frame, str(params.get("context_filter", "none"))
+        )
+        raw_short = (
+            (high > prior_high + break_buffer)
+            & (close < prior_high - close_back)
+            & (opened > close)
+            & short_context
+        )
+        raw_long = (
+            (low < prior_low - break_buffer)
+            & (close > prior_low + close_back)
+            & (close > opened)
+            & long_context
+        )
+        direction[raw_long] = 1
+        direction[raw_short] = -1
+        stop_distance[:] = atr * float(params["atr_stop"])
+        target_distance[:] = stop_distance * float(params["reward_risk"])
+        max_hold[:] = int(params["max_hold_bars"])
+
+    elif strategy.lineage == "prior_day_level_continuation":
+        previous_high, previous_low = _previous_day_levels(frame)
+        buffer = atr * float(params["break_buffer_atr"])
+        long_level = previous_high + buffer
+        short_level = previous_low - buffer
+        long_context, short_context = _context_masks(
+            frame, str(params.get("context_filter", "avoid_h4_opposite"))
+        )
+        raw_long = (close > long_level) & (close.shift(1) <= long_level) & long_context
+        raw_short = (close < short_level) & (close.shift(1) >= short_level) & short_context
+        if bool(params.get("first_signal_per_day", True)):
+            raw_long = _one_signal_per_day(raw_long, frame)
+            raw_short = _one_signal_per_day(raw_short, frame)
+        direction[raw_long] = 1
+        direction[raw_short] = -1
+        stop_distance[:] = atr * float(params["atr_stop"])
+        target_distance[:] = stop_distance * float(params["reward_risk"])
+        max_hold[:] = int(params["max_hold_bars"])
+
+    elif strategy.lineage == "volatility_spike_reversal":
+        close_location = (close - low) / frame["rng"].replace(0, np.nan)
+        style = str(params.get("spike_style", "capitulation"))
+        range_ok = frame["rng_atr"] >= float(params["spike_range_atr"])
+        body_ok = frame["body_pct"] >= float(params["body_min"])
+        extreme = float(params["rsi_extreme"])
+        long_context, short_context = _context_masks(
+            frame, str(params.get("context_filter", "none"))
+        )
+        if style == "wick_reject":
+            raw_long = (
+                range_ok
+                & (frame["lwk_pct"] >= float(params["wick_min"]))
+                & (close_location >= float(params["close_location_min"]))
+                & (frame["rsi14"] <= extreme)
+                & long_context
+            )
+            raw_short = (
+                range_ok
+                & (frame["uwk_pct"] >= float(params["wick_min"]))
+                & (close_location <= 1.0 - float(params["close_location_min"]))
+                & (frame["rsi14"] >= 100.0 - extreme)
+                & short_context
+            )
+        elif style == "capitulation":
+            raw_long = range_ok & body_ok & (close < opened) & (frame["rsi14"] <= extreme) & long_context
+            raw_short = range_ok & body_ok & (close > opened) & (frame["rsi14"] >= 100.0 - extreme) & short_context
+        else:
+            raise ValueError(f"unsupported spike_style: {style}")
+        direction[raw_long] = 1
+        direction[raw_short] = -1
+        stop_distance[:] = atr * float(params["atr_stop"])
+        target_distance[:] = stop_distance * float(params["reward_risk"])
+        max_hold[:] = int(params["max_hold_bars"])
+
+    elif strategy.lineage == "opening_range_continuation_reversal":
+        range_start = int(params["range_start_utc"])
+        range_end = int(params["range_end_utc"])
+        if not (0 <= range_start < range_end <= 24):
+            raise ValueError("range_start_utc/range_end_utc must define a non-wrapping UTC window")
+        hours = pd.Series(frame.index.hour, index=frame.index)
+        dates = frame.index.normalize()
+        source_mask = (hours >= range_start) & (hours < range_end)
+        range_high = high.where(source_mask).groupby(dates).transform("max")
+        range_low = low.where(source_mask).groupby(dates).transform("min")
+        buffer = atr * float(params["break_buffer_atr"])
+        mode_name = str(params["opening_range_mode"])
+        long_context, short_context = _context_masks(
+            frame, str(params.get("context_filter", "avoid_h4_opposite"))
+        )
+        entry_window = (
+            (hours >= int(params["session_start_utc"]))
+            & (hours < int(params["session_end_utc"]))
+        )
+        if mode_name == "continuation":
+            raw_long = (
+                (close > range_high + buffer)
+                & (close.shift(1) <= range_high + buffer)
+                & entry_window
+                & long_context
+            )
+            raw_short = (
+                (close < range_low - buffer)
+                & (close.shift(1) >= range_low - buffer)
+                & entry_window
+                & short_context
+            )
+        elif mode_name == "reversal":
+            sweep = atr * float(params["sweep_atr"])
+            raw_long = (
+                (low < range_low - sweep)
+                & (close > range_low + buffer)
+                & entry_window
+                & long_context
+            )
+            raw_short = (
+                (high > range_high + sweep)
+                & (close < range_high - buffer)
+                & entry_window
+                & short_context
+            )
+        else:
+            raise ValueError(f"unsupported opening_range_mode: {mode_name}")
+        if bool(params.get("first_signal_per_day", True)):
+            any_signal = raw_long | raw_short
+            first = any_signal & (any_signal.groupby(dates).cumsum() == 1)
+            raw_long &= first
+            raw_short &= first
+        direction[raw_long] = 1
+        direction[raw_short] = -1
+        stop_distance[:] = atr * float(params["atr_stop"])
+        target_distance[:] = stop_distance * float(params["reward_risk"])
+        max_hold[:] = int(params["max_hold_bars"])
+
+    elif strategy.lineage == "trend_day_pullback":
+        ema = frame[f"ema{int(params['ema_length'])}"]
+        day_open = _day_open(frame, opened)
+        trend_open_buffer = atr * float(params["trend_open_atr"])
+        pullback = atr * float(params["pullback_atr"])
+        rsi_trigger = float(params["rsi_trigger"])
+        sharpe_min = float(params.get("rolling_sharpe_min", -999.0))
+        long_day = h1_up & h4_up & (close > day_open + trend_open_buffer)
+        short_day = h1_down & h4_down & (close < day_open - trend_open_buffer)
+        long_cross = (frame["rsi14"].shift(1) <= rsi_trigger) & (frame["rsi14"] > rsi_trigger)
+        short_level = 100.0 - rsi_trigger
+        short_cross = (frame["rsi14"].shift(1) >= short_level) & (frame["rsi14"] < short_level)
+        raw_long = (
+            long_day
+            & (low <= ema + pullback)
+            & (close > ema)
+            & long_cross
+            & (frame["rolling_sharpe"] >= sharpe_min)
+        )
+        raw_short = (
+            short_day
+            & (high >= ema - pullback)
+            & (close < ema)
+            & short_cross
+            & (frame["rolling_sharpe"] <= -sharpe_min)
+        )
+        direction[raw_long] = 1
+        direction[raw_short] = -1
+        stop_distance[:] = atr * float(params["atr_stop"])
+        target_distance[:] = stop_distance * float(params["reward_risk"])
+        max_hold[:] = int(params["max_hold_bars"])
+
+    elif strategy.lineage == "day_time_regime_filter":
+        weekdays = _parse_weekdays(str(params["weekdays"]))
+        weekday_ok = pd.Series(frame.index.weekday, index=frame.index).isin(weekdays)
+        regime_ok = _regime_mask(frame, str(params.get("regime_mode", "any")))
+        lookback = int(params["momentum_bars"])
+        threshold = atr * float(params["momentum_atr"])
+        mode_name = str(params["signal_mode"])
+        long_context, short_context = _context_masks(
+            frame, str(params.get("context_filter", "avoid_h4_opposite"))
+        )
+        if mode_name == "momentum":
+            raw_long = (close > close.shift(lookback) + threshold) & long_context
+            raw_short = (close < close.shift(lookback) - threshold) & short_context
+        elif mode_name == "reversal":
+            mean = close.rolling(lookback, min_periods=lookback).mean()
+            raw_long = (close < mean - threshold) & (frame["rsi14"] <= float(params["rsi_extreme"])) & long_context
+            raw_short = (close > mean + threshold) & (frame["rsi14"] >= 100.0 - float(params["rsi_extreme"])) & short_context
+        else:
+            raise ValueError(f"unsupported signal_mode: {mode_name}")
+        direction[raw_long & weekday_ok & regime_ok] = 1
+        direction[raw_short & weekday_ok & regime_ok] = -1
+        stop_distance[:] = atr * float(params["atr_stop"])
+        target_distance[:] = stop_distance * float(params["reward_risk"])
+        max_hold[:] = int(params["max_hold_bars"])
+
+    elif strategy.lineage == "inside_bar_expansion":
+        buffer = atr * float(params["break_buffer_atr"])
+        inside_previous = frame["inside_bar"].shift(1) > 0
+        mother_high = high.shift(2)
+        mother_low = low.shift(2)
+        volume_ok = frame["vol_ratio"] >= float(params["volume_ratio"])
+        long_context, short_context = _context_masks(
+            frame, str(params.get("context_filter", "avoid_h4_opposite"))
+        )
+        raw_long = inside_previous & volume_ok & (close > mother_high + buffer) & long_context
+        raw_short = inside_previous & volume_ok & (close < mother_low - buffer) & short_context
+        direction[raw_long] = 1
+        direction[raw_short] = -1
+        stop_distance[:] = atr * float(params["atr_stop"])
+        target_distance[:] = stop_distance * float(params["reward_risk"])
         max_hold[:] = int(params["max_hold_bars"])
 
     else:  # pragma: no cover - guarded by the model literal

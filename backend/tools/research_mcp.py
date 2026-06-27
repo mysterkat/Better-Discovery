@@ -17,10 +17,16 @@ if str(BACKEND) not in sys.path:
 
 from app.research.models import BacktestSpec, MT5Environment, PromotionPolicy  # noqa: E402
 from app.research.service import RESEARCH  # noqa: E402
+from app.hypothesis.grammar import BUILDERS as HYPOTHESIS_BUILDERS  # noqa: E402
+from app.hypothesis.models import HypothesisDiscoveryRequest  # noqa: E402
+from app.hypothesis.service import HypothesisResearchService  # noqa: E402
 from app.market_data.models import MarketDataImportRequest  # noqa: E402
 from app.local_replay.models import ReplayRequest  # noqa: E402
 from app.local_replay.robustness import RobustnessRequest  # noqa: E402
 from app.schemas.mc import MCCompareRequest  # noqa: E402
+
+
+HYPOTHESIS = HypothesisResearchService()
 
 
 def _schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -37,6 +43,10 @@ TOOLS: list[dict[str, Any]] = [
      "inputSchema": _schema({"destination": {"type": "string"}})},
     {"name": "run_discovery", "description": "Run BETTER DISCOVERY with whitelisted overrides and record the candidates.",
      "inputSchema": _schema({"overrides": {"type": "object"}})},
+    {"name": "list_hypothesis_families", "description": "List deterministic FTMO hypothesis families supported by the bar-based XAUUSD research engine.",
+     "inputSchema": _schema({})},
+    {"name": "run_hypothesis_discovery", "description": "Run the deterministic XAUUSD hypothesis-family discovery engine on a manifest-backed bar dataset.",
+     "inputSchema": _schema({"request": {"type": "object", "description": "HypothesisDiscoveryRequest fields."}}, ["request"])},
     {"name": "import_market_data", "description": "Import canonical provider ticks/bars and publish validated discovery CSVs.",
      "inputSchema": _schema({"request": {"type": "object", "description": "MarketDataImportRequest fields."}}, ["request"])},
     {"name": "list_candidates", "description": "List discovered .set candidates, newest first.",
@@ -78,6 +88,15 @@ def _call(name: str, args: dict[str, Any]) -> Any:
         ),
         "setup_portable_mt5": lambda: RESEARCH.setup_portable_mt5(args.get("destination")),
         "run_discovery": lambda: RESEARCH.run_discovery(args.get("overrides", {})),
+        "list_hypothesis_families": lambda: {
+            "engine": "xauusd_bar_hypothesis_discovery",
+            "families": list(HYPOTHESIS_BUILDERS.keys()),
+            "execution": "closed-bar signal generation with next-bar bid/ask bar replay",
+            "tick_note": "tick data is supported by run_local_replay for later confirmation, not by this discovery loop",
+        },
+        "run_hypothesis_discovery": lambda: HYPOTHESIS.run_discovery(
+            HypothesisDiscoveryRequest(**args["request"])
+        ),
         "import_market_data": lambda: RESEARCH.import_market_data(
             MarketDataImportRequest(**args["request"])
         ),

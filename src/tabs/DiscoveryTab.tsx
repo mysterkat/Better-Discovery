@@ -31,6 +31,14 @@ const HYPOTHESIS_FAMILIES: Array<{ id: HypothesisFamily; label: string }> = [
   { id: "trend_pullback", label: "Trend pullbacks" },
   { id: "volatility_expansion", label: "Volatility expansion" },
   { id: "regime_mean_reversion", label: "Mean reversion" },
+  { id: "liquidity_sweep_reclaim", label: "Sweep reclaim" },
+  { id: "failed_breakout_reversal", label: "Failed breakouts" },
+  { id: "prior_day_level_continuation", label: "Prior-day levels" },
+  { id: "volatility_spike_reversal", label: "Spike reversal" },
+  { id: "opening_range_continuation_reversal", label: "Opening range" },
+  { id: "trend_day_pullback", label: "Trend day pullbacks" },
+  { id: "day_time_regime_filter", label: "Day/time regimes" },
+  { id: "inside_bar_expansion", label: "Inside-bar expansion" },
 ];
 
 function ParamTooltip({ description }: { description: string }) {

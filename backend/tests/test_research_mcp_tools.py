@@ -14,4 +14,5 @@ def test_mcp_exposes_current_research_funnel() -> None:
     assert {
         "import_market_data", "run_discovery", "run_local_replay",
         "run_mt5_pipeline", "compare_local_mt5_monte_carlo",
+        "list_hypothesis_families", "run_hypothesis_discovery",
     }.issubset(names)

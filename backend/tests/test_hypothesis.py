@@ -13,6 +13,18 @@ from app.hypothesis.service import HypothesisResearchService
 from app.hypothesis.signals import apply_signal_rules
 
 
+NEW_HYPOTHESIS_FAMILIES = (
+    "liquidity_sweep_reclaim",
+    "failed_breakout_reversal",
+    "prior_day_level_continuation",
+    "volatility_spike_reversal",
+    "opening_range_continuation_reversal",
+    "trend_day_pullback",
+    "day_time_regime_filter",
+    "inside_bar_expansion",
+)
+
+
 def _spec(**overrides) -> HypothesisSpec:
     values = {
         "strategy_id": "tsb_test",
@@ -41,6 +53,49 @@ def _request(strategy: HypothesisSpec) -> HypothesisBarRequest:
         commission_per_lot_round_turn=0.0,
         slippage_price_units=0.05,
     )
+
+
+def _base_frame(times: pd.DatetimeIndex, **overrides) -> pd.DataFrame:
+    n = len(times)
+    data = {
+        "open": [100.0] * n,
+        "high": [101.0] * n,
+        "low": [99.0] * n,
+        "close": [100.0] * n,
+        "atr14": [1.0] * n,
+        "rsi14": [50.0] * n,
+        "macd_norm": [0.0] * n,
+        "prev_sess_bias": [0.0] * n,
+        "h1_trend": [1] * n,
+        "h4_trend": [1] * n,
+        "h1_ema50": [100.0] * n,
+        "h1_ema200": [100.0] * n,
+        "h1_atr14": [1.0] * n,
+        "h4_atr_pct": [0.01] * n,
+        "rolling_sharpe": [0.2] * n,
+        "inside_bar": [0.0] * n,
+        "vol_ratio": [1.2] * n,
+        "regime": [4] * n,
+    }
+    data.update(overrides)
+    frame = pd.DataFrame(data, index=times)
+    rng = (frame["high"] - frame["low"]).replace(0, 1.0)
+    body = (frame["close"] - frame["open"]).abs()
+    derived = {
+        "rng": rng,
+        "rng_atr": rng / frame["atr14"].replace(0, 1.0),
+        "body_pct": body / rng,
+        "lwk_pct": (frame[["open", "close"]].min(axis=1) - frame["low"]) / rng,
+        "uwk_pct": (frame["high"] - frame[["open", "close"]].max(axis=1)) / rng,
+        "ema20": frame["close"],
+        "ema50": frame["close"],
+        "ema200": frame["close"],
+        "bb_width": [0.01] * n,
+    }
+    for key, value in derived.items():
+        if key not in overrides:
+            frame[key] = value
+    return frame
 
 
 def test_strategy_fingerprint_is_canonical() -> None:
@@ -269,6 +324,150 @@ def test_hypothesis_grammar_is_deterministic_and_mixed_by_family() -> None:
 
     assert [item.fingerprint for item in first] == [item.fingerprint for item in second]
     assert {item.lineage for item in first} == {"time_series_breakout", "trend_pullback"}
+
+
+def test_hypothesis_grammar_includes_market_structure_families() -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        families=NEW_HYPOTHESIS_FAMILIES,
+        max_variants=len(NEW_HYPOTHESIS_FAMILIES) * 2,
+    )
+
+    specs = generate_hypotheses(request)
+
+    assert set(item.lineage for item in specs) == set(NEW_HYPOTHESIS_FAMILIES)
+
+
+@pytest.mark.parametrize("family", NEW_HYPOTHESIS_FAMILIES)
+def test_new_hypothesis_families_apply_without_signal_errors(family: str) -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 1, 15, tzinfo=timezone.utc),
+        families=(family,),
+        max_variants=1,
+    )
+    strategy = generate_hypotheses(request)[0]
+    times = pd.date_range("2025-01-01T00:00:00Z", periods=240, freq="1h")
+    close = [100.0 + index * 0.05 for index in range(len(times))]
+    base = _base_frame(
+        times,
+        open=[value - 0.1 for value in close],
+        high=[value + 0.4 for value in close],
+        low=[value - 0.4 for value in close],
+        close=close,
+    )
+
+    signals = apply_signal_rules(base, strategy)
+
+    assert {"signal_direction", "stop_distance", "target_distance", "max_hold_bars"}.issubset(signals.columns)
+
+
+def test_liquidity_sweep_reclaim_detects_closed_bar_reclaim() -> None:
+    times = pd.date_range("2025-01-01T00:00:00Z", periods=4, freq="1h")
+    base = _base_frame(
+        times,
+        open=[100.5, 100.2, 99.7, 100.0],
+        high=[101.0, 100.8, 100.0, 100.5],
+        low=[100.0, 99.5, 98.8, 99.8],
+        close=[100.6, 100.0, 99.8, 100.2],
+    )
+    strategy = HypothesisSpec(
+        strategy_id="sweep_reclaim_test",
+        lineage="liquidity_sweep_reclaim",
+        hypothesis="A swept swing low that closes back above the level can reverse.",
+        parameters={
+            "sweep_lookback": 2,
+            "penetration_atr": 0.05,
+            "reclaim_buffer_atr": 0.0,
+            "wick_reject_min": 0.5,
+            "close_location_min": 0.45,
+            "atr_stop": 1.0,
+            "reward_risk": 1.0,
+            "max_hold_bars": 4,
+            "context_filter": "none",
+            "direction_mode": "both",
+            "session_start_utc": 0,
+            "session_end_utc": 24,
+            "volatility_filter": "none",
+        },
+    )
+
+    signals = apply_signal_rules(base, strategy)
+
+    assert signals.loc[times[2], "signal_direction"] == 1
+
+
+def test_failed_breakout_reversal_detects_back_inside_close() -> None:
+    times = pd.date_range("2025-01-01T00:00:00Z", periods=4, freq="1h")
+    base = _base_frame(
+        times,
+        open=[100.0, 100.5, 101.5, 100.0],
+        high=[101.0, 101.0, 102.0, 100.5],
+        low=[99.5, 100.0, 100.5, 99.5],
+        close=[100.5, 100.7, 100.8, 100.0],
+    )
+    strategy = HypothesisSpec(
+        strategy_id="failed_breakout_test",
+        lineage="failed_breakout_reversal",
+        hypothesis="A channel break that closes back inside can reverse next bar.",
+        parameters={
+            "channel_bars": 2,
+            "break_atr": 0.05,
+            "close_back_atr": 0.0,
+            "atr_stop": 1.0,
+            "reward_risk": 1.0,
+            "max_hold_bars": 4,
+            "context_filter": "none",
+            "direction_mode": "both",
+            "session_start_utc": 0,
+            "session_end_utc": 24,
+            "volatility_filter": "none",
+        },
+    )
+
+    signals = apply_signal_rules(base, strategy)
+
+    assert signals.loc[times[2], "signal_direction"] == -1
+
+
+def test_prior_day_level_continuation_uses_previous_day_levels() -> None:
+    times = pd.DatetimeIndex([
+        pd.Timestamp("2025-01-01T22:00:00Z"),
+        pd.Timestamp("2025-01-01T23:00:00Z"),
+        pd.Timestamp("2025-01-02T00:00:00Z"),
+        pd.Timestamp("2025-01-02T01:00:00Z"),
+    ])
+    base = _base_frame(
+        times,
+        open=[100.0, 100.2, 100.4, 101.0],
+        high=[100.5, 101.0, 100.8, 101.8],
+        low=[99.5, 99.8, 100.0, 100.8],
+        close=[100.2, 100.4, 100.6, 101.5],
+    )
+    strategy = HypothesisSpec(
+        strategy_id="prior_day_test",
+        lineage="prior_day_level_continuation",
+        hypothesis="A close through the prior day high can continue next bar.",
+        parameters={
+            "break_buffer_atr": 0.0,
+            "atr_stop": 1.0,
+            "reward_risk": 1.0,
+            "max_hold_bars": 4,
+            "context_filter": "none",
+            "first_signal_per_day": True,
+            "direction_mode": "both",
+            "session_start_utc": 0,
+            "session_end_utc": 24,
+            "volatility_filter": "none",
+        },
+    )
+
+    signals = apply_signal_rules(base, strategy)
+
+    assert signals.loc[times[3], "signal_direction"] == 1
 
 
 def test_ftmo_challenge_replay_passes_fast_target_hit() -> None:

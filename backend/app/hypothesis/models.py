@@ -14,6 +14,14 @@ Lineage = Literal[
     "trend_pullback",
     "volatility_expansion",
     "regime_mean_reversion",
+    "liquidity_sweep_reclaim",
+    "failed_breakout_reversal",
+    "prior_day_level_continuation",
+    "volatility_spike_reversal",
+    "opening_range_continuation_reversal",
+    "trend_day_pullback",
+    "day_time_regime_filter",
+    "inside_bar_expansion",
 ]
 
 
