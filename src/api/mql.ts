@@ -1,4 +1,5 @@
 import { api } from "./client";
+import type { HypothesisStrategySpec } from "./discovery";
 
 export interface MqlExportResult {
   ok: boolean;
@@ -8,6 +9,27 @@ export interface MqlExportResult {
   missing_inputs: string[];
   has_commission_r: boolean;
   has_swap_r_per_bar: boolean;
+}
+
+export interface HypothesisMqlExportRequest {
+  strategy: HypothesisStrategySpec;
+  output_name?: string | null;
+  risk_fraction?: number;
+  daily_loss_pct?: number;
+  max_loss_pct?: number;
+  max_trades_per_day?: number;
+  max_spread_points?: number;
+}
+
+export interface HypothesisMqlExportResult {
+  ok: boolean;
+  mq5_path: string;
+  set_path: string;
+  spec_path: string;
+  strategy_id: string;
+  lineage: string;
+  magic_number: number;
+  warnings: string[];
 }
 
 export async function getTemplate(): Promise<{ path: string }> {
@@ -24,4 +46,10 @@ export async function exportMql(
     template_path: templatePath ?? null,
     output_name: outputName ?? null,
   });
+}
+
+export async function exportHypothesisEa(
+  request: HypothesisMqlExportRequest,
+): Promise<HypothesisMqlExportResult> {
+  return api<HypothesisMqlExportResult>("POST", "/mql/hypothesis-export", request);
 }

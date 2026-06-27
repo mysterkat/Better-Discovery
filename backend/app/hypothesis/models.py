@@ -120,6 +120,7 @@ class HypothesisDiscoveryRequest(BaseModel):
     families: tuple[Lineage, ...] | None = None
     max_variants: int = Field(default=300, ge=1, le=5_000)
     min_closed_trades: int = Field(default=15, ge=1)
+    parallel_workers: int = Field(default=1, ge=1, le=32)
     top_n: int = Field(default=25, ge=1, le=250)
     lot_size: float = Field(default=0.1, gt=0)
     contract_size: float = Field(default=100.0, gt=0)
@@ -152,6 +153,7 @@ class HypothesisDiscoveryResult(BaseModel):
     timeframe: str
     variants_generated: int
     variants_tested: int
+    parallel_workers: int = 1
     artifact_folder: str
     summary_csv: str
     summary_json: str

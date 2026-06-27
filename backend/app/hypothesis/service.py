@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from ..jobs.runners import check_cancelled, get_current_job
 from ..market_data.catalog import MarketDataCatalog
 from ..paths import DEFAULT_RESEARCH
 from ..research.store import ExperimentStore
@@ -223,6 +225,25 @@ class HypothesisResearchService:
             "challenge": compact_challenge,
         }
 
+    def _evaluate_candidate(
+        self,
+        request: HypothesisDiscoveryRequest,
+        strategy: HypothesisSpec,
+        bars: pd.DataFrame,
+        base_frame: pd.DataFrame,
+    ) -> tuple[dict[str, Any], pd.DataFrame] | None:
+        replay_request = self._replay_request(request, strategy)
+        signals = apply_signal_rules(base_frame, strategy)
+        signals = signals.loc[
+            (signals.index >= pd.Timestamp(request.date_from))
+            & (signals.index < pd.Timestamp(request.date_to))
+        ]
+        ledger, metrics = run_bar_replay(bars, signals, replay_request)
+        if metrics["trades"] < request.min_closed_trades:
+            return None
+        challenge = evaluate_challenge_grid(ledger, request.challenge)
+        return self._candidate_row(strategy, metrics, challenge), ledger
+
     def run_discovery(self, request: HypothesisDiscoveryRequest) -> dict[str, Any]:
         manifest = self.catalog.load(request.dataset_id)
         if manifest.state != "complete":
@@ -258,21 +279,46 @@ class HypothesisResearchService:
             specs = generate_hypotheses(request)
             rows: list[dict[str, Any]] = []
             top_ledgers: dict[str, pd.DataFrame] = {}
+            current_job = get_current_job()
 
-            for strategy in specs:
-                replay_request = self._replay_request(request, strategy)
-                signals = apply_signal_rules(base_frame, strategy)
-                signals = signals.loc[
-                    (signals.index >= pd.Timestamp(request.date_from))
-                    & (signals.index < pd.Timestamp(request.date_to))
-                ]
-                ledger, metrics = run_bar_replay(bars, signals, replay_request)
-                if metrics["trades"] < request.min_closed_trades:
-                    continue
-                challenge = evaluate_challenge_grid(ledger, request.challenge)
-                row = self._candidate_row(strategy, metrics, challenge)
+            def record(result: tuple[dict[str, Any], pd.DataFrame] | None) -> None:
+                if result is None:
+                    return
+                row, ledger = result
                 rows.append(row)
-                top_ledgers[strategy.strategy_id] = ledger
+                top_ledgers[row["strategy_id"]] = ledger
+
+            workers = min(request.parallel_workers, len(specs) or 1)
+            if workers <= 1:
+                for index, strategy in enumerate(specs, start=1):
+                    check_cancelled()
+                    record(self._evaluate_candidate(request, strategy, bars, base_frame))
+                    if current_job is not None:
+                        current_job.mark_stage("Hypothesis variants", index, len(specs))
+            else:
+                executor = ThreadPoolExecutor(max_workers=workers)
+                futures = {
+                    executor.submit(self._evaluate_candidate, request, strategy, bars, base_frame): strategy
+                    for strategy in specs
+                }
+                cancel_futures = False
+                try:
+                    for index, future in enumerate(as_completed(futures), start=1):
+                        check_cancelled()
+                        record(future.result())
+                        if current_job is not None:
+                            current_job.mark_stage(
+                                f"Hypothesis variants ({workers} workers)",
+                                index,
+                                len(specs),
+                            )
+                except Exception:
+                    cancel_futures = True
+                    for future in futures:
+                        future.cancel()
+                    raise
+                finally:
+                    executor.shutdown(wait=not cancel_futures, cancel_futures=cancel_futures)
 
             rows.sort(
                 key=lambda item: (
@@ -309,6 +355,7 @@ class HypothesisResearchService:
                 "request": request.model_dump(mode="json"),
                 "variants_generated": len(specs),
                 "variants_tested": len(rows),
+                "parallel_workers": workers,
                 "top_candidates": top_candidates,
             }
             summary_json.write_text(
@@ -322,6 +369,7 @@ class HypothesisResearchService:
                 timeframe=request.timeframe,
                 variants_generated=len(specs),
                 variants_tested=len(rows),
+                parallel_workers=workers,
                 artifact_folder=str(folder),
                 summary_csv=str(summary_csv),
                 summary_json=str(summary_json),

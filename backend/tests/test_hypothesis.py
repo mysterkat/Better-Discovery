@@ -188,6 +188,32 @@ def test_request_normalizes_naive_dates_to_utc() -> None:
     assert request.date_to.tzinfo == timezone.utc
 
 
+def test_hypothesis_discovery_parallel_workers_are_validated() -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        parallel_workers=4,
+    )
+    assert request.parallel_workers == 4
+
+    with pytest.raises(ValueError):
+        HypothesisDiscoveryRequest(
+            dataset_id="test",
+            date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+            parallel_workers=0,
+        )
+
+    with pytest.raises(ValueError):
+        HypothesisDiscoveryRequest(
+            dataset_id="test",
+            date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+            parallel_workers=33,
+        )
+
+
 def test_long_only_session_filter_is_applied_after_breakout_signal() -> None:
     times = pd.date_range("2025-01-01T12:00:00Z", periods=3, freq="1h")
     base = pd.DataFrame({

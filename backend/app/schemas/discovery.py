@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ..hypothesis.models import HypothesisSpec
+
 
 class DiscoveryStartRequest(BaseModel):
     # Whitelisted overrides applied to pattern_discovery_v6 module globals.
@@ -56,3 +58,15 @@ class MqlExportRequest(BaseModel):
     # Override output filename stem (no extension).
     # null → auto-generated from pattern metadata.
     output_name: str | None = None
+
+
+class HypothesisMqlExportRequest(BaseModel):
+    """Request body for POST /mql/hypothesis-export."""
+
+    strategy: HypothesisSpec
+    output_name: str | None = None
+    risk_fraction: float = Field(default=0.01, gt=0, le=0.05)
+    daily_loss_pct: float = Field(default=4.0, gt=0, le=20.0)
+    max_loss_pct: float = Field(default=8.0, gt=0, le=30.0)
+    max_trades_per_day: int = Field(default=4, ge=1, le=100)
+    max_spread_points: float = Field(default=80.0, ge=0)

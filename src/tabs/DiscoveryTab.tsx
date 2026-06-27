@@ -101,6 +101,7 @@ export default function DiscoveryTab() {
   );
   const [maxVariants, setMaxVariants] = useState("300");
   const [minClosedTrades, setMinClosedTrades] = useState("15");
+  const [parallelWorkers, setParallelWorkers] = useState("1");
   const [targetProfitPct, setTargetProfitPct] = useState("10");
   const [dailyLossPct, setDailyLossPct] = useState("5");
   const [maxLossPct, setMaxLossPct] = useState("10");
@@ -316,9 +317,10 @@ export default function DiscoveryTab() {
     }
     const variants = Math.trunc(Number(maxVariants));
     const minTrades = Math.trunc(Number(minClosedTrades));
+    const workers = Math.trunc(Number(parallelWorkers));
     const attemptDays = Math.trunc(Number(maxAttemptDays));
-    if (!Number.isFinite(variants) || variants <= 0 || !Number.isFinite(minTrades) || minTrades <= 0) {
-      setError("Max variants and minimum trades must be positive numbers.");
+    if (!Number.isFinite(variants) || variants <= 0 || !Number.isFinite(minTrades) || minTrades <= 0 || !Number.isFinite(workers) || workers <= 0) {
+      setError("Max variants, minimum trades, and parallel workers must be positive numbers.");
       return;
     }
     setStarting(true);
@@ -334,6 +336,7 @@ export default function DiscoveryTab() {
         families,
         max_variants: variants,
         min_closed_trades: minTrades,
+        parallel_workers: Math.min(workers, 32),
         slippage_price_units: Number(slippagePriceUnits),
         challenge: {
           target_profit_pct: Number(targetProfitPct),
@@ -639,6 +642,11 @@ export default function DiscoveryTab() {
           <div className="field">
             <label className="field-label">Min closed trades</label>
             <input className="field-input" value={minClosedTrades} onChange={(event) => setMinClosedTrades(event.target.value)} disabled={isRunning} inputMode="numeric" />
+          </div>
+          <div className="field">
+            <label className="field-label">Parallel workers</label>
+            <input className="field-input" value={parallelWorkers} onChange={(event) => setParallelWorkers(event.target.value)} disabled={isRunning} inputMode="numeric" />
+            <span className="field-hint">Use 1 for lowest memory use; raise for chunked research runs.</span>
           </div>
         </div>
       </div>

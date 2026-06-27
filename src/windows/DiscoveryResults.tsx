@@ -4,8 +4,17 @@
  */
 
 import { Fragment, useEffect, useState } from "react";
-import { getDiscoveryResults, getSetFileContent, type DiscoveryOverview, type JobRef, type PatternSummary } from "../api/discovery";
+import {
+  getDiscoveryResults,
+  getSetFileContent,
+  type DiscoveryOverview,
+  type HypothesisFamily,
+  type HypothesisStrategySpec,
+  type JobRef,
+  type PatternSummary,
+} from "../api/discovery";
 import { saveToLibrary } from "../api/library";
+import { exportHypothesisEa } from "../api/mql";
 import { openFolder } from "../api/system";
 import IndicatorsTable from "../components/IndicatorsTable";
 import { renderValue, titleCase } from "../lib/format";
@@ -14,7 +23,7 @@ import { useSettings } from "../state/settings";
 interface HypothesisCandidate {
   strategy_id: string;
   strategy_fingerprint: string;
-  lineage: string;
+  lineage: HypothesisFamily;
   hypothesis: string;
   parameters: Record<string, unknown>;
   trades: number;
@@ -41,6 +50,7 @@ interface HypothesisDiscoveryResult {
   timeframe: string;
   variants_generated: number;
   variants_tested: number;
+  parallel_workers?: number;
   artifact_folder: string;
   summary_csv: string;
   summary_json: string;
@@ -240,7 +250,41 @@ export default function DiscoveryResults() {
 
 function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [busyExportId, setBusyExportId] = useState<string | null>(null);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportPath, setExportPath] = useState<string | null>(null);
   const best = result.top_candidates[0] ?? null;
+
+  const exportCandidate = async (candidate: HypothesisCandidate) => {
+    setBusyExportId(candidate.strategy_id);
+    setExportNotice(null);
+    setExportError(null);
+    setExportPath(null);
+    const strategy: HypothesisStrategySpec = {
+      strategy_id: candidate.strategy_id,
+      lineage: candidate.lineage,
+      hypothesis: candidate.hypothesis,
+      timeframe: result.timeframe === "m5" ? "m5" : "m15",
+      parameters: candidate.parameters,
+    };
+    try {
+      const exported = await exportHypothesisEa({
+        strategy,
+        output_name: candidate.strategy_id,
+        risk_fraction: candidate.risk_fraction,
+        daily_loss_pct: candidate.internal_daily_stop_pct,
+        max_loss_pct: 8.0,
+        max_trades_per_day: candidate.max_trades_per_day,
+      });
+      setExportNotice(`Exported EA: ${exported.mq5_path}`);
+      setExportPath(exported.mq5_path);
+    } catch (e) {
+      setExportError(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusyExportId(null);
+    }
+  };
 
   return (
     <>
@@ -262,6 +306,7 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
       <div className="results-grid" style={{ marginBottom: 16 }}>
         <div className="result-card"><span className="result-key">Generated</span><span className="result-val">{result.variants_generated}</span></div>
         <div className="result-card"><span className="result-key">Tested</span><span className="result-val">{result.variants_tested}</span></div>
+        <div className="result-card"><span className="result-key">Workers</span><span className="result-val">{result.parallel_workers ?? 1}</span></div>
         <div className="result-card"><span className="result-key">Dataset</span><span className="result-val result-val-truncate" title={result.dataset_id}>{result.dataset_id}</span></div>
         <div className="result-card"><span className="result-key">Symbol</span><span className="result-val">{result.symbol} {result.timeframe.toUpperCase()}</span></div>
         {best && (
@@ -280,6 +325,23 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
           Open summary CSV
         </button>
       </div>
+
+      {exportNotice && (
+        <div className="alert alert-success" style={{ marginBottom: 16 }}>
+          {exportNotice}
+          {exportPath && (
+            <button
+              className="btn-mini"
+              style={{ marginLeft: 8 }}
+              onClick={() => openFolder(exportPath).catch(() => undefined)}
+              title={exportPath}
+            >
+              Open folder
+            </button>
+          )}
+        </div>
+      )}
+      {exportError && <div className="alert alert-error" style={{ marginBottom: 16 }}>{exportError}</div>}
 
       {result.top_candidates.length > 0 && (
         <>
@@ -333,6 +395,16 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
                           <div><span className="kv-key">Max trades/day</span><span>{candidate.max_trades_per_day}</span></div>
                           <div><span className="kv-key">Net profit</span><span>{formatNumber(candidate.net_profit, 2)}</span></div>
                           <div><span className="kv-key">Max DD</span><span>{formatNumber(candidate.max_drawdown_pct, 2)}%</span></div>
+                          <div className="full-row">
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => exportCandidate(candidate)}
+                              disabled={busyExportId === candidate.strategy_id}
+                              title="Write a standalone MQL5 EA, .set file, and hypothesis JSON"
+                            >
+                              {busyExportId === candidate.strategy_id ? "Exporting..." : "Export EA"}
+                            </button>
+                          </div>
                           <div className="full-row"><span className="kv-key">Fingerprint</span><span className="mono small">{candidate.strategy_fingerprint}</span></div>
                           <div className="full-row"><span className="kv-key">Parameters</span><pre className="raw-json">{JSON.stringify(candidate.parameters, null, 2)}</pre></div>
                         </div>

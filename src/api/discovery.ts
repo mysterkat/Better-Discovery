@@ -57,6 +57,16 @@ export type HypothesisFamily =
   | "day_time_regime_filter"
   | "inside_bar_expansion";
 
+export interface HypothesisStrategySpec {
+  schema_version?: number;
+  strategy_id: string;
+  lineage: HypothesisFamily;
+  hypothesis: string;
+  timeframe: "m5" | "m15";
+  context_timeframes?: ("h1" | "h4")[];
+  parameters: Record<string, unknown>;
+}
+
 export interface HypothesisDiscoveryRequest {
   dataset_id: string;
   symbol: "XAUUSD";
@@ -66,6 +76,7 @@ export interface HypothesisDiscoveryRequest {
   families?: HypothesisFamily[];
   max_variants: number;
   min_closed_trades: number;
+  parallel_workers?: number;
   lot_size?: number;
   contract_size?: number;
   commission_per_lot_round_turn?: number;

@@ -17,8 +17,9 @@ if str(BACKEND) not in sys.path:
 
 from app.research.models import BacktestSpec, MT5Environment, PromotionPolicy  # noqa: E402
 from app.research.service import RESEARCH  # noqa: E402
+from app.bridge import hypothesis_to_mql  # noqa: E402
 from app.hypothesis.grammar import BUILDERS as HYPOTHESIS_BUILDERS  # noqa: E402
-from app.hypothesis.models import HypothesisDiscoveryRequest  # noqa: E402
+from app.hypothesis.models import HypothesisDiscoveryRequest, HypothesisSpec  # noqa: E402
 from app.hypothesis.service import HypothesisResearchService  # noqa: E402
 from app.market_data.models import MarketDataImportRequest  # noqa: E402
 from app.local_replay.models import ReplayRequest  # noqa: E402
@@ -46,7 +47,17 @@ TOOLS: list[dict[str, Any]] = [
     {"name": "list_hypothesis_families", "description": "List deterministic FTMO hypothesis families supported by the bar-based XAUUSD research engine.",
      "inputSchema": _schema({})},
     {"name": "run_hypothesis_discovery", "description": "Run the deterministic XAUUSD hypothesis-family discovery engine on a manifest-backed bar dataset.",
-     "inputSchema": _schema({"request": {"type": "object", "description": "HypothesisDiscoveryRequest fields."}}, ["request"])},
+     "inputSchema": _schema({"request": {"type": "object", "description": "HypothesisDiscoveryRequest fields, including optional parallel_workers."}}, ["request"])},
+    {"name": "export_hypothesis_ea", "description": "Export one HypothesisSpec to a standalone MQL5 EA, .set file, and hypothesis JSON.",
+     "inputSchema": _schema({
+         "strategy": {"type": "object", "description": "HypothesisSpec fields."},
+         "output_name": {"type": "string"},
+         "risk_fraction": {"type": "number", "default": 0.01},
+         "daily_loss_pct": {"type": "number", "default": 4.0},
+         "max_loss_pct": {"type": "number", "default": 8.0},
+         "max_trades_per_day": {"type": "integer", "default": 4},
+         "max_spread_points": {"type": "number", "default": 80.0},
+     }, ["strategy"])},
     {"name": "import_market_data", "description": "Import canonical provider ticks/bars and publish validated discovery CSVs.",
      "inputSchema": _schema({"request": {"type": "object", "description": "MarketDataImportRequest fields."}}, ["request"])},
     {"name": "list_candidates", "description": "List discovered .set candidates, newest first.",
@@ -92,10 +103,21 @@ def _call(name: str, args: dict[str, Any]) -> Any:
             "engine": "xauusd_bar_hypothesis_discovery",
             "families": list(HYPOTHESIS_BUILDERS.keys()),
             "execution": "closed-bar signal generation with next-bar bid/ask bar replay",
+            "parallelism": "run_hypothesis_discovery accepts parallel_workers from 1 to 32",
+            "export": "use export_hypothesis_ea to write a standalone MQL5 EA plus .set file from a HypothesisSpec",
             "tick_note": "tick data is supported by run_local_replay for later confirmation, not by this discovery loop",
         },
         "run_hypothesis_discovery": lambda: HYPOTHESIS.run_discovery(
             HypothesisDiscoveryRequest(**args["request"])
+        ),
+        "export_hypothesis_ea": lambda: hypothesis_to_mql.export(
+            HypothesisSpec(**args["strategy"]),
+            output_name=args.get("output_name"),
+            risk_fraction=float(args.get("risk_fraction", 0.01)),
+            daily_loss_pct=float(args.get("daily_loss_pct", 4.0)),
+            max_loss_pct=float(args.get("max_loss_pct", 8.0)),
+            max_trades_per_day=int(args.get("max_trades_per_day", 4)),
+            max_spread_points=float(args.get("max_spread_points", 80.0)),
         ),
         "import_market_data": lambda: RESEARCH.import_market_data(
             MarketDataImportRequest(**args["request"])
