@@ -12,6 +12,7 @@ from app.market_data.models import DatasetManifest
 from pathlib import Path
 import pytest
 
+from app.bridge import mt5_import
 from app.market_data.service import MarketDataService
 from app.market_data.providers import DukascopyProvider
 
@@ -65,6 +66,38 @@ def test_discovery_csv_is_staged_inside_dataset(tmp_path: Path) -> None:
     item = catalog.write_discovery_csv(manifest, frame, "XAUUSD", "m1")
     assert Path(item.path).is_relative_to(tmp_path / "sample")
     assert Path(item.path).is_file()
+
+
+def test_mt5_csv_publish_creates_catalog_dataset(tmp_path: Path, monkeypatch) -> None:
+    import app.market_data.catalog as catalog_module
+
+    monkeypatch.setattr(catalog_module, "DEFAULT_HIST_DATA", tmp_path / "hist_data")
+    csv_path = tmp_path / "xauusd_m15.csv"
+    pd.DataFrame({
+        "time": ["2025-01-01 00:00:00", "2025-01-01 00:15:00"],
+        "open": [2600.0, 2601.0],
+        "high": [2602.0, 2603.0],
+        "low": [2599.0, 2600.5],
+        "close": [2601.0, 2602.0],
+        "volume": [10, 12],
+    }).to_csv(csv_path, index=False)
+
+    result = mt5_import._publish_mt5_dataset(
+        ["XAUUSD"],
+        {"files": [{"label": "m15", "ok": True, "path": str(csv_path)}]},
+        catalog=MarketDataCatalog(tmp_path / "catalog"),
+    )
+
+    assert result is not None
+    assert result["provider"] == "mt5"
+    assert result["symbols"] == ["XAUUSD"]
+    assert result["timeframes"] == ["m15"]
+    bars = [item for item in result["files"] if item["kind"] == "bars"]
+    discovery = [item for item in result["files"] if item["kind"] == "discovery_csv"]
+    assert len(bars) == 1
+    assert len(discovery) == 1
+    frame = pd.read_parquet(bars[0]["path"])
+    assert {"bid_open", "ask_open", "spread_mean"}.issubset(frame.columns)
 
 
 def _ticks(day: str, price: float) -> pd.DataFrame:

@@ -6,12 +6,17 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from .. import paths  # ensures toolkit is on sys.path  # noqa: F401
 from ..paths import DEFAULT_HIST_DATA
+from ..market_data.catalog import MarketDataCatalog
+from ..market_data.models import DatasetManifest
 
 
 DEFAULT_HIST_FOLDER = str(DEFAULT_HIST_DATA)
@@ -261,12 +266,122 @@ def check_connection() -> dict[str, Any]:
     return _run_toolkit_call("check_connection", {}, timeout=20)
 
 
+def _mt5_csv_to_bars(path: Path) -> pd.DataFrame:
+    frame = pd.read_csv(path)
+    if "time" not in frame.columns:
+        raise ValueError(f"MT5 CSV missing time column: {path}")
+    required = {"open", "high", "low", "close"}
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(f"MT5 CSV missing columns {sorted(missing)}: {path}")
+    bars = frame[["time", "open", "high", "low", "close"]].copy()
+    bars["time"] = pd.to_datetime(bars["time"], utc=True)
+    volume = frame["volume"] if "volume" in frame.columns else pd.Series(0, index=frame.index)
+    bars["tick_volume"] = pd.to_numeric(volume, errors="coerce").fillna(0)
+    bars["real_volume"] = bars["tick_volume"]
+    for prefix in ("bid", "ask"):
+        bars[f"{prefix}_open"] = bars["open"]
+        bars[f"{prefix}_high"] = bars["high"]
+        bars[f"{prefix}_low"] = bars["low"]
+        bars[f"{prefix}_close"] = bars["close"]
+    bars["spread_open"] = 0.0
+    bars["spread_mean"] = 0.0
+    bars["spread_max"] = 0.0
+    return bars.sort_values("time").reset_index(drop=True)
+
+
+def _publish_mt5_dataset(
+    symbols: list[str],
+    mt5_result: dict[str, Any],
+    *,
+    catalog: MarketDataCatalog | None = None,
+) -> dict[str, Any] | None:
+    """Register MT5 broker CSV bars as an immutable market-data dataset."""
+    file_entries: list[tuple[str, dict[str, Any]]] = []
+    if "per_symbol" in mt5_result:
+        for symbol_result in mt5_result.get("per_symbol", []):
+            symbol = str(symbol_result.get("symbol", "")).upper()
+            for file_result in symbol_result.get("files", []) or []:
+                if file_result.get("ok") and file_result.get("path"):
+                    file_entries.append((symbol, file_result))
+    else:
+        symbol = symbols[0].upper() if symbols else "XAUUSD"
+        for file_result in mt5_result.get("files", []) or []:
+            if file_result.get("ok") and file_result.get("path"):
+                file_entries.append((symbol, file_result))
+
+    if not file_entries:
+        return None
+
+    parsed: list[tuple[str, str, Path, pd.DataFrame]] = []
+    for symbol, file_result in file_entries:
+        path = Path(str(file_result["path"]))
+        if not path.is_file():
+            continue
+        timeframe = str(file_result.get("label") or path.stem.split("_")[-1]).lower()
+        bars = _mt5_csv_to_bars(path)
+        if not bars.empty:
+            parsed.append((symbol, timeframe, path, bars))
+    if not parsed:
+        return None
+
+    start = min(pd.Timestamp(frame["time"].min()).to_pydatetime() for _, _, _, frame in parsed)
+    end = max(pd.Timestamp(frame["time"].max()).to_pydatetime() for _, _, _, frame in parsed)
+    dataset_id = f"mt5_{start:%Y%m%d}_{end:%Y%m%d}_{uuid.uuid4().hex[:8]}"
+    catalog = catalog or MarketDataCatalog()
+    timeframes = sorted({timeframe for _, timeframe, _, _ in parsed}, key=lambda value: _TF_MINUTES.get(value, 99_999))
+    manifest = DatasetManifest(
+        dataset_id=dataset_id,
+        provider="mt5",
+        venue="MetaTrader 5 broker history",
+        symbols=sorted({symbol for symbol, _, _, _ in parsed}),
+        timeframes=timeframes,
+        requested_from=start.isoformat(),
+        requested_to=end.isoformat(),
+        created_at=datetime.now(timezone.utc).isoformat(),
+        import_options={
+            "source": "mt5_import",
+            "write_discovery_csv": True,
+            "bid_ask_mode": "bar_ohlc_midpoint_proxy",
+        },
+        quality={"source": "mt5", "passed": True, "symbols": {}},
+    )
+    for symbol, timeframe, source_path, bars in parsed:
+        item = catalog.write_parquet(
+            manifest,
+            bars,
+            kind="bars",
+            symbol=symbol,
+            timeframe=timeframe,
+            relative_path=Path("bars") / symbol / timeframe / f"{source_path.stem}.parquet",
+        )
+        item.quality = {
+            "source_csv": str(source_path),
+            "rows": len(bars),
+            "bid_ask_mode": "bar_ohlc_midpoint_proxy",
+        }
+        catalog.write_discovery_csv(manifest, bars, symbol, timeframe)
+    published = catalog.publish_discovery_csvs(manifest)
+    completed = catalog.complete(
+        manifest,
+        {
+            "source": "mt5",
+            "passed": True,
+            "published_discovery_csvs": published,
+            "bid_ask_mode": "bar_ohlc_midpoint_proxy",
+            "note": "MT5 bar history has no historical bid/ask OHLC in this import path; bid/ask fields are proxied from bar OHLC.",
+        },
+    )
+    return completed.model_dump(mode="json")
+
+
 def fetch_historical(
     symbol: str,
     save_folder: str,
     tf_specs: list[dict[str, Any]],
     *,
     clear_existing: bool = False,
+    publish_dataset: bool = True,
 ) -> dict[str, Any]:
     folder = save_folder or DEFAULT_HIST_FOLDER
     cleared: dict[str, Any] | None = None
@@ -284,6 +399,10 @@ def fetch_historical(
         raise RuntimeError(str(result["error"]))
     if cleared is not None:
         result["cleared"] = cleared
+    if publish_dataset:
+        dataset = _publish_mt5_dataset([symbol], result)
+        if dataset is not None:
+            result["dataset"] = dataset
     return result
 
 
@@ -310,6 +429,7 @@ def fetch_many_symbols(
             res = fetch_historical(
                 sym, folder, tf_specs,
                 clear_existing=(clear_existing and i == 0),
+                publish_dataset=False,
             )
             per_symbol.append({"symbol": sym, **(res if isinstance(res, dict) else {})})
         except Exception as exc:  # noqa: BLE001 - isolate one symbol's failure
@@ -322,6 +442,7 @@ def fetch_many_symbols(
         "save_folder": folder,
         "symbols": list(symbols),
         "per_symbol": per_symbol,
+        "dataset": _publish_mt5_dataset(symbols, {"per_symbol": per_symbol}),
     }
 
 
