@@ -1,4 +1,4 @@
-"""MT5 historical data downloader — parameterized version.
+"""MT5 historical data downloader - parameterized version.
 
 Lives in backend/toolkit/ and is called exclusively through the
 backend bridge (bridge/mt5_import.py). All parameters are passed
@@ -10,7 +10,7 @@ import math
 import os
 from typing import Any
 
-# Maps user-facing TF string (prefix+value) → MT5 attribute name.
+# Maps user-facing TF string (prefix+value) to MT5 attribute name.
 _TF_ATTR: dict[str, str] = {
     "m1": "TIMEFRAME_M1",   "m2": "TIMEFRAME_M2",   "m3": "TIMEFRAME_M3",
     "m4": "TIMEFRAME_M4",   "m5": "TIMEFRAME_M5",   "m6": "TIMEFRAME_M6",
@@ -71,7 +71,7 @@ def check_connection() -> dict[str, Any]:
         return {"ok": False, "error": (
             f"MT5 init failed (code {err[0]}): {err[1]}. "
             "Make sure MetaTrader 5 is open, logged in, and "
-            "'Allow DLL imports' is enabled in Tools → Options → Expert Advisors."
+            "'Allow DLL imports' is enabled in Tools > Options > Expert Advisors."
         )}
     info    = mt5.terminal_info()
     account = mt5.account_info()
@@ -111,7 +111,7 @@ def _download_one(mt5: Any, symbol: str, tf_const: int, label: str,
     Pull historical bars for one symbol/timeframe using ``copy_rates_range``.
 
     ``copy_rates_from_pos`` only returns bars already in the terminal's LOCAL
-    cache, so deep-history requests silently truncate (e.g. 1000d M15 → 372d).
+    cache, so deep-history requests silently truncate (e.g. 1000d M15 to 372d).
     ``copy_rates_range`` forces the terminal to serve the full requested window
     from the server, so the broker's true depth is honoured.
 
@@ -134,7 +134,7 @@ def _download_one(mt5: Any, symbol: str, tf_const: int, label: str,
     if rates is None or len(rates) == 0:
         return {
             "label": label, "ok": False,
-            "error": f"No data — {mt5.last_error()}",
+            "error": f"No data - {mt5.last_error()}",
             "candles": 0, "path": "",
         }
     df = pd.DataFrame(rates)
@@ -156,7 +156,7 @@ def _download_one(mt5: Any, symbol: str, tf_const: int, label: str,
     if actual_days < int(span_days) - 1:
         print(
             f"    {label.upper()}: requested {int(span_days)}d but broker "
-            f"returned {actual_days}d ({actual_from} → {actual_to}, "
+            f"returned {actual_days}d ({actual_from} to {actual_to}, "
             f"{len(df)} bars)",
             flush=True,
         )
@@ -218,7 +218,7 @@ def main(
                 raise ValueError("spec needs 'trading_days' or 'candle_count'")
             label      = tf_label(prefix, time_value)
             # Progress marker the bridge parses to update job.stage_*
-            # Format must match `^\[(\d+)/(\d+)\]\s*(.+)$` — keep it stable.
+            # Format must match `^\[(\d+)/(\d+)\]\s*(.+)$` - keep it stable.
             print(f"[{idx}/{n_total}] Fetching {label.upper()}", flush=True)
             attr_name  = _TF_ATTR.get(label)
             if attr_name is None:
@@ -251,7 +251,7 @@ def fetch_many(
     """
     Download the same set of timeframes for a basket of symbols.
 
-    Thin loop over ``main`` — one MT5 connect/shutdown cycle per symbol — so the
+    Thin loop over ``main`` - one MT5 connect/shutdown cycle per symbol - so the
     multi-instrument basket reuses the identical range-fetch path (and therefore
     the identical CSV format). A failure for one symbol does not abort the rest.
 

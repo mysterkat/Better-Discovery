@@ -93,24 +93,24 @@ export default function DiscoveryTab() {
   const [params, setParams] = useState<ParamDef[]>([]);
   const [datasets, setDatasets] = useState<MarketDataset[]>([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
-  const [timeframe, setTimeframe] = useState<"m5" | "m15">("m15");
-  const [dateFrom, setDateFrom] = useState(dateInput(180));
+  const [timeframe, setTimeframe] = useState<"m5" | "m15">("m5");
+  const [dateFrom, setDateFrom] = useState(dateInput(2000));
   const [dateTo, setDateTo] = useState(dateInput(0));
   const [families, setFamilies] = useState<HypothesisFamily[]>(
     HYPOTHESIS_FAMILIES.map((item) => item.id),
   );
-  const [maxVariants, setMaxVariants] = useState("300");
-  const [minClosedTrades, setMinClosedTrades] = useState("15");
-  const [parallelWorkers, setParallelWorkers] = useState("1");
+  const [maxVariants, setMaxVariants] = useState("5000");
+  const [minClosedTrades, setMinClosedTrades] = useState("180");
+  const [parallelWorkers, setParallelWorkers] = useState("6");
   const [targetProfitPct, setTargetProfitPct] = useState("10");
   const [dailyLossPct, setDailyLossPct] = useState("5");
   const [maxLossPct, setMaxLossPct] = useState("10");
   const [maxAttemptDays, setMaxAttemptDays] = useState("10");
   const [startFrequency, setStartFrequency] = useState("1D");
-  const [riskFractions, setRiskFractions] = useState("0.01, 0.015, 0.02");
+  const [riskFractions, setRiskFractions] = useState("0.005, 0.0075, 0.01");
   const [dailyStops, setDailyStops] = useState("2, 3, 4");
-  const [maxTradesPerDay, setMaxTradesPerDay] = useState("2, 4, 8");
-  const [slippagePriceUnits, setSlippagePriceUnits] = useState("0.05");
+  const [maxTradesPerDay, setMaxTradesPerDay] = useState("4, 8, 12");
+  const [slippagePriceUnits, setSlippagePriceUnits] = useState("0.10");
 
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [overrideOnce, setOverrideOnce] = useState(false);

@@ -90,9 +90,9 @@ class FTMOChallengeConfig(BaseModel):
     max_loss_pct: float = Field(default=10.0, gt=0)
     max_attempt_days: int = Field(default=10, ge=1, le=120)
     start_frequency: str = Field(default="1D", min_length=2, max_length=12)
-    risk_fractions: tuple[float, ...] = (0.01, 0.015, 0.02)
+    risk_fractions: tuple[float, ...] = (0.005, 0.0075, 0.01)
     internal_daily_stop_pcts: tuple[float, ...] = (2.0, 3.0, 4.0)
-    max_trades_per_day_options: tuple[int, ...] = (2, 4, 8)
+    max_trades_per_day_options: tuple[int, ...] = (4, 8, 12)
 
     @model_validator(mode="after")
     def validate_grid(self) -> "FTMOChallengeConfig":
@@ -114,18 +114,18 @@ class FTMOChallengeConfig(BaseModel):
 class HypothesisDiscoveryRequest(BaseModel):
     dataset_id: str
     symbol: str = "XAUUSD"
-    timeframe: Literal["m5", "m15"] = "m15"
+    timeframe: Literal["m5", "m15"] = "m5"
     date_from: datetime
     date_to: datetime
     families: tuple[Lineage, ...] | None = None
-    max_variants: int = Field(default=300, ge=1, le=5_000)
-    min_closed_trades: int = Field(default=15, ge=1)
-    parallel_workers: int = Field(default=1, ge=1, le=32)
+    max_variants: int = Field(default=5_000, ge=1, le=5_000)
+    min_closed_trades: int = Field(default=180, ge=1)
+    parallel_workers: int = Field(default=6, ge=1, le=32)
     top_n: int = Field(default=25, ge=1, le=250)
     lot_size: float = Field(default=0.1, gt=0)
     contract_size: float = Field(default=100.0, gt=0)
     commission_per_lot_round_turn: float = Field(default=7.0, ge=0)
-    slippage_price_units: float = Field(default=0.05, ge=0)
+    slippage_price_units: float = Field(default=0.10, ge=0)
     challenge: FTMOChallengeConfig = Field(default_factory=FTMOChallengeConfig)
 
     @staticmethod

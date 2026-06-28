@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -25,7 +26,7 @@ DEFAULT_HIST_FOLDER = str(DEFAULT_HIST_DATA)
 # `{symbol_lowercase}_{label}.csv`  e.g. `xauusd_m5.csv`, `eurusd_h1.csv`
 _FILENAME_RE = re.compile(r"^([a-z0-9]+)_([a-z]+\d*)\.csv$", re.IGNORECASE)
 
-# Map of timeframe label → minutes. Used to sort imports smallest → largest
+# Map of timeframe label to minutes. Used to sort imports smallest to largest
 # so discovery's auto-fill picks the most granular timeframes first.
 _TF_MINUTES: dict[str, int] = {
     "m1": 1, "m2": 2, "m3": 3, "m4": 4, "m5": 5, "m6": 6, "m10": 10, "m12": 12,
@@ -81,7 +82,7 @@ def list_current_import() -> dict[str, Any]:
             "path": str(f),
             "size_bytes": stat.st_size,
             "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-            # Internal sort key — strip from response below
+            # Internal sort key - strip from response below
             "_minutes": _TF_MINUTES.get(label, 99_999_999),
         })
 
@@ -103,7 +104,7 @@ def list_current_import() -> dict[str, Any]:
 def clear_data_folder() -> dict[str, Any]:
     """Delete every recognized hist_data CSV (matching {sym}_{tf}.csv).
 
-    Non-matching files are left alone — we never delete unfamiliar content.
+    Non-matching files are left alone - we never delete unfamiliar content.
     Returns {"deleted": [filenames], "kept": [filenames]}.
     """
     folder = Path(DEFAULT_HIST_FOLDER)
@@ -146,7 +147,7 @@ def _run_toolkit_call(
     The toolkit prints a final `RESULT_JSON: {...}` line containing the
     structured result; everything before that is progress / log noise.
     """
-    # Lazy import to avoid a circular import at module load — runners imports
+    # Lazy import to avoid a circular import at module load - runners imports
     # nothing from bridge; bridge does NOT import runners at top level.
     from ..jobs.runners import get_current_job  # noqa: WPS433
 
@@ -170,6 +171,8 @@ def _run_toolkit_call(
     )
 
     try:
+        env = os.environ.copy()
+        env.setdefault("PYTHONIOENCODING", "utf-8")
         proc = subprocess.Popen(
             [
                 sys.executable,
@@ -183,11 +186,14 @@ def _run_toolkit_call(
             stdout=subprocess.PIPE,
             # Merge stderr INTO stdout so we only have one pipe to drain.
             # Two separate PIPEs without concurrent draining is a classic
-            # deadlock — stderr's buffer (4-8 KB on Windows) fills, the child
+            # deadlock - stderr's buffer (4-8 KB on Windows) fills, the child
             # blocks on its next stderr.write(), and our stdout iterator hangs.
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,  # line-buffered
+            env=env,
         )
     except Exception as exc:
         raise RuntimeError(f"Could not launch MT5 {fn_name}: {exc}") from exc
@@ -203,7 +209,7 @@ def _run_toolkit_call(
 
     try:
         if proc.stdout is None:
-            raise RuntimeError("subprocess stdout is None — cannot stream progress")
+            raise RuntimeError("subprocess stdout is None - cannot stream progress")
         # Drain the merged stdout/stderr stream.
         for line in proc.stdout:
             line = line.rstrip("\r\n")
@@ -427,7 +433,7 @@ def fetch_historical(
     cleared: dict[str, Any] | None = None
     if clear_existing and folder == DEFAULT_HIST_FOLDER:
         # Only auto-clean the canonical hist_data folder. If the user pointed
-        # at a custom folder via overrideOnce, leave it alone — they're in
+        # at a custom folder via overrideOnce, leave it alone - they're in
         # control of that location.
         cleared = clear_data_folder()
     result = _run_toolkit_call(
@@ -459,7 +465,7 @@ def fetch_many_symbols(
 
     ``clear_existing`` wipes the folder ONCE before the first symbol; subsequent
     symbols accumulate (filenames are ``{symbol}_{tf}.csv`` so they never
-    collide). One symbol failing does not abort the batch — its slot carries an
+    collide). One symbol failing does not abort the batch - its slot carries an
     ``error`` and the loop continues. Runs on the current job thread, so each
     symbol's per-TF progress streams to the same job.
     """
