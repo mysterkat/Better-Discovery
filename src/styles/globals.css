@@ -1153,6 +1153,11 @@ kbd {
   border-color: rgba(218, 54, 51, 0.35);
   color: #ff7a78;
 }
+.status-badge--warn {
+  background: rgba(187, 128, 9, 0.14);
+  border-color: rgba(187, 128, 9, 0.38);
+  color: #d8a657;
+}
 
 /* ── Folder display ───────────────────────────────────────────────── */
 .folder-display {

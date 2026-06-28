@@ -175,6 +175,21 @@ def _audit_mt5_bars(symbol: str, timeframe: str, bars: pd.DataFrame) -> dict[str
     }
 
 
+def _summarize_bar_audits(quality_by_symbol: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    warnings: list[str] = []
+    for symbol, by_timeframe in quality_by_symbol.items():
+        for timeframe, audit in by_timeframe.items():
+            issues = audit.get("issues") or []
+            if issues:
+                warnings.append(f"{symbol} {str(timeframe).upper()}: {', '.join(issues)}")
+    return {
+        "passed": True,
+        "warning_count": len(warnings),
+        "warnings": warnings[:50],
+        "audit_mode": "advisory",
+    }
+
+
 def list_current_import() -> dict[str, Any]:
     """Inspect DEFAULT_HIST_FOLDER and return a structured summary.
 
@@ -555,13 +570,7 @@ def _publish_mt5_dataset(
             parsed.append((symbol, timeframe, path, bars, audit))
     if not parsed:
         return None
-    failed_audits = [
-        f"{symbol} {timeframe.upper()}: {', '.join(audit.get('issues') or ['quality audit failed'])}"
-        for symbol, timeframe, _, _, audit in parsed
-        if not audit.get("passed", False)
-    ]
-    if failed_audits:
-        raise RuntimeError("MT5 bar quality audit failed: " + "; ".join(failed_audits))
+    audit_summary = _summarize_bar_audits(quality_by_symbol)
 
     start = min(pd.Timestamp(frame["time"].min()).to_pydatetime() for _, _, _, frame, _ in parsed)
     end = max(pd.Timestamp(frame["time"].max()).to_pydatetime() for _, _, _, frame, _ in parsed)
@@ -582,7 +591,12 @@ def _publish_mt5_dataset(
             "write_discovery_csv": True,
             "bid_ask_mode": "bar_ohlc_midpoint_proxy",
         },
-        quality={"source": "mt5", "passed": True, "symbols": quality_by_symbol},
+        quality={
+            "source": "mt5",
+            "passed": True,
+            "symbols": quality_by_symbol,
+            "bar_audit": audit_summary,
+        },
     )
     for symbol, timeframe, source_path, bars, audit in parsed:
         item = catalog.write_parquet(
@@ -607,9 +621,10 @@ def _publish_mt5_dataset(
             "source": "mt5",
             "passed": True,
             "symbols": quality_by_symbol,
+            "bar_audit": audit_summary,
             "published_discovery_csvs": published,
             "bid_ask_mode": "bar_ohlc_midpoint_proxy",
-            "note": "MT5 bar history has no historical bid/ask OHLC in this import path; bid/ask fields are proxied from bar OHLC.",
+            "note": "MT5 bar history has no historical bid/ask OHLC in this import path; bid/ask fields are proxied from bar OHLC. Bar quality audit is advisory and does not block publishing.",
         },
     )
     return completed.model_dump(mode="json")

@@ -44,7 +44,11 @@ function timeframeSpec(timeframe: string, tradingDays: number): TfSpec {
 function datasetQualityLabel(dataset: MarketDataset): string {
   if (dataset.state === "failed") return dataset.error ? "Failed" : "Failed";
   const quality = dataset.quality ?? {};
-  if (quality.passed === false) return "Issues";
+  const barAudit = quality.bar_audit as { warning_count?: number } | undefined;
+  if (barAudit?.warning_count && barAudit.warning_count > 0) {
+    return `${barAudit.warning_count} warning${barAudit.warning_count === 1 ? "" : "s"}`;
+  }
+  if (quality.passed === false) return "Warnings";
   const symbols = quality.symbols;
   if (symbols && typeof symbols === "object") {
     let issueCount = 0;
@@ -56,7 +60,7 @@ function datasetQualityLabel(dataset: MarketDataset): string {
         if (audit.passed === false) issueCount += Array.isArray(audit.issues) ? audit.issues.length || 1 : 1;
       }
     }
-    if (issueCount > 0) return `${issueCount} issue${issueCount === 1 ? "" : "s"}`;
+    if (issueCount > 0) return `${issueCount} warning${issueCount === 1 ? "" : "s"}`;
   }
   return dataset.state === "complete" ? "Clean" : "-";
 }
@@ -423,7 +427,7 @@ export default function DataImportTab() {
                   <td title={dataset.dataset_id}>{dataset.dataset_id}</td><td>{dataset.provider}</td>
                   <td>{dataset.symbols.join(", ")}</td><td>{dataset.timeframes.map((value) => value.toUpperCase()).join(", ")}</td>
                   <td><span className={`status-badge ${dataset.state === "complete" ? "status-badge--ok" : dataset.state === "failed" ? "status-badge--err" : ""}`}>{dataset.state}</span></td>
-                  <td title={dataset.error ?? ""}><span className={`status-badge ${datasetQualityLabel(dataset) === "Clean" ? "status-badge--ok" : datasetQualityLabel(dataset) === "-" ? "" : "status-badge--err"}`}>{datasetQualityLabel(dataset)}</span></td>
+                  <td title={dataset.error ?? (dataset.quality?.bar_audit as { warnings?: string[] } | undefined)?.warnings?.join("; ") ?? ""}><span className={`status-badge ${datasetQualityLabel(dataset) === "Clean" ? "status-badge--ok" : datasetQualityLabel(dataset) === "-" ? "" : "status-badge--warn"}`}>{datasetQualityLabel(dataset)}</span></td>
                   <td>{dataset.files.length}</td>
                   <td>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

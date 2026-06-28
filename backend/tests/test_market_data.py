@@ -180,6 +180,35 @@ def test_mt5_bar_audit_flags_missing_weekday() -> None:
     assert "2025-01-07" in audit["missing_trading_days"]
 
 
+def test_mt5_publish_keeps_advisory_audit_warnings(tmp_path: Path, monkeypatch) -> None:
+    import app.market_data.catalog as catalog_module
+
+    monkeypatch.setattr(catalog_module, "DEFAULT_HIST_DATA", tmp_path / "hist_data")
+    csv_path = tmp_path / "xauusd_m5.csv"
+    times = list(pd.date_range("2025-01-06T00:00:00Z", "2025-01-06T23:55:00Z", freq="5min"))
+    times += list(pd.date_range("2025-01-08T00:00:00Z", "2025-01-08T23:55:00Z", freq="5min"))
+    pd.DataFrame({
+        "time": [value.strftime("%Y-%m-%d %H:%M:%S") for value in times],
+        "open": 2600.0,
+        "high": 2601.0,
+        "low": 2599.0,
+        "close": 2600.5,
+        "volume": 1,
+    }).to_csv(csv_path, index=False)
+
+    result = mt5_import._publish_mt5_dataset(
+        ["XAUUSD"],
+        {"files": [{"label": "m5", "ok": True, "path": str(csv_path)}]},
+        catalog=MarketDataCatalog(tmp_path / "catalog"),
+    )
+
+    assert result is not None
+    assert result["state"] == "complete"
+    assert result["quality"]["passed"] is True
+    assert result["quality"]["bar_audit"]["warning_count"] == 1
+    assert result["quality"]["symbols"]["XAUUSD"]["m5"]["missing_trading_days"] == ["2025-01-07"]
+
+
 def _ticks(day: str, price: float) -> pd.DataFrame:
     times = pd.to_datetime([f"{day}T00:00:01Z", f"{day}T00:00:30Z"], utc=True)
     return pd.DataFrame({
