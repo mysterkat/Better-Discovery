@@ -14,6 +14,7 @@ from app.hypothesis.signals import apply_signal_rules
 
 
 NEW_HYPOTHESIS_FAMILIES = (
+    "strategy_grammar",
     "liquidity_sweep_reclaim",
     "failed_breakout_reversal",
     "prior_day_level_continuation",
@@ -494,6 +495,79 @@ def test_liquidity_sweep_reclaim_detects_closed_bar_reclaim() -> None:
     signals = apply_signal_rules(base, strategy)
 
     assert signals.loc[times[2], "signal_direction"] == 1
+
+
+def test_strategy_grammar_generates_rule_trees() -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        families=("strategy_grammar",),
+        max_variants=25,
+    )
+
+    specs = generate_hypotheses(request)
+
+    assert len(specs) == 25
+    assert {item.lineage for item in specs} == {"strategy_grammar"}
+    assert all(item.parameters.get("rule_blocks") for item in specs)
+
+
+def test_strategy_grammar_fvg_retrace_block_detects_closed_bar_entry() -> None:
+    times = pd.date_range("2025-01-01T00:00:00Z", periods=5, freq="1h")
+    base = _base_frame(
+        times,
+        open=[100.0, 100.4, 101.4, 101.2, 101.5],
+        high=[100.2, 100.6, 102.0, 101.8, 102.2],
+        low=[99.8, 100.1, 101.0, 100.5, 101.2],
+        close=[100.1, 100.5, 101.8, 101.4, 102.0],
+    )
+    strategy = HypothesisSpec(
+        strategy_id="grammar_fvg_test",
+        lineage="strategy_grammar",
+        hypothesis="A bullish fair value gap retrace can be used as a grammar entry block.",
+        parameters={
+            "rule_blocks": [{"name": "fair_value_gap", "mode": "new_or_retrace"}],
+            "block_logic": "all",
+            "direction_mode": "long_only",
+            "session_start_utc": 0,
+            "session_end_utc": 24,
+            "volatility_filter": "none",
+            "atr_stop": 1.0,
+            "reward_risk": 1.0,
+            "max_hold_bars": 4,
+        },
+    )
+
+    signals = apply_signal_rules(base, strategy)
+
+    assert signals.loc[times[2], "signal_direction"] == 1
+    assert signals.loc[times[3], "signal_direction"] == 1
+
+
+def test_strategy_grammar_smt_requires_external_proxy_data() -> None:
+    times = pd.date_range("2025-01-01T00:00:00Z", periods=6, freq="1h")
+    base = _base_frame(times)
+    strategy = HypothesisSpec(
+        strategy_id="grammar_smt_test",
+        lineage="strategy_grammar",
+        hypothesis="SMT blocks must not pass when the external proxy data is unavailable.",
+        parameters={
+            "rule_blocks": [{"name": "smt_divergence", "proxy": "dxy", "lookback": 3}],
+            "block_logic": "all",
+            "direction_mode": "both",
+            "session_start_utc": 0,
+            "session_end_utc": 24,
+            "volatility_filter": "none",
+            "atr_stop": 1.0,
+            "reward_risk": 1.0,
+            "max_hold_bars": 4,
+        },
+    )
+
+    signals = apply_signal_rules(base, strategy)
+
+    assert int((signals["signal_direction"] != 0).sum()) == 0
 
 
 def test_failed_breakout_reversal_detects_back_inside_close() -> None:

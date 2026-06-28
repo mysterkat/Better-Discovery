@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from ..local_replay.features import build_features
+from .block_engine import apply_strategy_grammar
 from .models import HypothesisSpec
 
 
@@ -121,7 +122,16 @@ def apply_signal_rules(base_frame: pd.DataFrame, strategy: HypothesisSpec) -> pd
     h4_up = frame["h4_trend"] > 0
     h4_down = frame["h4_trend"] < 0
 
-    if strategy.lineage == "time_series_breakout":
+    if strategy.lineage == "strategy_grammar":
+        grammar_signals = apply_strategy_grammar(frame, params)
+        direction = grammar_signals["signal_direction"].astype("int8")
+        stop_distance = grammar_signals["stop_distance"].astype(float)
+        target_distance = grammar_signals["target_distance"].astype(float)
+        target_price = grammar_signals["signal_target_price"].astype(float)
+        trail_atr = grammar_signals["trail_atr"].astype(float)
+        max_hold = grammar_signals["max_hold_bars"].astype("int32")
+
+    elif strategy.lineage == "time_series_breakout":
         lookback = int(params["channel_bars"])
         prior_high = high.shift(1).rolling(lookback, min_periods=lookback).max()
         prior_low = low.shift(1).rolling(lookback, min_periods=lookback).min()

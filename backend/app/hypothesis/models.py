@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 Lineage = Literal[
+    "strategy_grammar",
     "time_series_breakout",
     "session_range_breakout",
     "trend_pullback",
@@ -32,7 +33,7 @@ class HypothesisSpec(BaseModel):
     hypothesis: str = Field(min_length=20, max_length=1000)
     timeframe: Literal["m1", "m5", "m10", "m15"] = "m15"
     context_timeframes: tuple[Literal["h1", "h4"], ...] = ("h1", "h4")
-    parameters: dict[str, int | float | str | bool]
+    parameters: dict[str, Any]
 
     @property
     def fingerprint(self) -> str:

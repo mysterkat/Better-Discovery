@@ -38,6 +38,7 @@ const HIDDEN_FROM_TAB = new Set([
 ]);
 
 const HYPOTHESIS_FAMILIES: Array<{ id: HypothesisFamily; label: string }> = [
+  { id: "strategy_grammar", label: "Strategy grammar" },
   { id: "time_series_breakout", label: "Channel breaks" },
   { id: "session_range_breakout", label: "Range breaks" },
   { id: "trend_pullback", label: "Trend pullbacks" },
@@ -60,6 +61,15 @@ const HYPOTHESIS_FAMILY_GROUPS: Array<{
   timeframe: ExecutionTimeframe;
   families: HypothesisFamily[];
 }> = [
+  {
+    id: "autonomous_grammar",
+    label: "Autonomous Grammar",
+    hint: "ICT/SMT blocks, sweeps, FVG, OB, sessions",
+    timeframe: "m5",
+    families: [
+      "strategy_grammar",
+    ],
+  },
   {
     id: "reversal_trap",
     label: "Reversal / Trap",

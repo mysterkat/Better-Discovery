@@ -47,9 +47,9 @@ export default function MqlExportResults() {
               className="btn-mini"
               onClick={reveal}
               disabled={busy}
-              title="Open the file in your file manager"
+              title="Reveal the exported EA in your file manager"
             >
-              📂 Open folder
+              See in folder
             </button>
             {err && <span className="alert alert-error" style={{ padding: "4px 8px", margin: 0 }}>{err}</span>}
           </div>

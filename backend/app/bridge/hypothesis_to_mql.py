@@ -799,6 +799,11 @@ def export(
     max_spread_points: float = 80.0,
 ) -> dict[str, Any]:
     """Write a standalone EA and matching .set file for a hypothesis strategy."""
+    if strategy.lineage == "strategy_grammar":
+        raise ValueError(
+            "strategy_grammar exports need rule-tree MQL generation; run bar discovery first, "
+            "then export only fixed-family hypotheses until the grammar EA emitter is enabled."
+        )
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     magic_number = int(strategy.fingerprint[:8], 16) % 2_000_000_000
     name = _safe_name(output_name or strategy.strategy_id)

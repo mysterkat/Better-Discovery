@@ -43,6 +43,7 @@ export async function startDiscovery(
 }
 
 export type HypothesisFamily =
+  | "strategy_grammar"
   | "time_series_breakout"
   | "session_range_breakout"
   | "trend_pullback"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.bridge import hypothesis_to_mql
@@ -53,6 +54,24 @@ def test_hypothesis_export_writes_standalone_ea_set_and_spec() -> None:
     assert "InpRiskFraction=0.015" in set_text
     assert "InpMaxTradesPerDay=6" in set_text
     assert '"strategy_id": "sweep_reclaim_export_test"' in spec_text
+
+
+def test_hypothesis_export_rejects_strategy_grammar_until_rule_tree_emitter_exists() -> None:
+    strategy = HypothesisSpec(
+        strategy_id="grammar_export_guard",
+        lineage="strategy_grammar",
+        timeframe="m5",
+        hypothesis="A generated rule tree should not export as an incomplete fixed-template EA.",
+        parameters={
+            "rule_blocks": [{"name": "fair_value_gap"}],
+            "atr_stop": 1.0,
+            "reward_risk": 1.0,
+            "max_hold_bars": 8,
+        },
+    )
+
+    with pytest.raises(ValueError, match="rule-tree MQL generation"):
+        hypothesis_to_mql.export(strategy, output_name="_test_grammar_guard")
 
 
 def test_hypothesis_export_route_accepts_ui_payload() -> None:

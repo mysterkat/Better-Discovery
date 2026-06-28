@@ -336,7 +336,7 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
               onClick={() => openFolder(exportPath).catch(() => undefined)}
               title={exportPath}
             >
-              Open folder
+              See in folder
             </button>
           )}
         </div>

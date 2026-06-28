@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from random import Random
 
 from .models import HypothesisDiscoveryRequest, HypothesisSpec, Lineage
 
@@ -12,7 +13,7 @@ from .models import HypothesisDiscoveryRequest, HypothesisSpec, Lineage
 class HypothesisProfile:
     lineage: Lineage
     thesis: str
-    parameters: dict[str, int | float | str | bool]
+    parameters: dict[str, object]
 
 
 SESSION_WINDOWS: tuple[tuple[str, int, int], ...] = (
@@ -33,6 +34,11 @@ def _fingerprint(lineage: str, params: dict[str, int | float | str | bool]) -> s
 
 def _id(lineage: str, params: dict[str, int | float | str | bool]) -> str:
     return f"{lineage}_{_fingerprint(lineage, params)}"
+
+
+def _grammar_id(params: dict[str, object]) -> str:
+    raw = json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
+    return f"grammar_{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]}"
 
 
 def _with_common_filters(
@@ -331,7 +337,115 @@ def _inside_bar_expansion() -> list[HypothesisProfile]:
     return _with_common_filters("inside_bar_expansion", thesis, bases)
 
 
+GRAMMAR_ENTRY_BLOCKS: tuple[dict[str, object], ...] = (
+    {"name": "liquidity_sweep_reclaim", "lookback": 12, "penetration_atr": 0.05, "wick_min": 0.35},
+    {"name": "liquidity_sweep_reclaim", "lookback": 24, "penetration_atr": 0.10, "wick_min": 0.45},
+    {"name": "prior_day_liquidity", "buffer_atr": 0.02},
+    {"name": "session_liquidity", "range_start_utc": 0, "range_end_utc": 6, "session_start_utc": 6, "session_end_utc": 20},
+    {"name": "asian_range_liquidity", "buffer_atr": 0.03, "session_start_utc": 6, "session_end_utc": 18},
+    {"name": "london_sweep", "buffer_atr": 0.03, "session_end_utc": 18},
+    {"name": "ny_sweep", "buffer_atr": 0.03, "session_end_utc": 22},
+    {"name": "equal_high_low_liquidity", "lookback": 36, "tolerance_atr": 0.15, "buffer_atr": 0.02},
+    {"name": "failed_breakout_reversal", "lookback": 24, "buffer_atr": 0.05},
+    {"name": "opening_range_break", "range_start_utc": 0, "range_end_utc": 1, "session_start_utc": 1, "session_end_utc": 20, "buffer_atr": 0.02},
+    {"name": "opening_range_reversal", "range_start_utc": 0, "range_end_utc": 1, "session_start_utc": 1, "session_end_utc": 20, "buffer_atr": 0.03},
+    {"name": "inside_bar_expansion", "buffer_atr": 0.02},
+    {"name": "fair_value_gap", "mode": "new_or_retrace"},
+    {"name": "inverse_fair_value_gap", "buffer_atr": 0.01},
+    {"name": "order_block", "ob_lookback": 5, "displacement_atr": 1.4},
+    {"name": "breaker_block", "ob_lookback": 5, "retest_bars": 8},
+    {"name": "mitigation_block", "ob_lookback": 8, "displacement_atr": 1.2},
+    {"name": "rejection_block", "ob_lookback": 8, "displacement_atr": 1.2},
+    {"name": "trend_pullback", "ema_length": 20, "pullback_atr": 0.45, "rsi_trigger": 50.0},
+    {"name": "volatility_spike_reversal", "spike_range_atr": 1.8, "rsi_extreme": 32.0},
+)
+
+GRAMMAR_CONFIRMATION_BLOCKS: tuple[dict[str, object], ...] = (
+    {"name": "market_structure_shift", "swing_left": 2, "swing_right": 2, "buffer_atr": 0.01},
+    {"name": "break_of_structure", "swing_left": 3, "swing_right": 2, "buffer_atr": 0.02, "context": "avoid_h4_opposite"},
+    {"name": "change_of_character", "swing_left": 2, "swing_right": 2, "buffer_atr": 0.01},
+    {"name": "internal_structure_break", "buffer_atr": 0.01},
+    {"name": "external_structure_break", "buffer_atr": 0.02},
+    {"name": "displacement_candle", "range_atr": 1.2, "body_min": 0.50},
+    {"name": "fair_value_gap", "mode": "new"},
+    {"name": "fvg_mitigation_rejection"},
+    {"name": "inverse_fair_value_gap", "buffer_atr": 0.01},
+    {"name": "balanced_price_range", "lookback": 12},
+    {"name": "higher_timeframe_bias", "mode": "avoid_h4_opposite"},
+    {"name": "premium_discount"},
+    {"name": "liquidity_pool_distance", "lookback": 48, "max_distance_atr": 1.0},
+)
+
+GRAMMAR_FILTER_BLOCKS: tuple[dict[str, object], ...] = (
+    {"name": "day_time_filter", "weekdays": "0,1,2,3,4", "session_start_utc": 0, "session_end_utc": 24},
+    {"name": "day_time_filter", "weekdays": "1,2,3", "session_start_utc": 3, "session_end_utc": 22},
+    {"name": "volatility_regime", "mode": "expansion", "min_rng_atr": 0.8},
+    {"name": "volatility_regime", "mode": "compression", "quantile": 0.30},
+    {"name": "volatility_regime", "mode": "high_vol_kill", "max_rng_atr": 3.2},
+    {"name": "trend_day", "trend_open_atr": 0.30},
+    {"name": "higher_timeframe_bias", "mode": "trend_aligned"},
+)
+
+GRAMMAR_SMT_BLOCKS: tuple[dict[str, object], ...] = (
+    {"name": "smt_divergence", "proxy": "dxy", "lookback": 24},
+    {"name": "smt_divergence", "proxy": "silver", "lookback": 24},
+    {"name": "smt_divergence", "proxy": "us10y", "lookback": 24},
+)
+
+
+def _strategy_grammar(max_variants: int, seed: int = 310200) -> list[HypothesisProfile]:
+    thesis = (
+        "Autonomous strategy grammar: combine liquidity, ICT/SMT structure, "
+        "imbalance, session, volatility, and exit blocks into explainable closed-bar rules."
+    )
+    rng = Random(seed)
+    profiles: list[HypothesisProfile] = []
+    seen: set[str] = set()
+    attempts = 0
+    while len(profiles) < max_variants and attempts < max_variants * 12:
+        attempts += 1
+        entry = dict(rng.choice(GRAMMAR_ENTRY_BLOCKS))
+        confirmations = [dict(rng.choice(GRAMMAR_CONFIRMATION_BLOCKS))]
+        if rng.random() < 0.55:
+            extra = dict(rng.choice(GRAMMAR_CONFIRMATION_BLOCKS))
+            if extra["name"] != confirmations[0]["name"]:
+                confirmations.append(extra)
+        filters: list[dict[str, object]] = []
+        if rng.random() < 0.75:
+            filters.append(dict(rng.choice(GRAMMAR_FILTER_BLOCKS)))
+        if rng.random() < 0.12:
+            filters.append(dict(rng.choice(GRAMMAR_SMT_BLOCKS)))
+
+        blocks = [entry, *confirmations, *filters]
+        params: dict[str, object] = {
+            "recipe": "strategy_grammar",
+            "rule_blocks": blocks,
+            "block_logic": "all" if len(blocks) <= 4 else "vote",
+            "min_block_votes": max(2, len(blocks) - 1),
+            "direction_mode": rng.choice(DIRECTION_MODES),
+            "session_start_utc": int(rng.choice((0, 3, 6, 8, 12))),
+            "session_end_utc": int(rng.choice((18, 20, 22, 24))),
+            "volatility_filter": "none",
+            "stop_mode": rng.choice(("atr", "structure")),
+            "atr_stop": rng.choice((0.7, 0.9, 1.1, 1.4, 1.8)),
+            "reward_risk": rng.choice((0.8, 1.0, 1.25, 1.5, 2.0)),
+            "atr_trail": rng.choice((0.0, 0.0, 0.6, 1.0, 1.5)),
+            "max_hold_bars": rng.choice((4, 6, 8, 12, 16, 24)),
+            "first_signal_per_day": rng.random() < 0.25,
+        }
+        if int(params["session_start_utc"]) >= int(params["session_end_utc"]):
+            params["session_start_utc"] = 0
+            params["session_end_utc"] = 24
+        fp = _grammar_id(params)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        profiles.append(HypothesisProfile("strategy_grammar", thesis, params))
+    return profiles
+
+
 BUILDERS = {
+    "strategy_grammar": lambda: _strategy_grammar(1_000),
     "time_series_breakout": _time_series_breakout,
     "session_range_breakout": _session_range_breakout,
     "trend_pullback": _trend_pullback,
@@ -356,7 +470,14 @@ def generate_hypotheses(request: HypothesisDiscoveryRequest) -> list[HypothesisS
     deserves deeper MT5 testing.
     """
     requested = request.families or tuple(BUILDERS.keys())  # type: ignore[assignment]
-    family_profiles = {lineage: BUILDERS[lineage]() for lineage in requested}
+    family_profiles = {
+        lineage: (
+            _strategy_grammar(request.max_variants, seed=310200 + len(requested))
+            if lineage == "strategy_grammar"
+            else BUILDERS[lineage]()
+        )
+        for lineage in requested
+    }
     indices = {lineage: 0 for lineage in requested}
     specs: list[HypothesisSpec] = []
 
