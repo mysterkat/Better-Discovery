@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,8 @@ _TF_MINUTES: dict[str, int] = {
     "d1": 1440, "w1": 10080, "mn1": 43200,
 }
 
+_KNOWN_CLOSED_MONTH_DAYS = {(1, 1), (12, 25)}
+
 
 def _parse_filename(name: str) -> tuple[str, str] | None:
     """Return (symbol, tf_label) for a recognized hist_data CSV, else None."""
@@ -42,6 +44,135 @@ def _parse_filename(name: str) -> tuple[str, str] | None:
     if not m:
         return None
     return m.group(1).upper(), m.group(2).lower()
+
+
+def _easter_date(year: int) -> date:
+    """Gregorian Easter date using Meeus/Jones/Butcher algorithm."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _is_known_market_closed_day(value: date) -> bool:
+    if value.weekday() >= 5:
+        return True
+    if (value.month, value.day) in _KNOWN_CLOSED_MONTH_DAYS:
+        return True
+    return value == (_easter_date(value.year) - timedelta(days=2))
+
+
+def _trading_days_between(start: date, end: date) -> list[date]:
+    days: list[date] = []
+    current = start
+    while current <= end:
+        if not _is_known_market_closed_day(current):
+            days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
+def _gap_crosses_only_closed_days(start: pd.Timestamp, end: pd.Timestamp) -> bool:
+    start_date = start.date()
+    end_date = end.date()
+    if start_date == end_date:
+        return False
+    middle = start_date + timedelta(days=1)
+    while middle < end_date:
+        if not _is_known_market_closed_day(middle):
+            return False
+        middle += timedelta(days=1)
+    return _is_known_market_closed_day(start_date) or _is_known_market_closed_day(end_date) or start.weekday() == 4
+
+
+def _audit_mt5_bars(symbol: str, timeframe: str, bars: pd.DataFrame) -> dict[str, Any]:
+    expected_minutes = _TF_MINUTES.get(timeframe.lower())
+    issues: list[str] = []
+    if bars.empty:
+        return {
+            "passed": False,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "rows": 0,
+            "issues": ["no bars"],
+        }
+
+    frame = bars.copy()
+    frame["time"] = pd.to_datetime(frame["time"], utc=True)
+    frame = frame.sort_values("time").reset_index(drop=True)
+    duplicates = int(frame["time"].duplicated().sum())
+    if duplicates:
+        issues.append(f"{duplicates} duplicate timestamps")
+    non_monotonic = int((frame["time"].diff().dt.total_seconds().dropna() <= 0).sum())
+    if non_monotonic:
+        issues.append(f"{non_monotonic} non-increasing timestamps")
+
+    ohlc = frame[["open", "high", "low", "close"]].apply(pd.to_numeric, errors="coerce")
+    null_ohlc = int(ohlc.isna().any(axis=1).sum())
+    invalid_ohlc = int(((ohlc["high"] < ohlc[["open", "close", "low"]].max(axis=1)) |
+                        (ohlc["low"] > ohlc[["open", "close", "high"]].min(axis=1)) |
+                        (ohlc <= 0).any(axis=1)).sum())
+    if null_ohlc:
+        issues.append(f"{null_ohlc} rows with null OHLC")
+    if invalid_ohlc:
+        issues.append(f"{invalid_ohlc} rows with invalid OHLC")
+
+    first_time = pd.Timestamp(frame["time"].iloc[0])
+    last_time = pd.Timestamp(frame["time"].iloc[-1])
+    present_days = {pd.Timestamp(value).date() for value in frame["time"]}
+    expected_days = _trading_days_between(first_time.date(), last_time.date())
+    missing_days = [day.isoformat() for day in expected_days if day not in present_days]
+    if missing_days:
+        issues.append(f"{len(missing_days)} missing trading days")
+
+    large_gaps: list[dict[str, Any]] = []
+    if expected_minutes:
+        threshold_seconds = max(expected_minutes * 60 * 18, 90 * 60)
+        for previous, current in zip(frame["time"].iloc[:-1], frame["time"].iloc[1:]):
+            previous_ts = pd.Timestamp(previous)
+            current_ts = pd.Timestamp(current)
+            gap_seconds = (current_ts - previous_ts).total_seconds()
+            if gap_seconds <= threshold_seconds:
+                continue
+            if _gap_crosses_only_closed_days(previous_ts, current_ts):
+                continue
+            large_gaps.append({
+                "from": previous_ts.isoformat(),
+                "to": current_ts.isoformat(),
+                "minutes": round(gap_seconds / 60, 2),
+            })
+    if large_gaps:
+        issues.append(f"{len(large_gaps)} suspicious large gaps")
+
+    return {
+        "passed": not issues,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "rows": int(len(frame)),
+        "first_time": first_time.isoformat(),
+        "last_time": last_time.isoformat(),
+        "duplicate_timestamps": duplicates,
+        "non_monotonic_timestamps": non_monotonic,
+        "null_ohlc_rows": null_ohlc,
+        "invalid_ohlc_rows": invalid_ohlc,
+        "missing_trading_days_count": len(missing_days),
+        "missing_trading_days": missing_days[:50],
+        "large_gaps_count": len(large_gaps),
+        "large_gaps": large_gaps[:50],
+        "known_closed_days_excluded": "weekends, Jan 1, Dec 25, Good Friday",
+        "issues": issues,
+    }
 
 
 def list_current_import() -> dict[str, Any]:
@@ -131,6 +262,47 @@ def clear_data_folder() -> dict[str, Any]:
 _PROGRESS_RE = re.compile(r"^\[(\d+)/(\d+)\]\s*(.+)$")
 
 
+def _format_rate(bytes_per_second: float | int | None) -> str:
+    value = float(bytes_per_second or 0.0)
+    units = ["B/s", "KB/s", "MB/s", "GB/s"]
+    unit = units[0]
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            break
+        value /= 1024
+    return f"{value:.1f} {unit}"
+
+
+def _update_import_metrics(job: Any, metric: dict[str, Any], total: int) -> None:
+    metrics = dict(job.meta.get("import_metrics") or {})
+    completed = list(metrics.get("completed") or [])
+    completed.append(metric)
+    elapsed = sum(
+        float(item.get("download_seconds") or 0.0) + float(item.get("write_seconds") or 0.0)
+        for item in completed
+    )
+    done = len(completed)
+    remaining = max(0, total - done)
+    avg_seconds = elapsed / done if done else None
+    eta_seconds = (avg_seconds * remaining) if avg_seconds is not None else None
+    job.meta["import_metrics"] = {
+        "completed": completed[-20:],
+        "completed_timeframes": done,
+        "total_timeframes": total,
+        "last_symbol": metric.get("symbol"),
+        "last_timeframe": str(metric.get("timeframe", "")).upper(),
+        "last_rows": metric.get("rows"),
+        "last_file_bytes": metric.get("file_bytes"),
+        "download_bytes_per_second": metric.get("download_bytes_per_second"),
+        "write_bytes_per_second": metric.get("write_bytes_per_second"),
+        "download_rate_label": _format_rate(metric.get("download_bytes_per_second")),
+        "write_rate_label": _format_rate(metric.get("write_bytes_per_second")),
+        "eta_seconds": eta_seconds,
+    }
+    if eta_seconds is not None:
+        job.eta_seconds = eta_seconds
+
+
 def _run_toolkit_call(
     fn_name: str,
     payload: dict[str, Any],
@@ -217,6 +389,16 @@ def _run_toolkit_call(
                 continue
             if line.startswith("RESULT_JSON:"):
                 result_json = line[len("RESULT_JSON:"):].strip()
+                continue
+            if line.startswith("METRIC_JSON:"):
+                if job is not None:
+                    try:
+                        metric = json.loads(line[len("METRIC_JSON:"):].strip())
+                        tf_specs = payload.get("tf_specs")
+                        total = int(job.stage_total or (len(tf_specs) if isinstance(tf_specs, list) else 1))
+                        _update_import_metrics(job, metric, total)
+                    except Exception as exc:
+                        job.append_log(f"metric parse failed: {exc}")
                 continue
             # Update job stage from `[i/N] msg`
             m = _PROGRESS_RE.match(line)
@@ -359,7 +541,8 @@ def _publish_mt5_dataset(
     if not file_entries:
         return None
 
-    parsed: list[tuple[str, str, Path, pd.DataFrame]] = []
+    parsed: list[tuple[str, str, Path, pd.DataFrame, dict[str, Any]]] = []
+    quality_by_symbol: dict[str, dict[str, Any]] = {}
     for symbol, file_result in file_entries:
         path = Path(str(file_result["path"]))
         if not path.is_file():
@@ -367,20 +550,29 @@ def _publish_mt5_dataset(
         timeframe = str(file_result.get("label") or path.stem.split("_")[-1]).lower()
         bars = _mt5_csv_to_bars(path)
         if not bars.empty:
-            parsed.append((symbol, timeframe, path, bars))
+            audit = _audit_mt5_bars(symbol, timeframe, bars)
+            quality_by_symbol.setdefault(symbol, {})[timeframe] = audit
+            parsed.append((symbol, timeframe, path, bars, audit))
     if not parsed:
         return None
+    failed_audits = [
+        f"{symbol} {timeframe.upper()}: {', '.join(audit.get('issues') or ['quality audit failed'])}"
+        for symbol, timeframe, _, _, audit in parsed
+        if not audit.get("passed", False)
+    ]
+    if failed_audits:
+        raise RuntimeError("MT5 bar quality audit failed: " + "; ".join(failed_audits))
 
-    start = min(pd.Timestamp(frame["time"].min()).to_pydatetime() for _, _, _, frame in parsed)
-    end = max(pd.Timestamp(frame["time"].max()).to_pydatetime() for _, _, _, frame in parsed)
+    start = min(pd.Timestamp(frame["time"].min()).to_pydatetime() for _, _, _, frame, _ in parsed)
+    end = max(pd.Timestamp(frame["time"].max()).to_pydatetime() for _, _, _, frame, _ in parsed)
     dataset_id = f"mt5_{start:%Y%m%d}_{end:%Y%m%d}_{uuid.uuid4().hex[:8]}"
     catalog = catalog or MarketDataCatalog()
-    timeframes = sorted({timeframe for _, timeframe, _, _ in parsed}, key=lambda value: _TF_MINUTES.get(value, 99_999))
+    timeframes = sorted({timeframe for _, timeframe, _, _, _ in parsed}, key=lambda value: _TF_MINUTES.get(value, 99_999))
     manifest = DatasetManifest(
         dataset_id=dataset_id,
         provider="mt5",
         venue="MetaTrader 5 broker history",
-        symbols=sorted({symbol for symbol, _, _, _ in parsed}),
+        symbols=sorted({symbol for symbol, _, _, _, _ in parsed}),
         timeframes=timeframes,
         requested_from=start.isoformat(),
         requested_to=end.isoformat(),
@@ -390,9 +582,9 @@ def _publish_mt5_dataset(
             "write_discovery_csv": True,
             "bid_ask_mode": "bar_ohlc_midpoint_proxy",
         },
-        quality={"source": "mt5", "passed": True, "symbols": {}},
+        quality={"source": "mt5", "passed": True, "symbols": quality_by_symbol},
     )
-    for symbol, timeframe, source_path, bars in parsed:
+    for symbol, timeframe, source_path, bars, audit in parsed:
         item = catalog.write_parquet(
             manifest,
             bars,
@@ -405,6 +597,7 @@ def _publish_mt5_dataset(
             "source_csv": str(source_path),
             "rows": len(bars),
             "bid_ask_mode": "bar_ohlc_midpoint_proxy",
+            "bar_audit": audit,
         }
         catalog.write_discovery_csv(manifest, bars, symbol, timeframe)
     published = catalog.publish_discovery_csvs(manifest)
@@ -413,6 +606,7 @@ def _publish_mt5_dataset(
         {
             "source": "mt5",
             "passed": True,
+            "symbols": quality_by_symbol,
             "published_discovery_csvs": published,
             "bid_ask_mode": "bar_ohlc_midpoint_proxy",
             "note": "MT5 bar history has no historical bid/ask OHLC in this import path; bid/ask fields are proxied from bar OHLC.",

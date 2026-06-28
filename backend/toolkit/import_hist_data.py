@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import math
 import os
+import json
+import time
 from typing import Any
 
 # Maps user-facing TF string (prefix+value) to MT5 attribute name.
@@ -121,16 +123,17 @@ def _download_one(mt5: Any, symbol: str, tf_const: int, label: str,
     range request. The on-disk CSV format (datetime ``time`` index +
     ``open,high,low,close[,volume]`` columns) is preserved exactly.
     """
-    import time as _time
     from datetime import datetime, timedelta, timezone
     import pandas as pd
 
     mt5.copy_rates_from_pos(symbol, tf_const, 0, 99999)   # warm-up cache
-    _time.sleep(2)
+    time.sleep(2)
     # MT5 interprets range datetimes as UTC; use timezone-aware UTC bounds.
     date_to   = datetime.now(timezone.utc)
     date_from = date_to - timedelta(days=max(int(span_days), 1))
+    download_started = time.monotonic()
     rates = mt5.copy_rates_range(symbol, tf_const, date_from, date_to)
+    download_seconds = max(time.monotonic() - download_started, 0.000001)
     if rates is None or len(rates) == 0:
         return {
             "label": label, "ok": False,
@@ -148,7 +151,26 @@ def _download_one(mt5: Any, symbol: str, tf_const: int, label: str,
     df = df[keep_cols]
     filename = f"{symbol.lower()}_{label}.csv"
     path     = os.path.join(folder, filename)
+    write_started = time.monotonic()
     df.to_csv(path)
+    write_seconds = max(time.monotonic() - write_started, 0.000001)
+    file_bytes = os.path.getsize(path)
+    raw_bytes = int(getattr(rates, "nbytes", 0)) or int(df.memory_usage(index=True, deep=True).sum())
+    print(
+        "METRIC_JSON: " + json.dumps({
+            "symbol": symbol,
+            "timeframe": label,
+            "rows": int(len(df)),
+            "raw_bytes": raw_bytes,
+            "file_bytes": file_bytes,
+            "download_seconds": download_seconds,
+            "write_seconds": write_seconds,
+            "download_bytes_per_second": raw_bytes / download_seconds,
+            "write_bytes_per_second": file_bytes / write_seconds,
+            "path": path,
+        }),
+        flush=True,
+    )
     # Surface the broker's TRUE depth when the window came back short of ask.
     actual_from = df.index[0]
     actual_to   = df.index[-1]

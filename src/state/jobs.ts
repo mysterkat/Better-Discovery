@@ -27,6 +27,20 @@ export interface Job {
   started_at?: number | null;
   finished_at?: number | null;
   cancel_requested?: boolean;
+  meta?: {
+    import_metrics?: {
+      completed_timeframes?: number;
+      total_timeframes?: number;
+      last_symbol?: string;
+      last_timeframe?: string;
+      last_rows?: number;
+      last_file_bytes?: number;
+      download_rate_label?: string;
+      write_rate_label?: string;
+      eta_seconds?: number | null;
+    };
+    [key: string]: unknown;
+  };
   result?: unknown;
   error?: string;
 }

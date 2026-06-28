@@ -141,6 +141,45 @@ def test_mt5_import_rejects_partial_timeframe_result() -> None:
         mt5_import._validate_mt5_result(tf_specs, result)
 
 
+def test_mt5_bar_audit_passes_clean_weekdays() -> None:
+    times = pd.date_range("2025-01-06T00:00:00Z", "2025-01-07T23:55:00Z", freq="5min")
+    frame = pd.DataFrame({
+        "time": times,
+        "open": 2600.0,
+        "high": 2601.0,
+        "low": 2599.0,
+        "close": 2600.5,
+        "tick_volume": 1,
+        "real_volume": 1,
+    })
+
+    audit = mt5_import._audit_mt5_bars("XAUUSD", "m5", frame)
+
+    assert audit["passed"] is True
+    assert audit["missing_trading_days_count"] == 0
+    assert audit["duplicate_timestamps"] == 0
+
+
+def test_mt5_bar_audit_flags_missing_weekday() -> None:
+    times = list(pd.date_range("2025-01-06T00:00:00Z", "2025-01-06T23:55:00Z", freq="5min"))
+    times += list(pd.date_range("2025-01-08T00:00:00Z", "2025-01-08T23:55:00Z", freq="5min"))
+    frame = pd.DataFrame({
+        "time": times,
+        "open": 2600.0,
+        "high": 2601.0,
+        "low": 2599.0,
+        "close": 2600.5,
+        "tick_volume": 1,
+        "real_volume": 1,
+    })
+
+    audit = mt5_import._audit_mt5_bars("XAUUSD", "m5", frame)
+
+    assert audit["passed"] is False
+    assert audit["missing_trading_days_count"] == 1
+    assert "2025-01-07" in audit["missing_trading_days"]
+
+
 def _ticks(day: str, price: float) -> pd.DataFrame:
     times = pd.to_datetime([f"{day}T00:00:01Z", f"{day}T00:00:30Z"], utc=True)
     return pd.DataFrame({

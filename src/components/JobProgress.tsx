@@ -28,6 +28,18 @@ function formatEta(seconds: number | null | undefined): string {
   return `${h}h ${mm.toString().padStart(2, "0")}m`;
 }
 
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null || !isFinite(bytes) || bytes < 0) return "—";
+  let value = bytes;
+  const units = ["B", "KB", "MB", "GB"];
+  let unit = units[0];
+  for (unit of units) {
+    if (value < 1024 || unit === units[units.length - 1]) break;
+    value /= 1024;
+  }
+  return `${value.toFixed(value >= 10 || unit === "B" ? 0 : 1)} ${unit}`;
+}
+
 export default function JobProgress({
   jobId,
   onDone,
@@ -66,6 +78,8 @@ export default function JobProgress({
   const stageLabel = job.stage_index != null && job.stage_total != null
     ? `[${job.stage_index}/${job.stage_total}] ${job.stage_name ?? ""}`
     : (job.stage_name ?? "");
+  const importMetrics = job.meta?.import_metrics;
+  const importEta = importMetrics?.eta_seconds ?? job.eta_seconds;
 
   return (
     <div className={`job-progress status-${job.status}`}>
@@ -82,8 +96,8 @@ export default function JobProgress({
         {isRunning && stageLabel && (
           <span className="job-stage">{stageLabel}</span>
         )}
-        {isRunning && job.eta_seconds != null && (
-          <span className="job-eta">~{formatEta(job.eta_seconds)} left</span>
+        {isRunning && importEta != null && (
+          <span className="job-eta">~{formatEta(importEta)} left</span>
         )}
         {showCancel && isRunning && !job.cancel_requested && (
           <button
@@ -101,6 +115,24 @@ export default function JobProgress({
       {(isRunning || job.status === "done") && (
         <div className="job-progress-bar" aria-hidden="true">
           <div className="job-progress-fill" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+      {isRunning && importMetrics && (
+        <div className="job-import-meter">
+          <span>
+            Import {importMetrics.completed_timeframes ?? 0}/{importMetrics.total_timeframes ?? "?"}
+          </span>
+          {importMetrics.last_timeframe && (
+            <span>
+              Last {importMetrics.last_symbol ?? ""} {importMetrics.last_timeframe}
+              {importMetrics.last_rows != null ? ` - ${importMetrics.last_rows.toLocaleString()} bars` : ""}
+            </span>
+          )}
+          <span>MT5 {importMetrics.download_rate_label ?? "—"}</span>
+          <span>Disk {importMetrics.write_rate_label ?? "—"}</span>
+          {importMetrics.last_file_bytes != null && (
+            <span>Saved {formatBytes(importMetrics.last_file_bytes)}</span>
+          )}
         </div>
       )}
     </div>

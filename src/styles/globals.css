@@ -617,6 +617,17 @@ kbd {
   transition: width 0.3s ease;
 }
 .status-done .job-progress-fill { background: var(--accent); }
+.job-import-meter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  color: var(--text2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.job-import-meter span {
+  white-space: nowrap;
+}
 
 /* ── Phase grid ───────────────────────────────────────────────────── */
 .phase-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }

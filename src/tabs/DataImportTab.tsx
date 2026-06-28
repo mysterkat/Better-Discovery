@@ -41,6 +41,26 @@ function timeframeSpec(timeframe: string, tradingDays: number): TfSpec {
   return { prefix: prefix as TfSpec["prefix"], time_value: value, trading_days: tradingDays };
 }
 
+function datasetQualityLabel(dataset: MarketDataset): string {
+  if (dataset.state === "failed") return dataset.error ? "Failed" : "Failed";
+  const quality = dataset.quality ?? {};
+  if (quality.passed === false) return "Issues";
+  const symbols = quality.symbols;
+  if (symbols && typeof symbols === "object") {
+    let issueCount = 0;
+    for (const symbolQuality of Object.values(symbols as Record<string, unknown>)) {
+      if (!symbolQuality || typeof symbolQuality !== "object") continue;
+      for (const timeframeQuality of Object.values(symbolQuality as Record<string, unknown>)) {
+        if (!timeframeQuality || typeof timeframeQuality !== "object") continue;
+        const audit = timeframeQuality as { passed?: boolean; issues?: unknown[] };
+        if (audit.passed === false) issueCount += Array.isArray(audit.issues) ? audit.issues.length || 1 : 1;
+      }
+    }
+    if (issueCount > 0) return `${issueCount} issue${issueCount === 1 ? "" : "s"}`;
+  }
+  return dataset.state === "complete" ? "Clean" : "-";
+}
+
 export default function DataImportTab() {
   const [providers, setProviders] = useState<MarketDataProvider[]>([]);
   const [datasets, setDatasets] = useState<MarketDataset[]>([]);
@@ -396,13 +416,14 @@ export default function DataImportTab() {
         <div className="section-label">Dataset Catalog</div>
         <div className="dataset-table-wrap">
           <table className="data-table">
-            <thead><tr><th>Dataset</th><th>Provider</th><th>Symbols</th><th>Timeframes</th><th>State</th><th>Files</th><th>Action</th></tr></thead>
+            <thead><tr><th>Dataset</th><th>Provider</th><th>Symbols</th><th>Timeframes</th><th>State</th><th>Quality</th><th>Files</th><th>Action</th></tr></thead>
             <tbody>
               {datasets.map((dataset) => (
                 <tr key={dataset.dataset_id}>
                   <td title={dataset.dataset_id}>{dataset.dataset_id}</td><td>{dataset.provider}</td>
                   <td>{dataset.symbols.join(", ")}</td><td>{dataset.timeframes.map((value) => value.toUpperCase()).join(", ")}</td>
                   <td><span className={`status-badge ${dataset.state === "complete" ? "status-badge--ok" : dataset.state === "failed" ? "status-badge--err" : ""}`}>{dataset.state}</span></td>
+                  <td title={dataset.error ?? ""}><span className={`status-badge ${datasetQualityLabel(dataset) === "Clean" ? "status-badge--ok" : datasetQualityLabel(dataset) === "-" ? "" : "status-badge--err"}`}>{datasetQualityLabel(dataset)}</span></td>
                   <td>{dataset.files.length}</td>
                   <td>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -420,7 +441,7 @@ export default function DataImportTab() {
                   </td>
                 </tr>
               ))}
-              {!datasets.length && <tr><td colSpan={7}>No canonical datasets imported.</td></tr>}
+              {!datasets.length && <tr><td colSpan={8}>No canonical datasets imported.</td></tr>}
             </tbody>
           </table>
         </div>
