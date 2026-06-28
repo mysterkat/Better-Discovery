@@ -75,6 +75,9 @@ export interface HypothesisDiscoveryRequest {
   date_from: string;
   date_to: string;
   families?: HypothesisFamily[];
+  grammar_block_groups?: ("liquidity" | "structure" | "imbalance" | "orderflow" | "sessions" | "volatility" | "smt")[];
+  grammar_complexity?: "simple" | "medium" | "complex";
+  grammar_randomness?: "low" | "balanced" | "high";
   max_variants: number;
   min_closed_trades: number;
   min_trades_per_week?: number;

@@ -20,6 +20,8 @@ import IndicatorsTable from "../components/IndicatorsTable";
 import { renderValue, titleCase } from "../lib/format";
 import { useSettings } from "../state/settings";
 
+type HypothesisTimeframe = "m1" | "m5" | "m10" | "m15";
+
 interface HypothesisCandidate {
   strategy_id: string;
   strategy_fingerprint: string;
@@ -69,6 +71,11 @@ function formatNumber(value: number | null | undefined, digits = 2): string {
 
 function formatPct(value: number | null | undefined, digits = 1): string {
   return typeof value === "number" && isFinite(value) ? `${(value * 100).toFixed(digits)}%` : "-";
+}
+
+function normalizeHypothesisTimeframe(value: string): HypothesisTimeframe {
+  const lower = value.toLowerCase();
+  return lower === "m1" || lower === "m5" || lower === "m10" || lower === "m15" ? lower : "m15";
 }
 
 export default function DiscoveryResults() {
@@ -265,7 +272,7 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
       strategy_id: candidate.strategy_id,
       lineage: candidate.lineage,
       hypothesis: candidate.hypothesis,
-      timeframe: result.timeframe === "m5" ? "m5" : "m15",
+      timeframe: normalizeHypothesisTimeframe(result.timeframe),
       parameters: candidate.parameters,
     };
     try {

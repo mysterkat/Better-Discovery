@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 from fastapi.testclient import TestClient
 
 from app.bridge import hypothesis_to_mql
@@ -56,22 +54,41 @@ def test_hypothesis_export_writes_standalone_ea_set_and_spec() -> None:
     assert '"strategy_id": "sweep_reclaim_export_test"' in spec_text
 
 
-def test_hypothesis_export_rejects_strategy_grammar_until_rule_tree_emitter_exists() -> None:
+def test_hypothesis_export_translates_strategy_grammar_rule_tree() -> None:
     strategy = HypothesisSpec(
-        strategy_id="grammar_export_guard",
+        strategy_id="grammar_export_test",
         lineage="strategy_grammar",
         timeframe="m5",
-        hypothesis="A generated rule tree should not export as an incomplete fixed-template EA.",
+        hypothesis="A generated rule tree should export as explicit MQL block functions.",
         parameters={
-            "rule_blocks": [{"name": "fair_value_gap"}],
+            "rule_blocks": [
+                {"name": "liquidity_sweep_reclaim", "lookback": 24, "penetration_atr": 0.1},
+                {"name": "market_structure_shift", "swing_left": 2, "swing_right": 2},
+                {"name": "fair_value_gap", "mode": "new_or_retrace"},
+            ],
+            "block_logic": "all",
+            "stop_mode": "structure",
+            "direction_mode": "both",
+            "session_start_utc": 0,
+            "session_end_utc": 24,
+            "volatility_filter": "none",
             "atr_stop": 1.0,
             "reward_risk": 1.0,
             "max_hold_bars": 8,
         },
     )
 
-    with pytest.raises(ValueError, match="rule-tree MQL generation"):
-        hypothesis_to_mql.export(strategy, output_name="_test_grammar_guard")
+    result = hypothesis_to_mql.export(strategy, output_name="_test_grammar_export")
+    mq5_text = Path(result["mq5_path"]).read_text(encoding="utf-8")
+    set_text = Path(result["set_path"]).read_text(encoding="utf-8")
+
+    assert 'input string InpLineage = "strategy_grammar";' in mq5_text
+    assert "bool GrammarBlock0(const int direction)" in mq5_text
+    assert "bool GrammarBlock1(const int direction)" in mq5_text
+    assert "bool GrammarBlock2(const int direction)" in mq5_text
+    assert 'else if(InpLineage == "strategy_grammar")' in mq5_text
+    assert "LatestSwingLow(2, 2, level)" in mq5_text
+    assert "InpGrammarStopMode=structure" in set_text
 
 
 def test_hypothesis_export_route_accepts_ui_payload() -> None:

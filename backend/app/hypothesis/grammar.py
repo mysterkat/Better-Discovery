@@ -338,87 +338,118 @@ def _inside_bar_expansion() -> list[HypothesisProfile]:
 
 
 GRAMMAR_ENTRY_BLOCKS: tuple[dict[str, object], ...] = (
-    {"name": "liquidity_sweep_reclaim", "lookback": 12, "penetration_atr": 0.05, "wick_min": 0.35},
-    {"name": "liquidity_sweep_reclaim", "lookback": 24, "penetration_atr": 0.10, "wick_min": 0.45},
-    {"name": "prior_day_liquidity", "buffer_atr": 0.02},
-    {"name": "session_liquidity", "range_start_utc": 0, "range_end_utc": 6, "session_start_utc": 6, "session_end_utc": 20},
-    {"name": "asian_range_liquidity", "buffer_atr": 0.03, "session_start_utc": 6, "session_end_utc": 18},
-    {"name": "london_sweep", "buffer_atr": 0.03, "session_end_utc": 18},
-    {"name": "ny_sweep", "buffer_atr": 0.03, "session_end_utc": 22},
-    {"name": "equal_high_low_liquidity", "lookback": 36, "tolerance_atr": 0.15, "buffer_atr": 0.02},
-    {"name": "failed_breakout_reversal", "lookback": 24, "buffer_atr": 0.05},
-    {"name": "opening_range_break", "range_start_utc": 0, "range_end_utc": 1, "session_start_utc": 1, "session_end_utc": 20, "buffer_atr": 0.02},
-    {"name": "opening_range_reversal", "range_start_utc": 0, "range_end_utc": 1, "session_start_utc": 1, "session_end_utc": 20, "buffer_atr": 0.03},
-    {"name": "inside_bar_expansion", "buffer_atr": 0.02},
-    {"name": "fair_value_gap", "mode": "new_or_retrace"},
-    {"name": "inverse_fair_value_gap", "buffer_atr": 0.01},
-    {"name": "order_block", "ob_lookback": 5, "displacement_atr": 1.4},
-    {"name": "breaker_block", "ob_lookback": 5, "retest_bars": 8},
-    {"name": "mitigation_block", "ob_lookback": 8, "displacement_atr": 1.2},
-    {"name": "rejection_block", "ob_lookback": 8, "displacement_atr": 1.2},
-    {"name": "trend_pullback", "ema_length": 20, "pullback_atr": 0.45, "rsi_trigger": 50.0},
-    {"name": "volatility_spike_reversal", "spike_range_atr": 1.8, "rsi_extreme": 32.0},
+    {"group": "liquidity", "name": "liquidity_sweep_reclaim", "lookback": 12, "penetration_atr": 0.05, "wick_min": 0.35},
+    {"group": "liquidity", "name": "liquidity_sweep_reclaim", "lookback": 24, "penetration_atr": 0.10, "wick_min": 0.45},
+    {"group": "liquidity", "name": "prior_day_liquidity", "buffer_atr": 0.02},
+    {"group": "liquidity", "name": "session_liquidity", "range_start_utc": 0, "range_end_utc": 6, "session_start_utc": 6, "session_end_utc": 20},
+    {"group": "sessions", "name": "asian_range_liquidity", "buffer_atr": 0.03, "session_start_utc": 6, "session_end_utc": 18},
+    {"group": "sessions", "name": "london_sweep", "buffer_atr": 0.03, "session_end_utc": 18},
+    {"group": "sessions", "name": "ny_sweep", "buffer_atr": 0.03, "session_end_utc": 22},
+    {"group": "liquidity", "name": "equal_high_low_liquidity", "lookback": 36, "tolerance_atr": 0.15, "buffer_atr": 0.02},
+    {"group": "structure", "name": "failed_breakout_reversal", "lookback": 24, "buffer_atr": 0.05},
+    {"group": "sessions", "name": "opening_range_break", "range_start_utc": 0, "range_end_utc": 1, "session_start_utc": 1, "session_end_utc": 20, "buffer_atr": 0.02},
+    {"group": "sessions", "name": "opening_range_reversal", "range_start_utc": 0, "range_end_utc": 1, "session_start_utc": 1, "session_end_utc": 20, "buffer_atr": 0.03},
+    {"group": "volatility", "name": "inside_bar_expansion", "buffer_atr": 0.02},
+    {"group": "imbalance", "name": "fair_value_gap", "mode": "new_or_retrace"},
+    {"group": "imbalance", "name": "inverse_fair_value_gap", "buffer_atr": 0.01},
+    {"group": "orderflow", "name": "order_block", "ob_lookback": 5, "displacement_atr": 1.4},
+    {"group": "orderflow", "name": "breaker_block", "ob_lookback": 5, "retest_bars": 8},
+    {"group": "orderflow", "name": "mitigation_block", "ob_lookback": 8, "displacement_atr": 1.2},
+    {"group": "orderflow", "name": "rejection_block", "ob_lookback": 8, "displacement_atr": 1.2},
+    {"group": "structure", "name": "trend_pullback", "ema_length": 20, "pullback_atr": 0.45, "rsi_trigger": 50.0},
+    {"group": "volatility", "name": "volatility_spike_reversal", "spike_range_atr": 1.8, "rsi_extreme": 32.0},
 )
 
 GRAMMAR_CONFIRMATION_BLOCKS: tuple[dict[str, object], ...] = (
-    {"name": "market_structure_shift", "swing_left": 2, "swing_right": 2, "buffer_atr": 0.01},
-    {"name": "break_of_structure", "swing_left": 3, "swing_right": 2, "buffer_atr": 0.02, "context": "avoid_h4_opposite"},
-    {"name": "change_of_character", "swing_left": 2, "swing_right": 2, "buffer_atr": 0.01},
-    {"name": "internal_structure_break", "buffer_atr": 0.01},
-    {"name": "external_structure_break", "buffer_atr": 0.02},
-    {"name": "displacement_candle", "range_atr": 1.2, "body_min": 0.50},
-    {"name": "fair_value_gap", "mode": "new"},
-    {"name": "fvg_mitigation_rejection"},
-    {"name": "inverse_fair_value_gap", "buffer_atr": 0.01},
-    {"name": "balanced_price_range", "lookback": 12},
-    {"name": "higher_timeframe_bias", "mode": "avoid_h4_opposite"},
-    {"name": "premium_discount"},
-    {"name": "liquidity_pool_distance", "lookback": 48, "max_distance_atr": 1.0},
+    {"group": "structure", "name": "market_structure_shift", "swing_left": 2, "swing_right": 2, "buffer_atr": 0.01},
+    {"group": "structure", "name": "break_of_structure", "swing_left": 3, "swing_right": 2, "buffer_atr": 0.02, "context": "avoid_h4_opposite"},
+    {"group": "structure", "name": "change_of_character", "swing_left": 2, "swing_right": 2, "buffer_atr": 0.01},
+    {"group": "structure", "name": "internal_structure_break", "buffer_atr": 0.01},
+    {"group": "structure", "name": "external_structure_break", "buffer_atr": 0.02},
+    {"group": "volatility", "name": "displacement_candle", "range_atr": 1.2, "body_min": 0.50},
+    {"group": "imbalance", "name": "fair_value_gap", "mode": "new"},
+    {"group": "imbalance", "name": "fvg_mitigation_rejection"},
+    {"group": "imbalance", "name": "inverse_fair_value_gap", "buffer_atr": 0.01},
+    {"group": "imbalance", "name": "balanced_price_range", "lookback": 12},
+    {"group": "structure", "name": "higher_timeframe_bias", "mode": "avoid_h4_opposite"},
+    {"group": "structure", "name": "premium_discount"},
+    {"group": "liquidity", "name": "liquidity_pool_distance", "lookback": 48, "max_distance_atr": 1.0},
 )
 
 GRAMMAR_FILTER_BLOCKS: tuple[dict[str, object], ...] = (
-    {"name": "day_time_filter", "weekdays": "0,1,2,3,4", "session_start_utc": 0, "session_end_utc": 24},
-    {"name": "day_time_filter", "weekdays": "1,2,3", "session_start_utc": 3, "session_end_utc": 22},
-    {"name": "volatility_regime", "mode": "expansion", "min_rng_atr": 0.8},
-    {"name": "volatility_regime", "mode": "compression", "quantile": 0.30},
-    {"name": "volatility_regime", "mode": "high_vol_kill", "max_rng_atr": 3.2},
-    {"name": "trend_day", "trend_open_atr": 0.30},
-    {"name": "higher_timeframe_bias", "mode": "trend_aligned"},
+    {"group": "sessions", "name": "day_time_filter", "weekdays": "0,1,2,3,4", "session_start_utc": 0, "session_end_utc": 24},
+    {"group": "sessions", "name": "day_time_filter", "weekdays": "1,2,3", "session_start_utc": 3, "session_end_utc": 22},
+    {"group": "volatility", "name": "volatility_regime", "mode": "expansion", "min_rng_atr": 0.8},
+    {"group": "volatility", "name": "volatility_regime", "mode": "compression", "quantile": 0.30},
+    {"group": "volatility", "name": "volatility_regime", "mode": "high_vol_kill", "max_rng_atr": 3.2},
+    {"group": "structure", "name": "trend_day", "trend_open_atr": 0.30},
+    {"group": "structure", "name": "higher_timeframe_bias", "mode": "trend_aligned"},
 )
 
 GRAMMAR_SMT_BLOCKS: tuple[dict[str, object], ...] = (
-    {"name": "smt_divergence", "proxy": "dxy", "lookback": 24},
-    {"name": "smt_divergence", "proxy": "silver", "lookback": 24},
-    {"name": "smt_divergence", "proxy": "us10y", "lookback": 24},
+    {"group": "smt", "name": "smt_divergence", "proxy": "dxy", "lookback": 24},
+    {"group": "smt", "name": "smt_divergence", "proxy": "silver", "lookback": 24},
+    {"group": "smt", "name": "smt_divergence", "proxy": "us10y", "lookback": 24},
 )
 
 
-def _strategy_grammar(max_variants: int, seed: int = 310200) -> list[HypothesisProfile]:
+def _strip_group(block: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in block.items() if key != "group"}
+
+
+def _allowed_blocks(
+    blocks: tuple[dict[str, object], ...],
+    enabled_groups: set[str],
+) -> list[dict[str, object]]:
+    selected = [dict(block) for block in blocks if str(block.get("group")) in enabled_groups]
+    return selected or [dict(block) for block in blocks]
+
+
+def _strategy_grammar(
+    max_variants: int,
+    seed: int = 310200,
+    *,
+    block_groups: tuple[str, ...] | None = None,
+    complexity: str = "medium",
+    randomness: str = "balanced",
+) -> list[HypothesisProfile]:
     thesis = (
         "Autonomous strategy grammar: combine liquidity, ICT/SMT structure, "
         "imbalance, session, volatility, and exit blocks into explainable closed-bar rules."
     )
-    rng = Random(seed)
+    seed_offset = {"low": 7, "balanced": 97, "high": 997}.get(randomness, 97)
+    rng = Random(seed + seed_offset)
+    enabled_groups = set(block_groups or ("liquidity", "structure", "imbalance", "orderflow", "sessions", "volatility"))
+    entry_blocks = _allowed_blocks(GRAMMAR_ENTRY_BLOCKS, enabled_groups)
+    confirmation_blocks = _allowed_blocks(GRAMMAR_CONFIRMATION_BLOCKS, enabled_groups)
+    filter_blocks = [dict(block) for block in GRAMMAR_FILTER_BLOCKS if str(block.get("group")) in enabled_groups]
+    smt_blocks = _allowed_blocks(GRAMMAR_SMT_BLOCKS, enabled_groups) if "smt" in enabled_groups else []
+    extra_confirmation_chance = {"simple": 0.15, "medium": 0.55, "complex": 0.85}.get(complexity, 0.55)
+    filter_chance = {"simple": 0.35, "medium": 0.75, "complex": 0.90}.get(complexity, 0.75)
+    smt_chance = {"simple": 0.04, "medium": 0.12, "complex": 0.25}.get(complexity, 0.12)
     profiles: list[HypothesisProfile] = []
     seen: set[str] = set()
     attempts = 0
     while len(profiles) < max_variants and attempts < max_variants * 12:
         attempts += 1
-        entry = dict(rng.choice(GRAMMAR_ENTRY_BLOCKS))
-        confirmations = [dict(rng.choice(GRAMMAR_CONFIRMATION_BLOCKS))]
-        if rng.random() < 0.55:
-            extra = dict(rng.choice(GRAMMAR_CONFIRMATION_BLOCKS))
+        entry = _strip_group(dict(rng.choice(entry_blocks)))
+        confirmations = [_strip_group(dict(rng.choice(confirmation_blocks)))]
+        if rng.random() < extra_confirmation_chance:
+            extra = _strip_group(dict(rng.choice(confirmation_blocks)))
             if extra["name"] != confirmations[0]["name"]:
                 confirmations.append(extra)
         filters: list[dict[str, object]] = []
-        if rng.random() < 0.75:
-            filters.append(dict(rng.choice(GRAMMAR_FILTER_BLOCKS)))
-        if rng.random() < 0.12:
-            filters.append(dict(rng.choice(GRAMMAR_SMT_BLOCKS)))
+        if filter_blocks and rng.random() < filter_chance:
+            filters.append(_strip_group(dict(rng.choice(filter_blocks))))
+        if smt_blocks and rng.random() < smt_chance:
+            filters.append(_strip_group(dict(rng.choice(smt_blocks))))
 
         blocks = [entry, *confirmations, *filters]
         params: dict[str, object] = {
             "recipe": "strategy_grammar",
+            "grammar_complexity": complexity,
+            "grammar_randomness": randomness,
+            "grammar_block_groups": ",".join(sorted(enabled_groups)),
             "rule_blocks": blocks,
             "block_logic": "all" if len(blocks) <= 4 else "vote",
             "min_block_votes": max(2, len(blocks) - 1),
@@ -472,7 +503,13 @@ def generate_hypotheses(request: HypothesisDiscoveryRequest) -> list[HypothesisS
     requested = request.families or tuple(BUILDERS.keys())  # type: ignore[assignment]
     family_profiles = {
         lineage: (
-            _strategy_grammar(request.max_variants, seed=310200 + len(requested))
+            _strategy_grammar(
+                request.max_variants,
+                seed=310200 + len(requested),
+                block_groups=request.grammar_block_groups,
+                complexity=request.grammar_complexity,
+                randomness=request.grammar_randomness,
+            )
             if lineage == "strategy_grammar"
             else BUILDERS[lineage]()
         )

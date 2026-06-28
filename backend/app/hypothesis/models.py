@@ -119,6 +119,12 @@ class HypothesisDiscoveryRequest(BaseModel):
     date_from: datetime
     date_to: datetime
     families: tuple[Lineage, ...] | None = None
+    grammar_block_groups: tuple[
+        Literal["liquidity", "structure", "imbalance", "orderflow", "sessions", "volatility", "smt"],
+        ...,
+    ] | None = None
+    grammar_complexity: Literal["simple", "medium", "complex"] = "medium"
+    grammar_randomness: Literal["low", "balanced", "high"] = "balanced"
     max_variants: int = Field(default=5_000, ge=1, le=5_000)
     min_closed_trades: int = Field(default=180, ge=1)
     min_trades_per_week: float = Field(default=2.5, ge=0)

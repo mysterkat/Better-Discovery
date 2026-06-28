@@ -49,11 +49,16 @@ def _as_bool(params: dict[str, Any], key: str, default: bool) -> bool:
 
 
 def _timeframe_constant(timeframe: str) -> str:
-    return {"m5": "PERIOD_M5", "m15": "PERIOD_M15"}.get(timeframe.lower(), "PERIOD_M15")
+    return {
+        "m1": "PERIOD_M1",
+        "m5": "PERIOD_M5",
+        "m10": "PERIOD_M10",
+        "m15": "PERIOD_M15",
+    }.get(timeframe.lower(), "PERIOD_M15")
 
 
 def _timeframe_set_value(value: object) -> str:
-    return {"PERIOD_M5": "5", "PERIOD_M15": "15"}.get(str(value), str(value))
+    return {"PERIOD_M1": "1", "PERIOD_M5": "5", "PERIOD_M10": "10", "PERIOD_M15": "15"}.get(str(value), str(value))
 
 
 def _default_max_hold(strategy: HypothesisSpec) -> int:
@@ -133,6 +138,7 @@ def _input_values(
         "InpMomentumBars": _as_int(params, "momentum_bars", 8),
         "InpMomentumAtr": _as_float(params, "momentum_atr", 0.35),
         "InpContextFilter": str(params.get("context_filter", "none")),
+        "InpGrammarStopMode": str(params.get("stop_mode", "atr")),
     }
 
 
@@ -169,6 +175,407 @@ def _set_text(values: dict[str, str | int | float | bool]) -> str:
             raw = str(value)
         lines.append(f"{key}={raw}")
     return "\n".join(lines) + "\n"
+
+
+def _mql_num(value: Any, default: float = 0.0) -> str:
+    try:
+        return f"{float(value):.10g}"
+    except (TypeError, ValueError):
+        return f"{default:.10g}"
+
+
+def _mql_int(value: Any, default: int = 0) -> str:
+    try:
+        return str(int(float(value)))
+    except (TypeError, ValueError):
+        return str(default)
+
+
+def _mql_text(value: Any, default: str = "") -> str:
+    raw = str(value if value is not None else default)
+    return _mql_string(raw)
+
+
+def _grammar_block_function(index: int, block: dict[str, Any]) -> str:
+    name = str(block.get("name", ""))
+    lookback = _mql_int(block.get("lookback", 24), 24)
+    buffer_atr = _mql_num(block.get("buffer_atr", 0.0), 0.0)
+    penetration_atr = _mql_num(block.get("penetration_atr", 0.05), 0.05)
+    wick_min = _mql_num(block.get("wick_min", block.get("wick_reject_min", 0.35)), 0.35)
+    close_location_min = _mql_num(block.get("close_location_min", 0.45), 0.45)
+    range_start = _mql_int(block.get("range_start_utc", 0), 0)
+    range_end = _mql_int(block.get("range_end_utc", 6), 6)
+    session_start = _mql_int(block.get("session_start_utc", block.get("range_end_utc", 0)), 0)
+    session_end = _mql_int(block.get("session_end_utc", 24), 24)
+    mode = _mql_text(block.get("mode", "new_or_retrace"), "new_or_retrace")
+    weekdays = _mql_text(block.get("weekdays", "0,1,2,3,4"), "0,1,2,3,4")
+    swing_left = _mql_int(block.get("swing_left", 2), 2)
+    swing_right = _mql_int(block.get("swing_right", 2), 2)
+    body_min = _mql_num(block.get("body_min", 0.50), 0.50)
+    range_atr = _mql_num(block.get("range_atr", block.get("spike_range_atr", 1.2)), 1.2)
+    rsi_extreme = _mql_num(block.get("rsi_extreme", 30.0), 30.0)
+    ema_length = _mql_int(block.get("ema_length", 20), 20)
+    pullback_atr = _mql_num(block.get("pullback_atr", 0.5), 0.5)
+    rsi_trigger = _mql_num(block.get("rsi_trigger", 50.0), 50.0)
+    max_distance_atr = _mql_num(block.get("max_distance_atr", 1.0), 1.0)
+    ob_lookback = _mql_int(block.get("ob_lookback", 5), 5)
+    displacement_atr = _mql_num(block.get("displacement_atr", 1.4), 1.4)
+    retest_bars = _mql_int(block.get("retest_bars", 8), 8)
+    tolerance_atr = _mql_num(block.get("tolerance_atr", 0.15), 0.15)
+    min_rng_atr = _mql_num(block.get("min_rng_atr", 1.0), 1.0)
+    max_rng_atr = _mql_num(block.get("max_rng_atr", 3.0), 3.0)
+    trend_open_atr = _mql_num(block.get("trend_open_atr", 0.35), 0.35)
+    quantile_factor = _mql_num(0.75 + float(block.get("quantile", 0.25) or 0.25), 1.0)
+
+    header = f"""bool GrammarBlock{index}(const int direction)
+{{
+   MqlRates b, prev;
+   if(!Bar(1, b) || !Bar(2, prev)) return false;
+   double atr = ATR(1);
+"""
+    footer = "\n   return false;\n}\n"
+
+    if name in {"liquidity_sweep_reclaim", "stop_run_reclaim"}:
+        body = f"""
+   double ph = HighestHigh(2, {lookback}), pl = LowestLow(2, {lookback});
+   if(direction > 0)
+      return b.low < pl - {penetration_atr} * atr && b.close > pl && LowerWickPct(b) >= {wick_min} && CloseLocation(b) >= {close_location_min};
+   return b.high > ph + {penetration_atr} * atr && b.close < ph && UpperWickPct(b) >= {wick_min} && (1.0 - CloseLocation(b)) >= {close_location_min};
+"""
+    elif name in {"prior_day_liquidity", "prior_day_high_low"}:
+        body = f"""
+   double pdh = iHigh(_Symbol, PERIOD_D1, 1), pdl = iLow(_Symbol, PERIOD_D1, 1);
+   if(direction > 0) return b.low < pdl - {buffer_atr} * atr && b.close > pdl + {buffer_atr} * atr;
+   return b.high > pdh + {buffer_atr} * atr && b.close < pdh - {buffer_atr} * atr;
+"""
+    elif name in {"session_liquidity", "asian_range_liquidity", "london_sweep", "ny_sweep"}:
+        if name == "asian_range_liquidity":
+            range_start, range_end = "0", "6"
+        elif name == "london_sweep":
+            range_start, range_end = "6", "10"
+        elif name == "ny_sweep":
+            range_start, range_end = "12", "15"
+        body = f"""
+   double rh, rl;
+   if(!RangeWindowLevels(1, {range_start}, {range_end}, rh, rl)) return false;
+   int hour = UtcHour(b.time);
+   bool in_window = hour >= {session_start} && hour < {session_end};
+   if(!in_window) return false;
+   if(direction > 0) return b.low < rl - {buffer_atr} * atr && b.close > rl + {buffer_atr} * atr;
+   return b.high > rh + {buffer_atr} * atr && b.close < rh - {buffer_atr} * atr;
+"""
+    elif name == "equal_high_low_liquidity":
+        body = f"""
+   double ph = HighestHigh(2, {lookback}), pl = LowestLow(2, {lookback});
+   double range = ph - pl;
+   if(range > {tolerance_atr} * atr) return false;
+   if(direction > 0) return b.low < pl - {buffer_atr} * atr && b.close > pl;
+   return b.high > ph + {buffer_atr} * atr && b.close < ph;
+"""
+    elif name == "failed_breakout_reversal":
+        body = f"""
+   double ph = HighestHigh(2, {lookback}), pl = LowestLow(2, {lookback});
+   if(direction > 0) return b.low < pl - {buffer_atr} * atr && b.close > pl && b.close > b.open;
+   return b.high > ph + {buffer_atr} * atr && b.close < ph && b.close < b.open;
+"""
+    elif name in {"opening_range_break", "opening_range_reversal"}:
+        if name == "opening_range_break":
+            body = f"""
+   double rh, rl;
+   if(!RangeWindowLevels(1, {range_start}, {range_end}, rh, rl)) return false;
+   int hour = UtcHour(b.time);
+   if(hour < {session_start} || hour >= {session_end}) return false;
+   if(direction > 0) return b.close > rh + {buffer_atr} * atr && prev.close <= rh + {buffer_atr} * atr;
+   return b.close < rl - {buffer_atr} * atr && prev.close >= rl - {buffer_atr} * atr;
+"""
+        else:
+            body = f"""
+   double rh, rl;
+   if(!RangeWindowLevels(1, {range_start}, {range_end}, rh, rl)) return false;
+   int hour = UtcHour(b.time);
+   if(hour < {session_start} || hour >= {session_end}) return false;
+   if(direction > 0) return b.low < rl - {buffer_atr} * atr && b.close > rl;
+   return b.high > rh + {buffer_atr} * atr && b.close < rh;
+"""
+    elif name == "inside_bar_expansion":
+        body = f"""
+   MqlRates mother;
+   if(!Bar(3, mother) || !IsInsidePrevious()) return false;
+   if(direction > 0) return b.close > mother.high + {buffer_atr} * atr;
+   return b.close < mother.low - {buffer_atr} * atr;
+"""
+    elif name in {"fair_value_gap", "fvg"}:
+        body = f"""
+   double lower, upper;
+   string mode = "{mode}";
+   bool fresh = FreshFvg(direction, lower, upper);
+   if(mode == "new") return fresh;
+   if(!fresh && !FindLatestFvg(direction, 60, lower, upper)) return false;
+   if(direction > 0) return b.low <= upper && b.close >= lower;
+   return b.high >= lower && b.close <= upper;
+"""
+    elif name in {"inverse_fair_value_gap", "ifvg"}:
+        body = f"""
+   double lower, upper;
+   int opposite = direction > 0 ? -1 : 1;
+   if(!FindLatestFvg(opposite, 80, lower, upper)) return false;
+   if(direction > 0) return b.close > upper + {buffer_atr} * atr;
+   return b.close < lower - {buffer_atr} * atr;
+"""
+    elif name == "balanced_price_range":
+        body = """
+   double l1, u1, l2, u2;
+   return FindLatestFvg(1, 40, l1, u1) && FindLatestFvg(-1, 40, l2, u2);
+"""
+    elif name == "displacement_candle":
+        body = f"""
+   bool strong = RangeAtr(b, 1) >= {range_atr} && BodyPct(b) >= {body_min};
+   if(direction > 0) return strong && b.close > b.open;
+   return strong && b.close < b.open;
+"""
+    elif name in {"fvg_fill", "fvg_mitigation", "fvg_mitigation_rejection"}:
+        body = """
+   double lower, upper;
+   if(!FindLatestFvg(direction, 80, lower, upper)) return false;
+   if(direction > 0) return b.low <= upper && b.close > lower && b.close > b.open;
+   return b.high >= lower && b.close < upper && b.close < b.open;
+"""
+    elif name in {"order_block", "mitigation_block", "rejection_block"}:
+        require_reject = "true" if name == "rejection_block" else "false"
+        body = f"""
+   return OrderBlockTouch(direction, {ob_lookback}, {displacement_atr}, {require_reject});
+"""
+    elif name == "breaker_block":
+        body = f"""
+   return BreakerBlockTouch(direction, {ob_lookback}, {displacement_atr}, {retest_bars});
+"""
+    elif name in {"market_structure_shift", "break_of_structure", "change_of_character", "internal_structure_break", "external_structure_break"}:
+        if name == "internal_structure_break":
+            swing_left, swing_right = "1", "1"
+        elif name == "external_structure_break":
+            swing_left, swing_right = "4", "3"
+        choch_filter = ""
+        if name == "change_of_character":
+            choch_filter = "\n   if(direction > 0 && H1Trend() >= 0) return false;\n   if(direction < 0 && H1Trend() <= 0) return false;"
+        context_filter = "\n   if(!ContextOk(direction)) return false;" if name == "break_of_structure" else ""
+        body = f"""
+   double level = 0.0;
+   if(direction > 0)
+   {{
+      if(!LatestSwingHigh({swing_left}, {swing_right}, level)) return false;{choch_filter}{context_filter}
+      return b.close > level + {buffer_atr} * atr && prev.close <= level + {buffer_atr} * atr;
+   }}
+   if(!LatestSwingLow({swing_left}, {swing_right}, level)) return false;{choch_filter}{context_filter}
+   return b.close < level - {buffer_atr} * atr && prev.close >= level - {buffer_atr} * atr;
+"""
+    elif name == "higher_timeframe_bias":
+        body = """
+   return ContextOk(direction);
+"""
+    elif name == "premium_discount":
+        body = """
+   double hi = 0.0, lo = 0.0;
+   if(!LatestSwingHigh(3, 2, hi) || !LatestSwingLow(3, 2, lo)) return false;
+   double midpoint = (hi + lo) / 2.0;
+   if(direction > 0) return b.close <= midpoint;
+   return b.close >= midpoint;
+"""
+    elif name == "liquidity_pool_distance":
+        body = f"""
+   double ph = HighestHigh(2, {lookback}), pl = LowestLow(2, {lookback});
+   if(direction > 0) return MathAbs(b.close - pl) <= {max_distance_atr} * atr;
+   return MathAbs(ph - b.close) <= {max_distance_atr} * atr;
+"""
+    elif name == "volatility_regime":
+        body = f"""
+   string mode = "{mode}";
+   if(mode == "compression") return BBWidth(1) <= AvgBBWidth(1, 100) * {quantile_factor};
+   if(mode == "high_vol_kill") return RangeAtr(b, 1) <= {max_rng_atr};
+   return RangeAtr(b, 1) >= {min_rng_atr};
+"""
+    elif name == "trend_day":
+        body = f"""
+   double day_open = iOpen(_Symbol, PERIOD_D1, 0);
+   if(direction > 0) return ContextOk(direction) && b.close > day_open + {trend_open_atr} * atr;
+   return ContextOk(direction) && b.close < day_open - {trend_open_atr} * atr;
+"""
+    elif name == "day_time_filter":
+        body = f"""
+   string needle = "," + IntegerToString(UtcWeekdayPython(b.time)) + ",";
+   string haystack = ",{weekdays},";
+   if(StringFind(haystack, needle) < 0) return false;
+   int hour = UtcHour(b.time);
+   return hour >= {session_start} && hour < {session_end};
+"""
+    elif name == "trend_pullback":
+        body = f"""
+   double ema = EMAByLength({ema_length}, 1);
+   if(direction > 0) return b.low <= ema + {pullback_atr} * atr && b.close > ema && RSI(1) > {rsi_trigger};
+   return b.high >= ema - {pullback_atr} * atr && b.close < ema && RSI(1) < 100.0 - {rsi_trigger};
+"""
+    elif name == "volatility_spike_reversal":
+        body = f"""
+   bool range_ok = RangeAtr(b, 1) >= {range_atr};
+   if(direction > 0) return range_ok && RSI(1) <= {rsi_extreme} && (b.close > b.open || LowerWickPct(b) >= {wick_min});
+   return range_ok && RSI(1) >= 100.0 - {rsi_extreme} && (b.close < b.open || UpperWickPct(b) >= {wick_min});
+"""
+    elif name in {"smt_divergence", "smt"}:
+        body = """
+   // SMT requires imported external proxy OHLC. The standalone EA keeps this strict.
+   return false;
+"""
+    else:
+        body = f"""
+   // Unsupported generated block: {name}
+   return false;
+"""
+    return header + body + footer
+
+
+def _grammar_helpers(strategy: HypothesisSpec) -> str:
+    if strategy.lineage != "strategy_grammar":
+        return ""
+    blocks = list(strategy.parameters.get("rule_blocks") or [])
+    block_functions = "\n".join(
+        _grammar_block_function(index, block)
+        for index, block in enumerate(blocks)
+        if isinstance(block, dict)
+    )
+    return f"""
+bool LatestSwingHigh(const int left, const int right, double &level)
+{{
+   for(int shift = 1 + right; shift < 220; shift++)
+   {{
+      MqlRates candidate, other;
+      if(!Bar(shift, candidate)) return false;
+      bool ok = true;
+      for(int k = 1; k <= left; k++) {{ if(!Bar(shift + k, other) || candidate.high < other.high) ok = false; }}
+      for(int k = 1; k <= right; k++) {{ if(!Bar(shift - k, other) || candidate.high < other.high) ok = false; }}
+      if(ok) {{ level = candidate.high; return true; }}
+   }}
+   return false;
+}}
+
+bool LatestSwingLow(const int left, const int right, double &level)
+{{
+   for(int shift = 1 + right; shift < 220; shift++)
+   {{
+      MqlRates candidate, other;
+      if(!Bar(shift, candidate)) return false;
+      bool ok = true;
+      for(int k = 1; k <= left; k++) {{ if(!Bar(shift + k, other) || candidate.low > other.low) ok = false; }}
+      for(int k = 1; k <= right; k++) {{ if(!Bar(shift - k, other) || candidate.low > other.low) ok = false; }}
+      if(ok) {{ level = candidate.low; return true; }}
+   }}
+   return false;
+}}
+
+bool FreshFvg(const int direction, double &lower, double &upper)
+{{
+   MqlRates b, older;
+   if(!Bar(1, b) || !Bar(3, older)) return false;
+   if(direction > 0 && b.low > older.high) {{ lower = older.high; upper = b.low; return true; }}
+   if(direction < 0 && b.high < older.low) {{ lower = b.high; upper = older.low; return true; }}
+   return false;
+}}
+
+bool FindLatestFvg(const int direction, const int lookback, double &lower, double &upper)
+{{
+   for(int shift = 1; shift <= lookback; shift++)
+   {{
+      MqlRates b, older;
+      if(!Bar(shift, b) || !Bar(shift + 2, older)) return false;
+      if(direction > 0 && b.low > older.high) {{ lower = older.high; upper = b.low; return true; }}
+      if(direction < 0 && b.high < older.low) {{ lower = b.high; upper = older.low; return true; }}
+   }}
+   return false;
+}}
+
+bool OrderBlockTouch(const int direction, const int lookback, const double displacement_atr, const bool require_reject)
+{{
+   MqlRates b;
+   if(!Bar(1, b)) return false;
+   for(int shift = 2; shift <= lookback + 2; shift++)
+   {{
+      MqlRates impulse, zone;
+      if(!Bar(shift - 1, impulse) || !Bar(shift, zone)) continue;
+      bool displacement = RangeAtr(impulse, shift - 1) >= displacement_atr && BodyPct(impulse) >= 0.55;
+      if(direction > 0 && displacement && impulse.close > impulse.open && zone.close < zone.open)
+      {{
+         bool touched = b.low <= zone.high && b.close >= zone.low;
+         return touched && (!require_reject || b.close > b.open);
+      }}
+      if(direction < 0 && displacement && impulse.close < impulse.open && zone.close > zone.open)
+      {{
+         bool touched = b.high >= zone.low && b.close <= zone.high;
+         return touched && (!require_reject || b.close < b.open);
+      }}
+   }}
+   return false;
+}}
+
+bool BreakerBlockTouch(const int direction, const int lookback, const double displacement_atr, const int retest_bars)
+{{
+   MqlRates b;
+   if(!Bar(1, b)) return false;
+   for(int shift = 2; shift <= lookback + retest_bars + 2; shift++)
+   {{
+      MqlRates impulse, zone;
+      if(!Bar(shift - 1, impulse) || !Bar(shift, zone)) continue;
+      bool displacement = RangeAtr(impulse, shift - 1) >= displacement_atr && BodyPct(impulse) >= 0.55;
+      if(direction > 0 && displacement && impulse.close < impulse.open && zone.close > zone.open)
+      {{
+         if(b.close > zone.high && b.low <= zone.high) return true;
+      }}
+      if(direction < 0 && displacement && impulse.close > impulse.open && zone.close < zone.open)
+      {{
+         if(b.close < zone.low && b.high >= zone.low) return true;
+      }}
+   }}
+   return false;
+}}
+
+{block_functions}
+"""
+
+
+def _grammar_build_signal_branch(strategy: HypothesisSpec) -> str:
+    if strategy.lineage != "strategy_grammar":
+        return ""
+    blocks = [block for block in list(strategy.parameters.get("rule_blocks") or []) if isinstance(block, dict)]
+    if not blocks:
+        return ""
+    logic = str(strategy.parameters.get("block_logic", "all"))
+    min_votes = _as_int(strategy.parameters, "min_block_votes", max(1, len(blocks)))
+    long_terms = [f"GrammarBlock{index}(1)" for index in range(len(blocks))]
+    short_terms = [f"GrammarBlock{index}(-1)" for index in range(len(blocks))]
+    if logic == "any":
+        long_expr = " || ".join(long_terms)
+        short_expr = " || ".join(short_terms)
+    elif logic == "vote":
+        long_expr = f"({ ' + '.join(f'({term} ? 1 : 0)' for term in long_terms) }) >= {min_votes}"
+        short_expr = f"({ ' + '.join(f'({term} ? 1 : 0)' for term in short_terms) }) >= {min_votes}"
+    else:
+        long_expr = " && ".join(long_terms)
+        short_expr = " && ".join(short_terms)
+    return f"""
+   else if(InpLineage == "strategy_grammar")
+   {{
+      bool long_ok = {long_expr};
+      bool short_ok = {short_expr};
+      if(long_ok && !short_ok) direction = 1;
+      if(short_ok && !long_ok) direction = -1;
+      if(direction != 0 && InpGrammarStopMode == "structure")
+      {{
+         double level = 0.0;
+         if(direction > 0 && LatestSwingLow(2, 2, level))
+            stop_dist = MathMax(0.5 * atr, MathAbs(b.close - level));
+         if(direction < 0 && LatestSwingHigh(2, 2, level))
+            stop_dist = MathMax(0.5 * atr, MathAbs(level - b.close));
+         target_dist = InpRewardRisk * stop_dist;
+      }}
+   }}
+"""
 
 
 def _ea_source(strategy: HypothesisSpec, values: dict[str, str | int | float | bool]) -> str:
@@ -518,6 +925,8 @@ bool IsInsidePrevious()
    return prev.high < mother.high && prev.low > mother.low;
 }}
 
+{_grammar_helpers(strategy)}
+
 int BuildSignal(double &stop_dist, double &target_dist, double &target_price, double &trail_atr, int &max_hold)
 {{
    MqlRates b, prev;
@@ -661,6 +1070,7 @@ int BuildSignal(double &stop_dist, double &target_dist, double &target_price, do
          if(b.close < mother.low - InpBreakBufferAtr * atr && ContextOk(-1)) direction = -1;
       }}
    }}
+{_grammar_build_signal_branch(strategy)}
 
    if(direction == 0) return 0;
    if(!DirectionAllowed(direction) || !InSession(b.time) || !VolatilityOk()) return 0;
@@ -799,11 +1209,6 @@ def export(
     max_spread_points: float = 80.0,
 ) -> dict[str, Any]:
     """Write a standalone EA and matching .set file for a hypothesis strategy."""
-    if strategy.lineage == "strategy_grammar":
-        raise ValueError(
-            "strategy_grammar exports need rule-tree MQL generation; run bar discovery first, "
-            "then export only fixed-family hypotheses until the grammar EA emitter is enabled."
-        )
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     magic_number = int(strategy.fingerprint[:8], 16) % 2_000_000_000
     name = _safe_name(output_name or strategy.strategy_id)

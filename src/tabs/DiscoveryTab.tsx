@@ -18,8 +18,10 @@ import JobProgress from "../components/JobProgress";
 import { openResultWindow } from "../lib/windows";
 
 type DiscoveryEngine = "hypothesis" | "legacy";
+type HypothesisMode = "grammar" | "focused";
 type ExecutionTimeframe = "m1" | "m5" | "m10" | "m15";
 type QueueMode = "sequential" | "parallel";
+type GrammarBlockGroup = "liquidity" | "structure" | "imbalance" | "orderflow" | "sessions" | "volatility" | "smt";
 type QueueStatus = "queued" | "starting" | "running" | "done" | "failed" | "cancelled";
 type DiscoveryQueueItem = {
   id: string;
@@ -38,7 +40,6 @@ const HIDDEN_FROM_TAB = new Set([
 ]);
 
 const HYPOTHESIS_FAMILIES: Array<{ id: HypothesisFamily; label: string }> = [
-  { id: "strategy_grammar", label: "Strategy grammar" },
   { id: "time_series_breakout", label: "Channel breaks" },
   { id: "session_range_breakout", label: "Range breaks" },
   { id: "trend_pullback", label: "Trend pullbacks" },
@@ -52,6 +53,16 @@ const HYPOTHESIS_FAMILIES: Array<{ id: HypothesisFamily; label: string }> = [
   { id: "trend_day_pullback", label: "Trend day pullbacks" },
   { id: "day_time_regime_filter", label: "Day/time regimes" },
   { id: "inside_bar_expansion", label: "Inside-bar expansion" },
+];
+
+const GRAMMAR_BLOCK_GROUPS: Array<{ id: GrammarBlockGroup; label: string; hint: string }> = [
+  { id: "liquidity", label: "Liquidity", hint: "Sweeps, prior highs/lows, equal levels" },
+  { id: "structure", label: "Structure", hint: "MSS, BOS, CHoCH, trend bias" },
+  { id: "imbalance", label: "FVG / IFVG", hint: "Fair value gaps, inverse gaps, BPR" },
+  { id: "orderflow", label: "Order Blocks", hint: "OB, breaker, mitigation, rejection" },
+  { id: "sessions", label: "Sessions", hint: "Asian, London, NY, opening ranges" },
+  { id: "volatility", label: "Volatility", hint: "Compression, expansion, spike reversal" },
+  { id: "smt", label: "SMT", hint: "Strict proxy divergence; only trades when proxy data exists" },
 ];
 
 const HYPOTHESIS_FAMILY_GROUPS: Array<{
@@ -169,6 +180,7 @@ function parseIntList(raw: string): number[] {
 
 export default function DiscoveryTab() {
   const [engine, setEngine] = useState<DiscoveryEngine>("hypothesis");
+  const [hypothesisMode, setHypothesisMode] = useState<HypothesisMode>("grammar");
   const [params, setParams] = useState<ParamDef[]>([]);
   const [datasets, setDatasets] = useState<MarketDataset[]>([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
@@ -176,8 +188,13 @@ export default function DiscoveryTab() {
   const [dateFrom, setDateFrom] = useState(dateInput(2000));
   const [dateTo, setDateTo] = useState(dateInput(0));
   const [families, setFamilies] = useState<HypothesisFamily[]>(
-    HYPOTHESIS_FAMILIES.map((item) => item.id),
+    ["liquidity_sweep_reclaim", "failed_breakout_reversal", "volatility_spike_reversal"],
   );
+  const [grammarBlockGroups, setGrammarBlockGroups] = useState<GrammarBlockGroup[]>([
+    "liquidity", "structure", "imbalance", "orderflow", "sessions", "volatility",
+  ]);
+  const [grammarComplexity, setGrammarComplexity] = useState<"simple" | "medium" | "complex">("medium");
+  const [grammarRandomness, setGrammarRandomness] = useState<"low" | "balanced" | "high">("balanced");
   const [maxVariants, setMaxVariants] = useState("5000");
   const [minTradesPerWeek, setMinTradesPerWeek] = useState("2.5");
   const [parallelWorkers, setParallelWorkers] = useState("6");
@@ -377,6 +394,12 @@ export default function DiscoveryTab() {
     );
   };
 
+  const toggleGrammarBlockGroup = (id: GrammarBlockGroup) => {
+    setGrammarBlockGroups((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
+    );
+  };
+
   const applyFamilyGroup = (group: typeof HYPOTHESIS_FAMILY_GROUPS[number]) => {
     setFamilies(group.families);
     setTimeframe(group.timeframe);
@@ -393,7 +416,8 @@ export default function DiscoveryTab() {
     if (!risk.length || !stops.length || !trades.length) {
       return "Risk, daily-stop, and max-trades grids must each have at least one value.";
     }
-    if (!families.length) return "Select at least one hypothesis family.";
+    if (hypothesisMode === "focused" && !families.length) return "Select at least one hypothesis family.";
+    if (hypothesisMode === "grammar" && !grammarBlockGroups.length) return "Select at least one grammar block group.";
     const variants = Math.trunc(Number(maxVariants));
     const minTradesPerFiveDays = Number(minTradesPerWeek);
     const workers = Math.trunc(Number(parallelWorkers));
@@ -419,6 +443,7 @@ export default function DiscoveryTab() {
     const minTradesPerFiveDays = Number(minTradesPerWeek);
     const workers = Math.trunc(Number(parallelWorkers));
     const attemptDays = Math.trunc(Number(maxAttemptDays));
+    const grammarRun = runFamilies.length === 1 && runFamilies[0] === "strategy_grammar";
     return startHypothesisDiscovery({
       dataset_id: selectedDataset.dataset_id,
       symbol: "XAUUSD",
@@ -426,6 +451,9 @@ export default function DiscoveryTab() {
       date_from: `${dateFrom}T00:00:00Z`,
       date_to: `${dateTo}T23:59:59Z`,
       families: runFamilies,
+      grammar_block_groups: grammarRun ? grammarBlockGroups : undefined,
+      grammar_complexity: grammarRun ? grammarComplexity : undefined,
+      grammar_randomness: grammarRun ? grammarRandomness : undefined,
       max_variants: variants,
       min_closed_trades: 1,
       min_trades_per_week: minTradesPerFiveDays,
@@ -453,13 +481,14 @@ export default function DiscoveryTab() {
     const group = HYPOTHESIS_FAMILY_GROUPS.find((item) =>
       item.families.length === families.length && item.families.every((id) => families.includes(id))
     );
+    const runFamilies: HypothesisFamily[] = hypothesisMode === "grammar" ? ["strategy_grammar"] : [...families];
     setQueueItems((current) => [
       ...current,
       {
         id: `queue_${Date.now()}_${current.length}`,
-        label: group?.label ?? `${families.length} custom families`,
+        label: hypothesisMode === "grammar" ? `Autonomous Grammar (${grammarComplexity})` : group?.label ?? `${families.length} custom families`,
         timeframe,
-        families: [...families],
+        families: runFamilies,
         status: "queued",
       },
     ]);
@@ -572,7 +601,7 @@ export default function DiscoveryTab() {
     setError(null);
     setJobId(null);
     try {
-      const ref = await startHypothesisRun(timeframe, families);
+      const ref = await startHypothesisRun(timeframe, hypothesisMode === "grammar" ? ["strategy_grammar"] : families);
       setJobId(ref.job_id);
       setActiveJob("discovery", ref.job_id);
     } catch (e) {
@@ -849,51 +878,96 @@ export default function DiscoveryTab() {
       </div>
 
       <div className="form-section">
-        <div className="section-label">Hypothesis Families</div>
-        <div className="hypothesis-family-presets">
-          {HYPOTHESIS_FAMILY_GROUPS.map((group) => {
-            const active = group.families.length === families.length && group.families.every((id) => families.includes(id));
-            return (
+        <div className="section-label">Research Mode</div>
+        <div className="segmented-control" role="tablist" aria-label="Hypothesis research mode">
+          <button type="button" className={hypothesisMode === "grammar" ? "active" : ""} onClick={() => setHypothesisMode("grammar")} disabled={isRunning}>
+            Autonomous Grammar
+          </button>
+          <button type="button" className={hypothesisMode === "focused" ? "active" : ""} onClick={() => setHypothesisMode("focused")} disabled={isRunning}>
+            Focused Families
+          </button>
+        </div>
+
+        {hypothesisMode === "grammar" ? (
+          <>
+            <div className="form-grid-2 hypothesis-grid" style={{ marginTop: 14 }}>
+              <div className="field">
+                <label className="field-label">Strategy complexity</label>
+                <select className="field-input" value={grammarComplexity} onChange={(event) => setGrammarComplexity(event.target.value as typeof grammarComplexity)} disabled={isRunning}>
+                  <option value="simple">Simple</option>
+                  <option value="medium">Medium</option>
+                  <option value="complex">Complex</option>
+                </select>
+                <span className="field-hint">Controls how many blocks are combined before a signal can fire.</span>
+              </div>
+              <div className="field">
+                <label className="field-label">Randomness</label>
+                <select className="field-input" value={grammarRandomness} onChange={(event) => setGrammarRandomness(event.target.value as typeof grammarRandomness)} disabled={isRunning}>
+                  <option value="low">Low</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="high">High</option>
+                </select>
+                <span className="field-hint">Controls how broadly the generator samples valid strategy recipes.</span>
+              </div>
+            </div>
+            <div className="timeframe-grid hypothesis-family-grid" style={{ marginTop: 12 }}>
+              {GRAMMAR_BLOCK_GROUPS.map((group) => (
+                <label className="check-option" key={group.id} title={group.hint}>
+                  <input type="checkbox" checked={grammarBlockGroups.includes(group.id)} onChange={() => toggleGrammarBlockGroup(group.id)} disabled={isRunning} />
+                  <span>{group.label}</span>
+                </label>
+              ))}
+            </div>
+            <span className="field-hint">Grammar results export to MQL through the rule-tree translator. SMT remains strict and needs proxy data to produce signals.</span>
+          </>
+        ) : (
+          <>
+            <div className="hypothesis-family-presets" style={{ marginTop: 12 }}>
+              {HYPOTHESIS_FAMILY_GROUPS.filter((group) => group.id !== "autonomous_grammar").map((group) => {
+                const active = group.families.length === families.length && group.families.every((id) => families.includes(id));
+                return (
+                  <button
+                    type="button"
+                    key={group.id}
+                    className={`hypothesis-family-preset${active ? " active" : ""}`}
+                    onClick={() => applyFamilyGroup(group)}
+                    disabled={isRunning}
+                    title={`${group.hint}. Suggested timeframe: ${group.timeframe.toUpperCase()}`}
+                  >
+                    <span>{group.label}</span>
+                    <small>{group.timeframe.toUpperCase()}</small>
+                  </button>
+                );
+              })}
               <button
                 type="button"
-                key={group.id}
-                className={`hypothesis-family-preset${active ? " active" : ""}`}
-                onClick={() => applyFamilyGroup(group)}
+                className="hypothesis-family-preset"
+                onClick={() => setFamilies(HYPOTHESIS_FAMILIES.map((item) => item.id))}
                 disabled={isRunning}
-                title={`${group.hint}. Suggested timeframe: ${group.timeframe.toUpperCase()}`}
               >
-                <span>{group.label}</span>
-                <small>{group.timeframe.toUpperCase()}</small>
+                <span>All Families</span>
+                <small>mixed</small>
               </button>
-            );
-          })}
-          <button
-            type="button"
-            className="hypothesis-family-preset"
-            onClick={() => setFamilies(HYPOTHESIS_FAMILIES.map((item) => item.id))}
-            disabled={isRunning}
-          >
-            <span>All Families</span>
-            <small>mixed</small>
-          </button>
-          <button
-            type="button"
-            className="hypothesis-family-preset"
-            onClick={() => setFamilies([])}
-            disabled={isRunning}
-          >
-            <span>Clear</span>
-            <small>manual</small>
-          </button>
-        </div>
-        <div className="timeframe-grid hypothesis-family-grid">
-          {HYPOTHESIS_FAMILIES.map((family) => (
-            <label className="check-option" key={family.id}>
-              <input type="checkbox" checked={families.includes(family.id)} onChange={() => toggleFamily(family.id)} disabled={isRunning} />
-              <span>{family.label}</span>
-            </label>
-          ))}
-        </div>
+              <button
+                type="button"
+                className="hypothesis-family-preset"
+                onClick={() => setFamilies([])}
+                disabled={isRunning}
+              >
+                <span>Clear</span>
+                <small>manual</small>
+              </button>
+            </div>
+            <div className="timeframe-grid hypothesis-family-grid">
+              {HYPOTHESIS_FAMILIES.map((family) => (
+                <label className="check-option" key={family.id}>
+                  <input type="checkbox" checked={families.includes(family.id)} onChange={() => toggleFamily(family.id)} disabled={isRunning} />
+                  <span>{family.label}</span>
+                </label>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       <div className="form-section">
@@ -977,7 +1051,9 @@ export default function DiscoveryTab() {
                 <div className={`discovery-queue-item queue-status-${item.status}`} key={item.id}>
                   <div className="discovery-queue-main">
                     <strong>{index + 1}. {item.label}</strong>
-                    <span>{item.timeframe.toUpperCase()} - {item.families.length} families {stage ? `- ${stage}` : ""}</span>
+                    <span>
+                      {item.timeframe.toUpperCase()} - {item.families.includes("strategy_grammar") ? "grammar" : `${item.families.length} families`} {stage ? `- ${stage}` : ""}
+                    </span>
                     {item.error && <span className="queue-error">{item.error}</span>}
                   </div>
                   <div className="discovery-queue-actions">

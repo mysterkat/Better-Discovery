@@ -513,6 +513,35 @@ def test_strategy_grammar_generates_rule_trees() -> None:
     assert all(item.parameters.get("rule_blocks") for item in specs)
 
 
+def test_strategy_grammar_respects_block_group_controls() -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        families=("strategy_grammar",),
+        max_variants=20,
+        grammar_block_groups=("imbalance",),
+        grammar_complexity="simple",
+        grammar_randomness="low",
+    )
+
+    specs = generate_hypotheses(request)
+
+    assert len(specs) == 20
+    assert all("imbalance" in str(item.parameters.get("grammar_block_groups", "")) for item in specs)
+    block_names = {
+        block["name"]
+        for item in specs
+        for block in item.parameters["rule_blocks"]  # type: ignore[index]
+    }
+    assert block_names <= {
+        "fair_value_gap",
+        "inverse_fair_value_gap",
+        "fvg_mitigation_rejection",
+        "balanced_price_range",
+    }
+
+
 def test_strategy_grammar_fvg_retrace_block_detects_closed_bar_entry() -> None:
     times = pd.date_range("2025-01-01T00:00:00Z", periods=5, freq="1h")
     base = _base_frame(
