@@ -65,12 +65,13 @@ class Job:
         # progress = fraction of stages started — gives a non-zero bar early.
         if total > 0:
             self.progress = max(0.0, min(1.0, index / total))
-        # ETA: extrapolate from time spent so far.
-        if self.started_at is not None and index > 1 and total > index:
+        # ETA: extrapolate from completed work. Callers pass `index` after the
+        # indexed unit has completed, so using index - 1 overstates early ETAs.
+        if self.started_at is not None and index > 0 and total > index:
             elapsed = time.time() - self.started_at
-            stages_done = max(1, index - 1)  # finished stages
+            stages_done = max(1, index)
             per_stage = elapsed / stages_done
-            self.eta_seconds = per_stage * (total - index + 1)
+            self.eta_seconds = per_stage * (total - index)
         else:
             self.eta_seconds = None
 

@@ -172,7 +172,11 @@ def run_bar_replay_fast_metrics(
     signals: pd.DataFrame,
     request: HypothesisBarRequest,
 ) -> dict[str, float | int | None]:
-    """NumPy-backed metric path for repeated long-only timing permutations."""
+    """NumPy-backed metric path for repeated timing permutations.
+
+    This mirrors the canonical closed-bar replay but keeps only PnL values
+    rather than allocating a full ledger for variants that will be rejected.
+    """
     frame = bars.sort_values("time").reset_index(drop=True)
     normalized = signals.copy()
     normalized.index.name = "time"
@@ -184,7 +188,11 @@ def run_bar_replay_fast_metrics(
     bid_high = frame["bid_high"].to_numpy(dtype=float)
     bid_low = frame["bid_low"].to_numpy(dtype=float)
     bid_close = frame["bid_close"].to_numpy(dtype=float)
+    bid_open = frame["bid_open"].to_numpy(dtype=float)
     ask_open = frame["ask_open"].to_numpy(dtype=float)
+    ask_high = frame["ask_high"].to_numpy(dtype=float)
+    ask_low = frame["ask_low"].to_numpy(dtype=float)
+    ask_close = frame["ask_close"].to_numpy(dtype=float)
     directions = aligned["signal_direction"].to_numpy(dtype=np.int8)
     stop_distances = aligned["stop_distance"].to_numpy(dtype=float)
     target_distances = aligned["target_distance"].to_numpy(dtype=float)
@@ -197,37 +205,50 @@ def run_bar_replay_fast_metrics(
     slippage = request.slippage_price_units
     multiplier = lot * request.contract_size
     entry = stop = target = np.nan
+    direction = 0
     trail = 0.0
     max_hold = entry_bar = 0
     active = False
     pnl: list[float] = []
     for index in range(len(frame)):
-        if not active and index > 0 and directions[index - 1] == 1 and stop_distances[index - 1] > 0:
-            entry = ask_open[index] + slippage
-            stop = entry - stop_distances[index - 1]
+        signal_index = index - 1
+        if not active and signal_index >= 0 and directions[signal_index] and stop_distances[signal_index] > 0:
+            direction = int(directions[signal_index])
+            entry = (ask_open[index] if direction == 1 else bid_open[index]) + direction * slippage
+            stop = entry - direction * stop_distances[signal_index]
             explicit = explicit_targets[index - 1]
             distance = target_distances[index - 1]
-            target = explicit if explicit > 0 else (entry + distance if distance > 0 else np.nan)
-            if not np.isfinite(target) or target > entry:
+            target = explicit if explicit > 0 else (entry + direction * distance if distance > 0 else np.nan)
+            if not np.isfinite(target) or direction * (target - entry) > 0:
                 trail = trail_atrs[index - 1]
                 max_hold = max(1, int(max_holds[index - 1]))
                 entry_bar = index
                 active = True
         if active:
             exit_price = np.nan
-            if bid_low[index] <= stop:
-                exit_price = stop - slippage
-            elif np.isfinite(target) and bid_high[index] >= target:
-                exit_price = target - slippage
+            if direction == 1:
+                stop_hit = bid_low[index] <= stop
+                target_hit = np.isfinite(target) and bid_high[index] >= target
+            else:
+                stop_hit = ask_high[index] >= stop
+                target_hit = np.isfinite(target) and ask_low[index] <= target
+            if stop_hit:
+                exit_price = stop - direction * slippage
+            elif target_hit:
+                exit_price = target - direction * slippage
             elif index - entry_bar >= max_hold:
-                exit_price = bid_close[index] - slippage
+                exit_price = (bid_close[index] if direction == 1 else ask_close[index]) - direction * slippage
             if np.isfinite(exit_price):
-                pnl.append((exit_price - entry) * multiplier - commission)
+                pnl.append(direction * (exit_price - entry) * multiplier - commission)
                 active = False
             elif trail > 0:
-                stop = max(stop, bid_high[index] - trail * atrs[index])
+                if direction == 1:
+                    stop = max(stop, bid_high[index] - trail * atrs[index])
+                else:
+                    stop = min(stop, ask_low[index] + trail * atrs[index])
     if active and len(frame):
-        pnl.append((bid_close[-1] - slippage - entry) * multiplier - commission)
+        exit_price = (bid_close[-1] if direction == 1 else ask_close[-1]) - direction * slippage
+        pnl.append(direction * (exit_price - entry) * multiplier - commission)
     values = np.asarray(pnl, dtype=float)
     gross_profit = float(values[values > 0].sum())
     gross_loss = float(abs(values[values < 0].sum()))

@@ -79,6 +79,7 @@ export default function JobProgress({
     ? `[${job.stage_index}/${job.stage_total}] ${job.stage_name ?? ""}`
     : (job.stage_name ?? "");
   const importMetrics = job.meta?.import_metrics;
+  const hypothesisProgress = job.meta?.hypothesis_progress;
   const importEta = importMetrics?.eta_seconds ?? job.eta_seconds;
 
   return (
@@ -132,6 +133,19 @@ export default function JobProgress({
           <span>Disk {importMetrics.write_rate_label ?? "—"}</span>
           {importMetrics.last_file_bytes != null && (
             <span>Saved {formatBytes(importMetrics.last_file_bytes)}</span>
+          )}
+        </div>
+      )}
+      {isRunning && hypothesisProgress && (
+        <div className="job-import-meter">
+          <span>
+            Variants {hypothesisProgress.completed_variants ?? 0}/{hypothesisProgress.total_variants ?? "?"}
+          </span>
+          <span>
+            Accepted {hypothesisProgress.accepted_variants ?? 0}
+          </span>
+          {hypothesisProgress.variants_per_hour != null && (
+            <span>{hypothesisProgress.variants_per_hour.toFixed(1)} variants/hour</span>
           )}
         </div>
       )}

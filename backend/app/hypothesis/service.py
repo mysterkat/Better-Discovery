@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from ..jobs.runners import check_cancelled, get_current_job
 from ..market_data.catalog import MarketDataCatalog
 from ..paths import DEFAULT_RESEARCH
 from ..research.store import ExperimentStore
-from .bar_engine import run_bar_replay
+from .bar_engine import run_bar_replay, run_bar_replay_fast_metrics
 from .challenge import evaluate_challenge_grid
 from .grammar import generate_hypotheses
 from .models import (
@@ -238,8 +239,22 @@ class HypothesisResearchService:
             (signals.index >= pd.Timestamp(request.date_from))
             & (signals.index < pd.Timestamp(request.date_to))
         ]
+        signal_count = int((signals["signal_direction"] != 0).sum())
+        if signal_count < request.min_closed_trades:
+            return None
+
+        fast_metrics = run_bar_replay_fast_metrics(bars, signals, replay_request)
+        if fast_metrics["trades"] < request.min_closed_trades:
+            return None
+        profit_factor = fast_metrics["profit_factor"]
+        expected_payoff = fast_metrics["expected_payoff"]
+        if profit_factor is None or profit_factor < 0.90 or expected_payoff is None or expected_payoff <= 0:
+            return None
+
         ledger, metrics = run_bar_replay(bars, signals, replay_request)
         if metrics["trades"] < request.min_closed_trades:
+            return None
+        if metrics["profit_factor"] is None or metrics["profit_factor"] < 0.90 or metrics["expected_payoff"] is None or metrics["expected_payoff"] <= 0:
             return None
         challenge = evaluate_challenge_grid(ledger, request.challenge)
         return self._candidate_row(strategy, metrics, challenge), ledger
@@ -280,6 +295,7 @@ class HypothesisResearchService:
             rows: list[dict[str, Any]] = []
             top_ledgers: dict[str, pd.DataFrame] = {}
             current_job = get_current_job()
+            variant_started_at = time.time()
 
             def record(result: tuple[dict[str, Any], pd.DataFrame] | None) -> None:
                 if result is None:
@@ -289,12 +305,32 @@ class HypothesisResearchService:
                 top_ledgers[row["strategy_id"]] = ledger
 
             workers = min(request.parallel_workers, len(specs) or 1)
+            def update_variant_progress(index: int, total: int, workers_used: int) -> None:
+                if current_job is None:
+                    return
+                current_job.mark_stage(
+                    f"Hypothesis variants ({workers_used} workers)",
+                    index,
+                    total,
+                )
+                elapsed = max(0.001, time.time() - variant_started_at)
+                completed = max(1, index)
+                rate = completed / elapsed
+                remaining = max(0, total - index)
+                current_job.eta_seconds = remaining / rate if rate > 0 else None
+                current_job.meta["hypothesis_progress"] = {
+                    "completed_variants": index,
+                    "total_variants": total,
+                    "accepted_variants": len(rows),
+                    "variants_per_hour": rate * 3600.0,
+                    "eta_seconds": current_job.eta_seconds,
+                }
+
             if workers <= 1:
                 for index, strategy in enumerate(specs, start=1):
                     check_cancelled()
                     record(self._evaluate_candidate(request, strategy, bars, base_frame))
-                    if current_job is not None:
-                        current_job.mark_stage("Hypothesis variants", index, len(specs))
+                    update_variant_progress(index, len(specs), workers)
             else:
                 executor = ThreadPoolExecutor(max_workers=workers)
                 futures = {
@@ -306,12 +342,7 @@ class HypothesisResearchService:
                     for index, future in enumerate(as_completed(futures), start=1):
                         check_cancelled()
                         record(future.result())
-                        if current_job is not None:
-                            current_job.mark_stage(
-                                f"Hypothesis variants ({workers} workers)",
-                                index,
-                                len(specs),
-                            )
+                        update_variant_progress(index, len(specs), workers)
                 except Exception:
                     cancel_futures = True
                     for future in futures:

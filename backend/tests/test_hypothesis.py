@@ -176,6 +176,38 @@ def test_fast_metrics_match_canonical_bar_replay() -> None:
         assert fast[key] == pytest.approx(canonical[key])
 
 
+def test_fast_metrics_match_canonical_bar_replay_for_shorts() -> None:
+    times = pd.date_range("2025-01-01", periods=8, freq="15min", tz="UTC")
+    bars = pd.DataFrame({
+        "time": times,
+        "bid_open": [100.0, 99.8, 99.2, 99.5, 99.7, 99.4, 99.1, 98.8],
+        "bid_high": [100.2, 100.0, 99.6, 99.8, 100.0, 99.6, 99.3, 99.0],
+        "bid_low": [99.7, 99.0, 98.8, 99.0, 99.2, 98.9, 98.7, 98.4],
+        "bid_close": [99.9, 99.2, 99.4, 99.7, 99.4, 99.1, 98.8, 98.6],
+        "ask_open": [100.2, 100.0, 99.4, 99.7, 99.9, 99.6, 99.3, 99.0],
+        "ask_high": [100.4, 100.2, 99.8, 100.0, 100.2, 99.8, 99.5, 99.2],
+        "ask_low": [99.9, 99.2, 99.0, 99.2, 99.4, 99.1, 98.9, 98.6],
+        "ask_close": [100.1, 99.4, 99.6, 99.9, 99.6, 99.3, 99.0, 98.8],
+    })
+    signals = pd.DataFrame({
+        "signal_direction": [-1, 0, 0, -1, 0, 0, 0, 0],
+        "stop_distance": [0.6, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
+        "target_distance": [0.7, 0.0, 0.0, 0.6, 0.0, 0.0, 0.0, 0.0],
+        "signal_target_price": [0.0] * 8,
+        "trail_atr": [0.0] * 8,
+        "max_hold_bars": [3] * 8,
+        "atr14": [0.4] * 8,
+    }, index=times)
+    request = _request(_spec())
+
+    _, canonical = run_bar_replay(bars, signals, request)
+    fast = run_bar_replay_fast_metrics(bars, signals, request)
+
+    assert fast["trades"] == canonical["trades"]
+    for key in ("net_profit", "profit_factor", "expected_payoff", "max_drawdown_pct"):
+        assert fast[key] == pytest.approx(canonical[key])
+
+
 def test_request_normalizes_naive_dates_to_utc() -> None:
     request = HypothesisBarRequest(
         dataset_id="test",

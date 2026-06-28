@@ -39,6 +39,13 @@ export interface Job {
       write_rate_label?: string;
       eta_seconds?: number | null;
     };
+    hypothesis_progress?: {
+      completed_variants?: number;
+      total_variants?: number;
+      accepted_variants?: number;
+      variants_per_hour?: number;
+      eta_seconds?: number | null;
+    };
     [key: string]: unknown;
   };
   result?: unknown;
