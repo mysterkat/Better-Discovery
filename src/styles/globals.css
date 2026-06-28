@@ -449,6 +449,50 @@ button { font-family: inherit; }
 .hypothesis-family-grid {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
+.hypothesis-family-presets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+.hypothesis-family-preset {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+}
+.hypothesis-family-preset small {
+  color: var(--text2);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.hypothesis-family-preset:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--bg3);
+}
+.hypothesis-family-preset.active {
+  border-color: var(--accent);
+  background: var(--accent2);
+  color: #fff;
+}
+.hypothesis-family-preset.active small {
+  color: rgba(255,255,255,.78);
+}
+.hypothesis-family-preset:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
 .hypothesis-grid {
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
 }

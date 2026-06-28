@@ -42,6 +42,63 @@ const HYPOTHESIS_FAMILIES: Array<{ id: HypothesisFamily; label: string }> = [
   { id: "inside_bar_expansion", label: "Inside-bar expansion" },
 ];
 
+const HYPOTHESIS_FAMILY_GROUPS: Array<{
+  id: string;
+  label: string;
+  hint: string;
+  timeframe: ExecutionTimeframe;
+  families: HypothesisFamily[];
+}> = [
+  {
+    id: "reversal_trap",
+    label: "Reversal / Trap",
+    hint: "Stop hunts, failed breaks, snapbacks",
+    timeframe: "m5",
+    families: [
+      "liquidity_sweep_reclaim",
+      "failed_breakout_reversal",
+      "volatility_spike_reversal",
+      "regime_mean_reversion",
+    ],
+  },
+  {
+    id: "breakout_continuation",
+    label: "Breakout / Continuation",
+    hint: "Level breaks that keep moving",
+    timeframe: "m10",
+    families: [
+      "time_series_breakout",
+      "session_range_breakout",
+      "prior_day_level_continuation",
+      "volatility_expansion",
+      "inside_bar_expansion",
+    ],
+  },
+  {
+    id: "trend_pullback",
+    label: "Trend Pullback",
+    hint: "Bigger-direction pullback entries",
+    timeframe: "m15",
+    families: [
+      "trend_pullback",
+      "trend_day_pullback",
+      "day_time_regime_filter",
+    ],
+  },
+  {
+    id: "opening_session",
+    label: "Opening / Session",
+    hint: "Session opens and range behavior",
+    timeframe: "m5",
+    families: [
+      "opening_range_continuation_reversal",
+      "session_range_breakout",
+      "prior_day_level_continuation",
+      "day_time_regime_filter",
+    ],
+  },
+];
+
 function ParamTooltip({ description }: { description: string }) {
   if (!description) return null;
   return (
@@ -287,6 +344,11 @@ export default function DiscoveryTab() {
     setFamilies((current) =>
       current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
     );
+  };
+
+  const applyFamilyGroup = (group: typeof HYPOTHESIS_FAMILY_GROUPS[number]) => {
+    setFamilies(group.families);
+    setTimeframe(group.timeframe);
   };
 
   const useDatasetRange = () => {
@@ -628,6 +690,42 @@ export default function DiscoveryTab() {
 
       <div className="form-section">
         <div className="section-label">Hypothesis Families</div>
+        <div className="hypothesis-family-presets">
+          {HYPOTHESIS_FAMILY_GROUPS.map((group) => {
+            const active = group.families.length === families.length && group.families.every((id) => families.includes(id));
+            return (
+              <button
+                type="button"
+                key={group.id}
+                className={`hypothesis-family-preset${active ? " active" : ""}`}
+                onClick={() => applyFamilyGroup(group)}
+                disabled={isRunning}
+                title={`${group.hint}. Suggested timeframe: ${group.timeframe.toUpperCase()}`}
+              >
+                <span>{group.label}</span>
+                <small>{group.timeframe.toUpperCase()}</small>
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            className="hypothesis-family-preset"
+            onClick={() => setFamilies(HYPOTHESIS_FAMILIES.map((item) => item.id))}
+            disabled={isRunning}
+          >
+            <span>All Families</span>
+            <small>mixed</small>
+          </button>
+          <button
+            type="button"
+            className="hypothesis-family-preset"
+            onClick={() => setFamilies([])}
+            disabled={isRunning}
+          >
+            <span>Clear</span>
+            <small>manual</small>
+          </button>
+        </div>
         <div className="timeframe-grid hypothesis-family-grid">
           {HYPOTHESIS_FAMILIES.map((family) => (
             <label className="check-option" key={family.id}>
