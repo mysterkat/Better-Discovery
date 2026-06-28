@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getParams,
   startDiscovery,
@@ -19,6 +19,17 @@ import { openResultWindow } from "../lib/windows";
 
 type DiscoveryEngine = "hypothesis" | "legacy";
 type ExecutionTimeframe = "m1" | "m5" | "m10" | "m15";
+type QueueMode = "sequential" | "parallel";
+type QueueStatus = "queued" | "starting" | "running" | "done" | "failed" | "cancelled";
+type DiscoveryQueueItem = {
+  id: string;
+  label: string;
+  timeframe: ExecutionTimeframe;
+  families: HypothesisFamily[];
+  status: QueueStatus;
+  jobId?: string;
+  error?: string;
+};
 
 const FOLDER_KEYS = new Set(["DATA_FOLDER", "OUTPUT_FOLDER"]);
 const HIDDEN_FROM_TAB = new Set([
@@ -158,7 +169,7 @@ export default function DiscoveryTab() {
     HYPOTHESIS_FAMILIES.map((item) => item.id),
   );
   const [maxVariants, setMaxVariants] = useState("5000");
-  const [minClosedTrades, setMinClosedTrades] = useState("180");
+  const [minTradesPerWeek, setMinTradesPerWeek] = useState("2.5");
   const [parallelWorkers, setParallelWorkers] = useState("6");
   const [targetProfitPct, setTargetProfitPct] = useState("10");
   const [dailyLossPct, setDailyLossPct] = useState("5");
@@ -179,10 +190,17 @@ export default function DiscoveryTab() {
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [currentImport, setCurrentImport] = useState<CurrentImport | null>(null);
+  const [queueItems, setQueueItems] = useState<DiscoveryQueueItem[]>([]);
+  const [queueRunning, setQueueRunning] = useState(false);
+  const [queueMode, setQueueMode] = useState<QueueMode>("sequential");
+  const [queueParallelLimit, setQueueParallelLimit] = useState("2");
+  const queueStartLock = useRef(false);
 
   const persistentDefaults = useParamDefaults((s) => s.defaults);
   const job = useJobs((s) => (jobId ? s.jobs[jobId] : undefined));
+  const jobs = useJobs((s) => s.jobs);
   const setActiveJob = useJobs((s) => s.setActive);
+  const subscribeJob = useJobs((s) => s.subscribe);
   const isRunning = !!jobId && (job?.status === "running" || job?.status === "pending");
   const isDone = !!jobId && (job?.status === "done" || job?.status === "failed" || job?.status === "cancelled");
 
@@ -235,6 +253,9 @@ export default function DiscoveryTab() {
   const autoDetectedTfs = currentImport?.exists
     ? currentImport.timeframes.slice(0, 5).map((tf) => tf.label).join(", ")
     : "";
+  const queueActiveCount = queueItems.filter((item) => item.status === "starting" || item.status === "running").length;
+  const queuePendingCount = queueItems.filter((item) => item.status === "queued").length;
+  const queueTerminalCount = queueItems.filter((item) => ["done", "failed", "cancelled"].includes(item.status)).length;
 
   const trueDefault = (p: ParamDef): string => {
     const pd = persistentDefaults[p.key];
@@ -351,6 +372,178 @@ export default function DiscoveryTab() {
     setTimeframe(group.timeframe);
   };
 
+  const validateHypothesisForm = () => {
+    if (!selectedDataset) return "Select a completed XAUUSD dataset first.";
+    const required = [timeframe, "h1", "h4"];
+    const missing = required.filter((value) => !selectedDataset.timeframes.includes(value));
+    if (missing.length) return `Selected dataset is missing ${missing.map((value) => value.toUpperCase()).join(", ")}.`;
+    const risk = parseNumberList(riskFractions);
+    const stops = parseNumberList(dailyStops);
+    const trades = parseIntList(maxTradesPerDay);
+    if (!risk.length || !stops.length || !trades.length) {
+      return "Risk, daily-stop, and max-trades grids must each have at least one value.";
+    }
+    if (!families.length) return "Select at least one hypothesis family.";
+    const variants = Math.trunc(Number(maxVariants));
+    const minTradesPerFiveDays = Number(minTradesPerWeek);
+    const workers = Math.trunc(Number(parallelWorkers));
+    const attemptDays = Math.trunc(Number(maxAttemptDays));
+    if (!Number.isFinite(variants) || variants <= 0 || !Number.isFinite(minTradesPerFiveDays) || minTradesPerFiveDays <= 0 || !Number.isFinite(workers) || workers <= 0 || !Number.isFinite(attemptDays) || attemptDays <= 0) {
+      return "Max variants, minimum trades/week, parallel workers, and max attempt days must be positive numbers.";
+    }
+    return null;
+  };
+
+  const selectedDatasetHasTimeframe = (value: ExecutionTimeframe) =>
+    !!selectedDataset && selectedDataset.timeframes.includes(value) && selectedDataset.timeframes.includes("h1") && selectedDataset.timeframes.includes("h4");
+
+  const startHypothesisRun = async (runTimeframe: ExecutionTimeframe, runFamilies: HypothesisFamily[]) => {
+    if (!selectedDataset) throw new Error("Select a completed XAUUSD dataset first.");
+    if (!selectedDatasetHasTimeframe(runTimeframe)) {
+      throw new Error(`Selected dataset must include ${runTimeframe.toUpperCase()}, H1, and H4.`);
+    }
+    const risk = parseNumberList(riskFractions);
+    const stops = parseNumberList(dailyStops);
+    const trades = parseIntList(maxTradesPerDay);
+    const variants = Math.trunc(Number(maxVariants));
+    const minTradesPerFiveDays = Number(minTradesPerWeek);
+    const workers = Math.trunc(Number(parallelWorkers));
+    const attemptDays = Math.trunc(Number(maxAttemptDays));
+    return startHypothesisDiscovery({
+      dataset_id: selectedDataset.dataset_id,
+      symbol: "XAUUSD",
+      timeframe: runTimeframe,
+      date_from: `${dateFrom}T00:00:00Z`,
+      date_to: `${dateTo}T23:59:59Z`,
+      families: runFamilies,
+      max_variants: variants,
+      min_closed_trades: 1,
+      min_trades_per_week: minTradesPerFiveDays,
+      parallel_workers: Math.min(workers, 32),
+      slippage_price_units: Number(slippagePriceUnits),
+      challenge: {
+        target_profit_pct: Number(targetProfitPct),
+        daily_loss_pct: Number(dailyLossPct),
+        max_loss_pct: Number(maxLossPct),
+        max_attempt_days: attemptDays,
+        start_frequency: startFrequency.trim() || "1D",
+        risk_fractions: risk,
+        internal_daily_stop_pcts: stops,
+        max_trades_per_day_options: trades,
+      },
+    });
+  };
+
+  const queueSelectedRun = () => {
+    const message = validateHypothesisForm();
+    if (message) {
+      setError(message);
+      return;
+    }
+    const group = HYPOTHESIS_FAMILY_GROUPS.find((item) =>
+      item.families.length === families.length && item.families.every((id) => families.includes(id))
+    );
+    setQueueItems((current) => [
+      ...current,
+      {
+        id: `queue_${Date.now()}_${current.length}`,
+        label: group?.label ?? `${families.length} custom families`,
+        timeframe,
+        families: [...families],
+        status: "queued",
+      },
+    ]);
+    setError(null);
+  };
+
+  const queueRecommendedRuns = () => {
+    if (!selectedDataset) {
+      setError("Select a completed XAUUSD dataset first.");
+      return;
+    }
+    const runnable = HYPOTHESIS_FAMILY_GROUPS.filter((group) => selectedDatasetHasTimeframe(group.timeframe));
+    if (!runnable.length) {
+      setError("Selected dataset does not contain the preset execution timeframes plus H1 and H4.");
+      return;
+    }
+    setQueueItems((current) => [
+      ...current,
+      ...runnable.map((group, index) => ({
+        id: `queue_${Date.now()}_${current.length + index}`,
+        label: group.label,
+        timeframe: group.timeframe,
+        families: [...group.families],
+        status: "queued" as QueueStatus,
+      })),
+    ]);
+    setError(null);
+  };
+
+  const removeQueueItem = (id: string) => {
+    setQueueItems((current) => current.filter((item) => item.id !== id));
+  };
+
+  useEffect(() => {
+    const jobIds = queueItems.map((item) => item.jobId).filter(Boolean) as string[];
+    const unsubscribers = jobIds.map((id) => subscribeJob(id));
+    return () => {
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
+    };
+  }, [queueItems.map((item) => item.jobId).filter(Boolean).join("|"), subscribeJob]);
+
+  useEffect(() => {
+    setQueueItems((current) => current.map((item) => {
+      if (!item.jobId) return item;
+      const queuedJob = jobs[item.jobId];
+      if (!queuedJob) return item;
+      if (queuedJob.status === "done") return { ...item, status: "done" };
+      if (queuedJob.status === "failed") return { ...item, status: "failed", error: queuedJob.error ?? "Failed" };
+      if (queuedJob.status === "cancelled") return { ...item, status: "cancelled", error: queuedJob.error ?? "Cancelled" };
+      if (queuedJob.status === "running" || queuedJob.status === "pending") return { ...item, status: "running" };
+      return item;
+    }));
+  }, [jobs]);
+
+  useEffect(() => {
+    if (!queueRunning || queueStartLock.current) return;
+    const active = queueItems.filter((item) => item.status === "starting" || item.status === "running").length;
+    const pending = queueItems.filter((item) => item.status === "queued");
+    if (!pending.length) {
+      if (active === 0) setQueueRunning(false);
+      return;
+    }
+    const parallelLimit = queueMode === "parallel"
+      ? Math.max(1, Math.min(2, Math.trunc(Number(queueParallelLimit)) || 1))
+      : 1;
+    const slots = Math.max(0, parallelLimit - active);
+    if (slots <= 0) return;
+    queueStartLock.current = true;
+    const toStart = pending.slice(0, slots);
+    (async () => {
+      for (const item of toStart) {
+        setQueueItems((current) => current.map((candidate) =>
+          candidate.id === item.id ? { ...candidate, status: "starting" } : candidate
+        ));
+        try {
+          const ref = await startHypothesisRun(item.timeframe, item.families);
+          setQueueItems((current) => current.map((candidate) =>
+            candidate.id === item.id ? { ...candidate, status: "running", jobId: ref.job_id } : candidate
+          ));
+          setJobId(ref.job_id);
+          setActiveJob("discovery", ref.job_id);
+        } catch (reason) {
+          setQueueItems((current) => current.map((candidate) =>
+            candidate.id === item.id
+              ? { ...candidate, status: "failed", error: reason instanceof Error ? reason.message : String(reason) }
+              : candidate
+          ));
+        }
+      }
+    })().finally(() => {
+      queueStartLock.current = false;
+    });
+  }, [queueItems, queueRunning, queueMode, queueParallelLimit, selectedDatasetId, dateFrom, dateTo, maxVariants, minTradesPerWeek, parallelWorkers, targetProfitPct, dailyLossPct, maxLossPct, maxAttemptDays, startFrequency, riskFractions, dailyStops, maxTradesPerDay, slippagePriceUnits]);
+
   const useDatasetRange = () => {
     if (!selectedDataset) return;
     const from = dateOnly(selectedDataset.requested_from);
@@ -360,59 +553,16 @@ export default function DiscoveryTab() {
   };
 
   const handleStartHypothesis = async () => {
-    if (!selectedDataset) {
-      setError("Select a completed XAUUSD dataset first.");
-      return;
-    }
-    if (!datasetReady) {
-      setError("Selected dataset must contain the test timeframe plus H1 and H4 context bars.");
-      return;
-    }
-    const risk = parseNumberList(riskFractions);
-    const stops = parseNumberList(dailyStops);
-    const trades = parseIntList(maxTradesPerDay);
-    if (!risk.length || !stops.length || !trades.length) {
-      setError("Risk, daily-stop, and max-trades grids must each have at least one value.");
-      return;
-    }
-    if (!families.length) {
-      setError("Select at least one hypothesis family.");
-      return;
-    }
-    const variants = Math.trunc(Number(maxVariants));
-    const minTrades = Math.trunc(Number(minClosedTrades));
-    const workers = Math.trunc(Number(parallelWorkers));
-    const attemptDays = Math.trunc(Number(maxAttemptDays));
-    if (!Number.isFinite(variants) || variants <= 0 || !Number.isFinite(minTrades) || minTrades <= 0 || !Number.isFinite(workers) || workers <= 0) {
-      setError("Max variants, minimum trades, and parallel workers must be positive numbers.");
+    const message = validateHypothesisForm();
+    if (message) {
+      setError(message);
       return;
     }
     setStarting(true);
     setError(null);
     setJobId(null);
     try {
-      const ref = await startHypothesisDiscovery({
-        dataset_id: selectedDataset.dataset_id,
-        symbol: "XAUUSD",
-        timeframe,
-        date_from: `${dateFrom}T00:00:00Z`,
-        date_to: `${dateTo}T23:59:59Z`,
-        families,
-        max_variants: variants,
-        min_closed_trades: minTrades,
-        parallel_workers: Math.min(workers, 32),
-        slippage_price_units: Number(slippagePriceUnits),
-        challenge: {
-          target_profit_pct: Number(targetProfitPct),
-          daily_loss_pct: Number(dailyLossPct),
-          max_loss_pct: Number(maxLossPct),
-          max_attempt_days: attemptDays,
-          start_frequency: startFrequency.trim() || "1D",
-          risk_fractions: risk,
-          internal_daily_stop_pcts: stops,
-          max_trades_per_day_options: trades,
-        },
-      });
+      const ref = await startHypothesisRun(timeframe, families);
       setJobId(ref.job_id);
       setActiveJob("discovery", ref.job_id);
     } catch (e) {
@@ -744,8 +894,9 @@ export default function DiscoveryTab() {
             <input className="field-input" value={maxVariants} onChange={(event) => setMaxVariants(event.target.value)} disabled={isRunning} inputMode="numeric" />
           </div>
           <div className="field">
-            <label className="field-label">Min closed trades</label>
-            <input className="field-input" value={minClosedTrades} onChange={(event) => setMinClosedTrades(event.target.value)} disabled={isRunning} inputMode="numeric" />
+            <label className="field-label">Min trades / 5 trading days</label>
+            <input className="field-input" value={minTradesPerWeek} onChange={(event) => setMinTradesPerWeek(event.target.value)} disabled={isRunning} inputMode="decimal" />
+            <span className="field-hint">Scales automatically with the selected date range.</span>
           </div>
           <div className="field">
             <label className="field-label">Parallel workers</label>
@@ -753,6 +904,94 @@ export default function DiscoveryTab() {
             <span className="field-hint">Use 1 for lowest memory use; raise for chunked research runs.</span>
           </div>
         </div>
+      </div>
+
+      <div className="form-section">
+        <div className="section-label">Discovery Queue</div>
+        <div className="queue-toolbar">
+          <button type="button" className="btn btn-secondary btn-sm" onClick={queueSelectedRun} disabled={isRunning || queueRunning}>
+            Queue Current Setup
+          </button>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={queueRecommendedRuns} disabled={isRunning || queueRunning || !selectedDataset}>
+            Queue Preset Set
+          </button>
+          <select className="field-input queue-mode-select" value={queueMode} onChange={(event) => setQueueMode(event.target.value as QueueMode)} disabled={queueRunning}>
+            <option value="sequential">Sequential</option>
+            <option value="parallel">Parallel safe</option>
+          </select>
+          {queueMode === "parallel" && (
+            <input
+              className="field-input queue-limit-input"
+              value={queueParallelLimit}
+              onChange={(event) => setQueueParallelLimit(event.target.value)}
+              disabled={queueRunning}
+              inputMode="numeric"
+              title="Parallel queue is capped at 2 concurrent discovery jobs."
+            />
+          )}
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => setQueueRunning(true)}
+            disabled={queueRunning || queuePendingCount === 0}
+          >
+            Run Queue
+          </button>
+          {queueRunning && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => setQueueRunning(false)}>
+              Pause Queue
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setQueueItems((current) => current.filter((item) => item.status === "running" || item.status === "starting"))}
+            disabled={queueRunning || queueItems.length === 0}
+          >
+            Clear Waiting/Done
+          </button>
+        </div>
+        <span className="field-hint">Parallel safe starts at most 2 discovery jobs. Each job still uses its own Parallel workers setting.</span>
+        {queueItems.length > 0 && (
+          <div className="discovery-queue-list">
+            <div className="discovery-queue-summary">
+              {queuePendingCount} queued, {queueActiveCount} running, {queueTerminalCount} finished
+            </div>
+            {queueItems.map((item, index) => {
+              const queuedJob = item.jobId ? jobs[item.jobId] : undefined;
+              const resultJobId = item.jobId;
+              const stage = queuedJob?.stage_index != null && queuedJob?.stage_total != null
+                ? `${queuedJob.stage_index}/${queuedJob.stage_total}`
+                : "";
+              return (
+                <div className={`discovery-queue-item queue-status-${item.status}`} key={item.id}>
+                  <div className="discovery-queue-main">
+                    <strong>{index + 1}. {item.label}</strong>
+                    <span>{item.timeframe.toUpperCase()} - {item.families.length} families {stage ? `- ${stage}` : ""}</span>
+                    {item.error && <span className="queue-error">{item.error}</span>}
+                  </div>
+                  <div className="discovery-queue-actions">
+                    <span className="status-badge">{item.status}</span>
+                    {resultJobId && queuedJob?.status === "done" && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => openResultWindow(`discovery-results-${resultJobId}`, "FTMO Hypothesis Results", { window: "discovery-results", jobId: resultJobId })}
+                      >
+                        Results
+                      </button>
+                    )}
+                    {(item.status === "queued" || item.status === "done" || item.status === "failed" || item.status === "cancelled") && !queueRunning && (
+                      <button type="button" className="btn btn-secondary btn-sm" onClick={() => removeQueueItem(item.id)}>
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="form-section">

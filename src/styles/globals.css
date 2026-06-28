@@ -496,6 +496,78 @@ button { font-family: inherit; }
 .hypothesis-grid {
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
 }
+.queue-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+.queue-mode-select {
+  width: 150px;
+  min-width: 150px;
+}
+.queue-limit-input {
+  width: 58px;
+  min-width: 58px;
+}
+.discovery-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.discovery-queue-summary {
+  color: var(--text2);
+  font-size: 12px;
+}
+.discovery-queue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.discovery-queue-item.queue-status-running,
+.discovery-queue-item.queue-status-starting {
+  border-color: rgba(58,134,255,.45);
+  background: rgba(58,134,255,.08);
+}
+.discovery-queue-item.queue-status-done {
+  border-color: rgba(50,180,120,.38);
+}
+.discovery-queue-item.queue-status-failed,
+.discovery-queue-item.queue-status-cancelled {
+  border-color: rgba(220,80,80,.42);
+}
+.discovery-queue-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.discovery-queue-main strong {
+  color: var(--text);
+  font-size: 13px;
+}
+.discovery-queue-main span {
+  color: var(--text2);
+  font-size: 12px;
+}
+.discovery-queue-main .queue-error {
+  color: var(--err);
+}
+.discovery-queue-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
 
 /* ── Current import banner ─────────────────────────────────────────── */
 .current-import-banner {

@@ -258,6 +258,32 @@ def test_hypothesis_discovery_accepts_supported_execution_timeframes(timeframe: 
     assert request.timeframe == timeframe
 
 
+def test_min_trades_per_week_scales_with_trading_days() -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        min_closed_trades=999,
+        min_trades_per_week=2.5,
+    )
+    bars = pd.DataFrame({
+        "time": pd.to_datetime([
+            "2025-01-06T00:00:00Z",
+            "2025-01-07T00:00:00Z",
+            "2025-01-08T00:00:00Z",
+            "2025-01-09T00:00:00Z",
+            "2025-01-10T00:00:00Z",
+            "2025-01-13T00:00:00Z",
+            "2025-01-14T00:00:00Z",
+            "2025-01-15T00:00:00Z",
+            "2025-01-16T00:00:00Z",
+            "2025-01-17T00:00:00Z",
+        ], utc=True),
+    })
+
+    assert HypothesisResearchService._minimum_required_trades(request, bars) == 5
+
+
 def test_long_only_session_filter_is_applied_after_breakout_signal() -> None:
     times = pd.date_range("2025-01-01T12:00:00Z", periods=3, freq="1h")
     base = pd.DataFrame({

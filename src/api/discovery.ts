@@ -76,6 +76,7 @@ export interface HypothesisDiscoveryRequest {
   families?: HypothesisFamily[];
   max_variants: number;
   min_closed_trades: number;
+  min_trades_per_week?: number;
   parallel_workers?: number;
   lot_size?: number;
   contract_size?: number;

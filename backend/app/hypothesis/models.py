@@ -120,6 +120,7 @@ class HypothesisDiscoveryRequest(BaseModel):
     families: tuple[Lineage, ...] | None = None
     max_variants: int = Field(default=5_000, ge=1, le=5_000)
     min_closed_trades: int = Field(default=180, ge=1)
+    min_trades_per_week: float = Field(default=2.5, ge=0)
     parallel_workers: int = Field(default=6, ge=1, le=32)
     top_n: int = Field(default=25, ge=1, le=250)
     lot_size: float = Field(default=0.1, gt=0)

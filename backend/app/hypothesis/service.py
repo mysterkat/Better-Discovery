@@ -166,6 +166,7 @@ class HypothesisResearchService:
         self,
         request: HypothesisDiscoveryRequest,
         strategy: HypothesisSpec,
+        min_required_trades: int | None = None,
     ) -> HypothesisBarRequest:
         return HypothesisBarRequest(
             dataset_id=request.dataset_id,
@@ -179,7 +180,7 @@ class HypothesisResearchService:
             commission_per_lot_round_turn=request.commission_per_lot_round_turn,
             slippage_price_units=request.slippage_price_units,
             promotion_policy={
-                "min_trades": request.min_closed_trades,
+                "min_trades": min_required_trades or request.min_closed_trades,
                 "min_profit_factor": 1.0,
                 "max_drawdown_pct": 100.0,
                 "min_positive_month_fraction": 0.0,
@@ -226,25 +227,34 @@ class HypothesisResearchService:
             "challenge": compact_challenge,
         }
 
+    @staticmethod
+    def _minimum_required_trades(request: HypothesisDiscoveryRequest, bars: pd.DataFrame) -> int:
+        if request.min_trades_per_week > 0 and not bars.empty:
+            times = pd.to_datetime(bars["time"], utc=True)
+            trading_days = max(1, int(times.dt.normalize().nunique()))
+            return max(1, int(round((trading_days / 5.0) * request.min_trades_per_week)))
+        return request.min_closed_trades
+
     def _evaluate_candidate(
         self,
         request: HypothesisDiscoveryRequest,
         strategy: HypothesisSpec,
         bars: pd.DataFrame,
         base_frame: pd.DataFrame,
+        min_required_trades: int,
     ) -> tuple[dict[str, Any], pd.DataFrame] | None:
-        replay_request = self._replay_request(request, strategy)
+        replay_request = self._replay_request(request, strategy, min_required_trades)
         signals = apply_signal_rules(base_frame, strategy)
         signals = signals.loc[
             (signals.index >= pd.Timestamp(request.date_from))
             & (signals.index < pd.Timestamp(request.date_to))
         ]
         signal_count = int((signals["signal_direction"] != 0).sum())
-        if signal_count < request.min_closed_trades:
+        if signal_count < min_required_trades:
             return None
 
         fast_metrics = run_bar_replay_fast_metrics(bars, signals, replay_request)
-        if fast_metrics["trades"] < request.min_closed_trades:
+        if fast_metrics["trades"] < min_required_trades:
             return None
         profit_factor = fast_metrics["profit_factor"]
         expected_payoff = fast_metrics["expected_payoff"]
@@ -252,7 +262,7 @@ class HypothesisResearchService:
             return None
 
         ledger, metrics = run_bar_replay(bars, signals, replay_request)
-        if metrics["trades"] < request.min_closed_trades:
+        if metrics["trades"] < min_required_trades:
             return None
         if metrics["profit_factor"] is None or metrics["profit_factor"] < 0.90 or metrics["expected_payoff"] is None or metrics["expected_payoff"] <= 0:
             return None
@@ -292,6 +302,7 @@ class HypothesisResearchService:
             }
             base_frame = build_base_frame(warm_bars, contexts)
             specs = generate_hypotheses(request)
+            min_required_trades = self._minimum_required_trades(request, bars)
             rows: list[dict[str, Any]] = []
             top_ledgers: dict[str, pd.DataFrame] = {}
             current_job = get_current_job()
@@ -329,12 +340,12 @@ class HypothesisResearchService:
             if workers <= 1:
                 for index, strategy in enumerate(specs, start=1):
                     check_cancelled()
-                    record(self._evaluate_candidate(request, strategy, bars, base_frame))
+                    record(self._evaluate_candidate(request, strategy, bars, base_frame, min_required_trades))
                     update_variant_progress(index, len(specs), workers)
             else:
                 executor = ThreadPoolExecutor(max_workers=workers)
                 futures = {
-                    executor.submit(self._evaluate_candidate, request, strategy, bars, base_frame): strategy
+                    executor.submit(self._evaluate_candidate, request, strategy, bars, base_frame, min_required_trades): strategy
                     for strategy in specs
                 }
                 cancel_futures = False
@@ -387,6 +398,7 @@ class HypothesisResearchService:
                 "variants_generated": len(specs),
                 "variants_tested": len(rows),
                 "parallel_workers": workers,
+                "min_required_trades": min_required_trades,
                 "top_candidates": top_candidates,
             }
             summary_json.write_text(
