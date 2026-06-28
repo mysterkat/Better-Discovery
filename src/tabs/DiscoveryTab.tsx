@@ -18,6 +18,7 @@ import JobProgress from "../components/JobProgress";
 import { openResultWindow } from "../lib/windows";
 
 type DiscoveryEngine = "hypothesis" | "legacy";
+type ExecutionTimeframe = "m1" | "m5" | "m10" | "m15";
 
 const FOLDER_KEYS = new Set(["DATA_FOLDER", "OUTPUT_FOLDER"]);
 const HIDDEN_FROM_TAB = new Set([
@@ -93,7 +94,7 @@ export default function DiscoveryTab() {
   const [params, setParams] = useState<ParamDef[]>([]);
   const [datasets, setDatasets] = useState<MarketDataset[]>([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
-  const [timeframe, setTimeframe] = useState<"m5" | "m15">("m5");
+  const [timeframe, setTimeframe] = useState<ExecutionTimeframe>("m5");
   const [dateFrom, setDateFrom] = useState(dateInput(2000));
   const [dateTo, setDateTo] = useState(dateInput(0));
   const [families, setFamilies] = useState<HypothesisFamily[]>(
@@ -583,9 +584,11 @@ export default function DiscoveryTab() {
           </div>
           <div className="field">
             <label className="field-label">Test timeframe</label>
-            <select className="field-input" value={timeframe} onChange={(event) => setTimeframe(event.target.value as "m5" | "m15")} disabled={isRunning}>
-              <option value="m15">M15</option>
+            <select className="field-input" value={timeframe} onChange={(event) => setTimeframe(event.target.value as ExecutionTimeframe)} disabled={isRunning}>
+              <option value="m1">M1</option>
               <option value="m5">M5</option>
+              <option value="m10">M10</option>
+              <option value="m15">M15</option>
             </select>
             <span className="field-hint">Dataset must include this timeframe plus H1 and H4.</span>
           </div>

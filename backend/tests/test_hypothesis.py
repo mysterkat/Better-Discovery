@@ -214,6 +214,18 @@ def test_hypothesis_discovery_parallel_workers_are_validated() -> None:
         )
 
 
+@pytest.mark.parametrize("timeframe", ("m1", "m5", "m10", "m15"))
+def test_hypothesis_discovery_accepts_supported_execution_timeframes(timeframe: str) -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        timeframe=timeframe,
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+    )
+
+    assert request.timeframe == timeframe
+
+
 def test_long_only_session_filter_is_applied_after_breakout_signal() -> None:
     times = pd.date_range("2025-01-01T12:00:00Z", periods=3, freq="1h")
     base = pd.DataFrame({

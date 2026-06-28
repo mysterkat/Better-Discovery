@@ -30,7 +30,7 @@ class HypothesisSpec(BaseModel):
     strategy_id: str = Field(min_length=3, max_length=80)
     lineage: Lineage
     hypothesis: str = Field(min_length=20, max_length=1000)
-    timeframe: Literal["m5", "m15"] = "m15"
+    timeframe: Literal["m1", "m5", "m10", "m15"] = "m15"
     context_timeframes: tuple[Literal["h1", "h4"], ...] = ("h1", "h4")
     parameters: dict[str, int | float | str | bool]
 
@@ -114,7 +114,7 @@ class FTMOChallengeConfig(BaseModel):
 class HypothesisDiscoveryRequest(BaseModel):
     dataset_id: str
     symbol: str = "XAUUSD"
-    timeframe: Literal["m5", "m15"] = "m5"
+    timeframe: Literal["m1", "m5", "m10", "m15"] = "m5"
     date_from: datetime
     date_to: datetime
     families: tuple[Lineage, ...] | None = None

@@ -22,7 +22,7 @@ import { useJobs } from "../state/jobs";
 type DataSource = "mt5" | "dukascopy";
 
 const TIMEFRAMES = ["m1", "m5", "m10", "m15", "m30", "h1", "h4", "d1"];
-const MT5_TIMEFRAMES = ["m1", "m5", "m15", "m30", "h1", "h4", "d1"];
+const MT5_TIMEFRAMES = ["m1", "m5", "m10", "m15", "m30", "h1", "h4", "d1"];
 
 function dateInput(daysAgo: number): string {
   const value = new Date();

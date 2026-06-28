@@ -62,7 +62,7 @@ export interface HypothesisStrategySpec {
   strategy_id: string;
   lineage: HypothesisFamily;
   hypothesis: string;
-  timeframe: "m5" | "m15";
+  timeframe: "m1" | "m5" | "m10" | "m15";
   context_timeframes?: ("h1" | "h4")[];
   parameters: Record<string, unknown>;
 }
@@ -70,7 +70,7 @@ export interface HypothesisStrategySpec {
 export interface HypothesisDiscoveryRequest {
   dataset_id: string;
   symbol: "XAUUSD";
-  timeframe: "m5" | "m15";
+  timeframe: "m1" | "m5" | "m10" | "m15";
   date_from: string;
   date_to: string;
   families?: HypothesisFamily[];
