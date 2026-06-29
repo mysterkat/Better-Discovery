@@ -33,6 +33,15 @@ export interface HypothesisMqlExportResult {
   mt5_spec_path?: string | null;
   mt5_data_path?: string | null;
   mt5_experts_folder?: string | null;
+  mt5_installs?: Array<{
+    data_path: string;
+    experts_folder: string;
+    mq5_path: string;
+    set_path: string;
+    spec_path: string;
+    origin?: string;
+    portable?: string;
+  }>;
   strategy_id: string;
   lineage: string;
   magic_number: number;

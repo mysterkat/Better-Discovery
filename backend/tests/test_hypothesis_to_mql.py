@@ -9,7 +9,9 @@ from app.hypothesis.models import HypothesisSpec
 from app.main import app
 
 
-def test_hypothesis_export_writes_standalone_ea_set_and_spec() -> None:
+def test_hypothesis_export_writes_standalone_ea_set_and_spec(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(mt5_setup, "_resolve_mt5_paths", lambda: (_ for _ in ()).throw(RuntimeError("MT5 unavailable")))
     strategy = HypothesisSpec(
         strategy_id="sweep_reclaim_export_test",
         lineage="liquidity_sweep_reclaim",
@@ -60,6 +62,7 @@ def test_hypothesis_export_installs_copy_to_active_mt5_data_folder(tmp_path, mon
     include_path = data_path / "MQL5" / "Include" / "Trade"
     include_path.mkdir(parents=True)
     (include_path / "Trade.mqh").write_text("// standard lib placeholder", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     monkeypatch.setattr(
         mt5_setup,
         "_resolve_mt5_paths",
@@ -97,7 +100,56 @@ def test_hypothesis_export_installs_copy_to_active_mt5_data_folder(tmp_path, mon
     assert Path(result["mt5_spec_path"]).is_file()
 
 
-def test_hypothesis_export_translates_strategy_grammar_rule_tree() -> None:
+def test_hypothesis_export_installs_copy_to_normal_terminal_when_portable_is_active(tmp_path, monkeypatch) -> None:
+    appdata = tmp_path / "appdata"
+    portable_data = appdata / "MetaQuotes" / "Terminal" / "PORTABLE"
+    normal_data = appdata / "MetaQuotes" / "Terminal" / "NORMAL"
+    for data_path, origin in [
+        (portable_data, r"C:\Users\micha\AppData\Local\BetterDiscoveryResearch\mt5_portable"),
+        (normal_data, r"C:\Program Files\MetaTrader 5"),
+    ]:
+        (data_path / "MQL5" / "Include" / "Trade").mkdir(parents=True)
+        (data_path / "MQL5" / "Include" / "Trade" / "Trade.mqh").write_text("// standard lib placeholder", encoding="utf-8")
+        (data_path / "origin.txt").write_text(origin, encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setattr(
+        mt5_setup,
+        "_resolve_mt5_paths",
+        lambda: {"install": str(tmp_path / "portable"), "data": str(portable_data), "common": str(tmp_path / "common")},
+    )
+    strategy = HypothesisSpec(
+        strategy_id="mt5_multi_install_export_test",
+        lineage="trend_pullback",
+        timeframe="m5",
+        hypothesis="A pullback continuation should export to every detected terminal.",
+        parameters={
+            "ema_length": 20,
+            "pullback_atr": 0.5,
+            "rsi_trigger": 50,
+            "atr_stop": 1.2,
+            "reward_risk": 1.5,
+            "max_hold_bars": 12,
+            "context_filter": "none",
+            "direction_mode": "both",
+            "session_start_utc": 0,
+            "session_end_utc": 24,
+            "volatility_filter": "none",
+        },
+    )
+
+    result = hypothesis_to_mql.export(strategy, output_name="_test_mt5_multi_install_export")
+
+    assert result["mt5_installed"] is True
+    assert len(result["mt5_installs"]) == 2
+    assert Path(result["mt5_mq5_path"]).is_file()
+    assert Path(result["mt5_mq5_path"]).is_relative_to(normal_data)
+    assert (portable_data / "MQL5" / "Experts" / "BetterDiscovery" / "Hypothesis" / "test_mt5_multi_install_export.mq5").is_file()
+    assert (normal_data / "MQL5" / "Experts" / "BetterDiscovery" / "Hypothesis" / "test_mt5_multi_install_export.mq5").is_file()
+
+
+def test_hypothesis_export_translates_strategy_grammar_rule_tree(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(mt5_setup, "_resolve_mt5_paths", lambda: (_ for _ in ()).throw(RuntimeError("MT5 unavailable")))
     strategy = HypothesisSpec(
         strategy_id="grammar_export_test",
         lineage="strategy_grammar",
@@ -137,7 +189,9 @@ def test_hypothesis_export_translates_strategy_grammar_rule_tree() -> None:
     assert "InpGrammarStopMode=structure" in set_text
 
 
-def test_hypothesis_export_route_accepts_ui_payload() -> None:
+def test_hypothesis_export_route_accepts_ui_payload(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setattr(mt5_setup, "_resolve_mt5_paths", lambda: (_ for _ in ()).throw(RuntimeError("MT5 unavailable")))
     client = TestClient(app)
 
     response = client.post(

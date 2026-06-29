@@ -285,8 +285,10 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
         max_trades_per_day: candidate.max_trades_per_day,
       });
       const preferredPath = exported.preferred_mq5_path ?? exported.mq5_path;
-      setExportNotice(`${exported.mt5_installed ? "Installed EA to active MT5" : "Exported EA"}: ${preferredPath}`);
-      setExportPath(preferredPath);
+      const folderPath = exported.mt5_experts_folder ?? preferredPath;
+      const installCount = exported.mt5_installs?.length ?? (exported.mt5_installed ? 1 : 0);
+      setExportNotice(`${exported.mt5_installed ? `Installed EA to ${installCount} MT5 folder${installCount === 1 ? "" : "s"}` : "Exported EA"}: ${preferredPath}`);
+      setExportPath(folderPath);
     } catch (e) {
       setExportError(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {

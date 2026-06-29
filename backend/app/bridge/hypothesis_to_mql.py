@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import os
 from pathlib import Path
 from typing import Any
 
@@ -63,59 +64,135 @@ def _timeframe_set_value(value: object) -> str:
     return {"PERIOD_M1": "1", "PERIOD_M5": "5", "PERIOD_M10": "10", "PERIOD_M15": "15"}.get(str(value), str(value))
 
 
-def _install_to_active_mt5(mq5_path: Path, set_path: Path, spec_path: Path) -> dict[str, Any]:
-    """Copy exported files into the currently connected MT5 data folder.
+def _is_portable_better_discovery_terminal(data_path: Path) -> bool:
+    origin = data_path / "origin.txt"
+    if not origin.is_file():
+        return False
+    try:
+        text = origin.read_text(encoding="utf-8", errors="ignore").lower()
+    except OSError:
+        return False
+    return "betterdiscoveryresearch" in text or "mt5_portable" in text
 
-    This avoids Windows file association opening a different, clean terminal.
-    If MT5 is unavailable, export remains valid in userdata and the caller gets
-    a warning instead of a hard failure.
+
+def _terminal_origin(data_path: Path) -> str | None:
+    origin = data_path / "origin.txt"
+    if not origin.is_file():
+        return None
+    try:
+        text = origin.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _candidate_mt5_data_paths(active_data_path: Path | None) -> list[Path]:
+    candidates: list[Path] = []
+    if active_data_path is not None:
+        candidates.append(active_data_path)
+
+    appdata = os.environ.get("APPDATA")
+    terminal_root = Path(appdata) / "MetaQuotes" / "Terminal" if appdata else None
+    if terminal_root and terminal_root.is_dir():
+        for child in terminal_root.iterdir():
+            if not child.is_dir() or child.name in {"Common", "Community"}:
+                continue
+            if (child / "MQL5").is_dir() or (child / "origin.txt").is_file():
+                candidates.append(child)
+
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        key = str(path.resolve()).lower()
+        if key not in seen:
+            unique.append(path)
+            seen.add(key)
+    return unique
+
+
+def _preferred_mt5_install(installs: list[dict[str, str]]) -> dict[str, str] | None:
+    if not installs:
+        return None
+    non_portable = [
+        item for item in installs
+        if not _is_portable_better_discovery_terminal(Path(item["data_path"]))
+    ]
+    if non_portable:
+        return non_portable[0]
+    return installs[0]
+
+
+def _install_to_mt5_terminals(mq5_path: Path, set_path: Path, spec_path: Path) -> dict[str, Any]:
+    """Copy exported files into every detected MT5 terminal data folder.
+
+    MT5 Python can connect to Better Discovery's portable terminal, while the
+    user may trade from the normal installed terminal. Installing to all detected
+    terminal data folders avoids the "empty terminal/editor" mismatch.
     """
+    active_data_path: Path | None = None
+    warnings: list[str] = []
     try:
         from .mt5_setup import _resolve_mt5_paths  # noqa: WPS433
 
         paths = _resolve_mt5_paths()
     except Exception as exc:  # noqa: BLE001
+        paths = {}
+        warnings.append(
+            "Could not resolve active MT5 through the Python bridge; installed to detected terminal folders only. "
+            f"Detail: {type(exc).__name__}: {exc}"
+        )
+    else:
+        resolved_data = Path(str(paths.get("data") or ""))
+        if resolved_data.is_dir():
+            active_data_path = resolved_data
+        elif str(resolved_data):
+            warnings.append(f"Resolved MT5 data folder does not exist: {resolved_data}")
+
+    installs: list[dict[str, str]] = []
+    for data_path in _candidate_mt5_data_paths(active_data_path):
+        if not data_path.is_dir():
+            continue
+        target_dir = data_path / _MT5_EXPORT_SUBDIR
+        target_dir.mkdir(parents=True, exist_ok=True)
+        mt5_mq5 = target_dir / mq5_path.name
+        mt5_set = target_dir / set_path.name
+        mt5_spec = target_dir / spec_path.name
+        shutil.copy2(mq5_path, mt5_mq5)
+        shutil.copy2(set_path, mt5_set)
+        shutil.copy2(spec_path, mt5_spec)
+        trade_include = data_path / "MQL5" / "Include" / "Trade" / "Trade.mqh"
+        if not trade_include.is_file():
+            warnings.append(f"MT5 standard library include is missing in this terminal: {trade_include}")
+        installs.append({
+            "data_path": str(data_path),
+            "experts_folder": str(target_dir),
+            "mq5_path": str(mt5_mq5),
+            "set_path": str(mt5_set),
+            "spec_path": str(mt5_spec),
+            "origin": _terminal_origin(data_path) or "",
+            "portable": str(_is_portable_better_discovery_terminal(data_path)).lower(),
+        })
+
+    preferred = _preferred_mt5_install(installs)
+    if preferred is None:
         return {
             "installed": False,
             "preferred_mq5_path": str(mq5_path),
             "mt5_data_path": None,
-            "warning": (
-                "Could not resolve active MT5 data folder. Open your normal MT5 terminal, "
-                f"log in, then export again. Detail: {type(exc).__name__}: {exc}"
-            ),
+            "warning": "No MT5 terminal data folders were found under AppData\\Roaming\\MetaQuotes\\Terminal.",
+            "warnings": warnings,
+            "mt5_installs": installs,
         }
 
-    data_path = Path(str(paths.get("data") or ""))
-    if not data_path.is_dir():
-        return {
-            "installed": False,
-            "preferred_mq5_path": str(mq5_path),
-            "mt5_data_path": str(data_path),
-            "warning": f"Resolved MT5 data folder does not exist: {data_path}",
-        }
-
-    target_dir = data_path / _MT5_EXPORT_SUBDIR
-    target_dir.mkdir(parents=True, exist_ok=True)
-    mt5_mq5 = target_dir / mq5_path.name
-    mt5_set = target_dir / set_path.name
-    mt5_spec = target_dir / spec_path.name
-    shutil.copy2(mq5_path, mt5_mq5)
-    shutil.copy2(set_path, mt5_set)
-    shutil.copy2(spec_path, mt5_spec)
-    warnings: list[str] = []
-    trade_include = data_path / "MQL5" / "Include" / "Trade" / "Trade.mqh"
-    if not trade_include.is_file():
-        warnings.append(
-            f"MT5 standard library include is missing in this terminal: {trade_include}"
-        )
     return {
         "installed": True,
-        "preferred_mq5_path": str(mt5_mq5),
-        "mt5_mq5_path": str(mt5_mq5),
-        "mt5_set_path": str(mt5_set),
-        "mt5_spec_path": str(mt5_spec),
-        "mt5_data_path": str(data_path),
-        "mt5_experts_folder": str(target_dir),
+        "preferred_mq5_path": preferred["mq5_path"],
+        "mt5_mq5_path": preferred["mq5_path"],
+        "mt5_set_path": preferred["set_path"],
+        "mt5_spec_path": preferred["spec_path"],
+        "mt5_data_path": preferred["data_path"],
+        "mt5_experts_folder": preferred["experts_folder"],
+        "mt5_installs": installs,
         "warnings": warnings,
     }
 
@@ -1541,7 +1618,7 @@ def export(
     mq5_path.write_text(_ea_source(strategy, values), encoding="utf-8", newline="\n")
     set_path.write_text(_set_text(values), encoding="utf-8", newline="\n")
     spec_path.write_text(strategy.model_dump_json(indent=2), encoding="utf-8")
-    mt5_install = _install_to_active_mt5(mq5_path, set_path, spec_path)
+    mt5_install = _install_to_mt5_terminals(mq5_path, set_path, spec_path)
     warnings = [
         "Generated EA uses MT5 server bars and closed-bar logic; results can differ from Python bar replay because broker time, spread, and indicator implementations differ.",
         "Use this for MT5 validation/backtesting before any live or funded use.",
@@ -1560,6 +1637,7 @@ def export(
         "mt5_spec_path": mt5_install.get("mt5_spec_path"),
         "mt5_data_path": mt5_install.get("mt5_data_path"),
         "mt5_experts_folder": mt5_install.get("mt5_experts_folder"),
+        "mt5_installs": mt5_install.get("mt5_installs", []),
         "strategy_id": strategy.strategy_id,
         "lineage": strategy.lineage,
         "magic_number": magic_number,
