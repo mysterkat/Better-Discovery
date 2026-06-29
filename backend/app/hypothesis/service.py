@@ -91,6 +91,17 @@ class HypothesisResearchService:
         )
         return self._range(self._read(paths), date_from, date_to)
 
+    @staticmethod
+    def _grammar_timeframes(strategy: HypothesisSpec) -> tuple[str, ...]:
+        if strategy.lineage != "strategy_grammar":
+            return ()
+        values = [
+            str(block.get("timeframe", strategy.timeframe)).lower()
+            for block in list(strategy.parameters.get("rule_blocks") or [])
+            if isinstance(block, dict)
+        ]
+        return tuple(dict.fromkeys(value for value in values if value in {"m1", "m5", "m10", "m15"}))
+
     def run(self, request: HypothesisBarRequest) -> dict[str, Any]:
         manifest = self.catalog.load(request.dataset_id)
         if manifest.state != "complete":
@@ -105,7 +116,12 @@ class HypothesisResearchService:
             timeframe: self._bars(manifest, symbol, timeframe, warmup_from, request.date_to)
             for timeframe in request.strategy.context_timeframes
         }
-        signals = build_signal_frame(warm_bars, contexts, request.strategy)
+        grammar_bars = {
+            timeframe: self._bars(manifest, symbol, timeframe, warmup_from, request.date_to)
+            for timeframe in self._grammar_timeframes(request.strategy)
+            if timeframe != request.strategy.timeframe
+        }
+        signals = build_signal_frame(warm_bars, contexts, request.strategy, grammar_bars)
         signals = signals.loc[(signals.index >= pd.Timestamp(request.date_from)) & (signals.index < pd.Timestamp(request.date_to))]
         return self.run_preloaded(request, bars, signals)
 
@@ -241,10 +257,22 @@ class HypothesisResearchService:
         strategy: HypothesisSpec,
         bars: pd.DataFrame,
         base_frame: pd.DataFrame,
+        grammar_frames: dict[str, pd.DataFrame] | None,
         min_required_trades: int,
     ) -> tuple[dict[str, Any], pd.DataFrame] | None:
         replay_request = self._replay_request(request, strategy, min_required_trades)
-        signals = apply_signal_rules(base_frame, strategy)
+        strategy_grammar_frames = None
+        if strategy.lineage == "strategy_grammar" and grammar_frames:
+            strategy_grammar_frames = {
+                timeframe: frame
+                for timeframe, frame in grammar_frames.items()
+                if any(
+                    isinstance(block, dict)
+                    and str(block.get("timeframe", strategy.timeframe)).lower() == timeframe
+                    for block in list(strategy.parameters.get("rule_blocks") or [])
+                )
+            }
+        signals = apply_signal_rules(base_frame, strategy, strategy_grammar_frames)
         signals = signals.loc[
             (signals.index >= pd.Timestamp(request.date_from))
             & (signals.index < pd.Timestamp(request.date_to))
@@ -302,6 +330,36 @@ class HypothesisResearchService:
             }
             base_frame = build_base_frame(warm_bars, contexts)
             specs = generate_hypotheses(request)
+            grammar_timeframes = tuple(
+                dict.fromkeys(
+                    timeframe
+                    for strategy in specs
+                    for timeframe in self._grammar_timeframes(strategy)
+                )
+            )
+            grammar_frames: dict[str, pd.DataFrame] = {request.timeframe: base_frame}
+            if grammar_timeframes:
+                from .signals import align_signal_timeframe
+
+                for grammar_timeframe in grammar_timeframes:
+                    if grammar_timeframe == request.timeframe:
+                        continue
+                    warm_tf_bars = self._bars(
+                        manifest,
+                        request.symbol,
+                        grammar_timeframe,
+                        warmup_from,
+                        request.date_to,
+                    )
+                    if warm_tf_bars.empty:
+                        raise ValueError(f"missing grammar timeframe bars: {grammar_timeframe.upper()}")
+                    signal_frame = build_base_frame(warm_tf_bars, contexts)
+                    grammar_frames[grammar_timeframe] = align_signal_timeframe(
+                        base_frame,
+                        signal_frame,
+                        grammar_timeframe,
+                        request.timeframe,
+                    )
             min_required_trades = self._minimum_required_trades(request, bars)
             rows: list[dict[str, Any]] = []
             top_ledgers: dict[str, pd.DataFrame] = {}
@@ -340,12 +398,12 @@ class HypothesisResearchService:
             if workers <= 1:
                 for index, strategy in enumerate(specs, start=1):
                     check_cancelled()
-                    record(self._evaluate_candidate(request, strategy, bars, base_frame, min_required_trades))
+                    record(self._evaluate_candidate(request, strategy, bars, base_frame, grammar_frames, min_required_trades))
                     update_variant_progress(index, len(specs), workers)
             else:
                 executor = ThreadPoolExecutor(max_workers=workers)
                 futures = {
-                    executor.submit(self._evaluate_candidate, request, strategy, bars, base_frame, min_required_trades): strategy
+                    executor.submit(self._evaluate_candidate, request, strategy, bars, base_frame, grammar_frames, min_required_trades): strategy
                     for strategy in specs
                 }
                 cancel_futures = False

@@ -412,6 +412,7 @@ def _strategy_grammar(
     block_groups: tuple[str, ...] | None = None,
     complexity: str = "medium",
     randomness: str = "balanced",
+    grammar_timeframes: tuple[str, ...] = ("m5",),
 ) -> list[HypothesisProfile]:
     thesis = (
         "Autonomous strategy grammar: combine liquidity, ICT/SMT structure, "
@@ -420,6 +421,7 @@ def _strategy_grammar(
     seed_offset = {"low": 7, "balanced": 97, "high": 997}.get(randomness, 97)
     rng = Random(seed + seed_offset)
     enabled_groups = set(block_groups or ("liquidity", "structure", "imbalance", "orderflow", "sessions", "volatility"))
+    timeframe_pool = tuple(dict.fromkeys(tf.lower() for tf in grammar_timeframes if tf.lower() in {"m1", "m5", "m10", "m15"})) or ("m5",)
     entry_blocks = _allowed_blocks(GRAMMAR_ENTRY_BLOCKS, enabled_groups)
     confirmation_blocks = _allowed_blocks(GRAMMAR_CONFIRMATION_BLOCKS, enabled_groups)
     filter_blocks = [dict(block) for block in GRAMMAR_FILTER_BLOCKS if str(block.get("group")) in enabled_groups]
@@ -433,16 +435,23 @@ def _strategy_grammar(
     while len(profiles) < max_variants and attempts < max_variants * 12:
         attempts += 1
         entry = _strip_group(dict(rng.choice(entry_blocks)))
+        entry["timeframe"] = rng.choice(timeframe_pool)
         confirmations = [_strip_group(dict(rng.choice(confirmation_blocks)))]
+        confirmations[0]["timeframe"] = rng.choice(timeframe_pool)
         if rng.random() < extra_confirmation_chance:
             extra = _strip_group(dict(rng.choice(confirmation_blocks)))
             if extra["name"] != confirmations[0]["name"]:
+                extra["timeframe"] = rng.choice(timeframe_pool)
                 confirmations.append(extra)
         filters: list[dict[str, object]] = []
         if filter_blocks and rng.random() < filter_chance:
-            filters.append(_strip_group(dict(rng.choice(filter_blocks))))
+            selected_filter = _strip_group(dict(rng.choice(filter_blocks)))
+            selected_filter["timeframe"] = rng.choice(timeframe_pool)
+            filters.append(selected_filter)
         if smt_blocks and rng.random() < smt_chance:
-            filters.append(_strip_group(dict(rng.choice(smt_blocks))))
+            selected_smt = _strip_group(dict(rng.choice(smt_blocks)))
+            selected_smt["timeframe"] = rng.choice(timeframe_pool)
+            filters.append(selected_smt)
 
         blocks = [entry, *confirmations, *filters]
         params: dict[str, object] = {
@@ -450,6 +459,7 @@ def _strategy_grammar(
             "grammar_complexity": complexity,
             "grammar_randomness": randomness,
             "grammar_block_groups": ",".join(sorted(enabled_groups)),
+            "grammar_timeframes": ",".join(timeframe_pool),
             "rule_blocks": blocks,
             "block_logic": "all" if len(blocks) <= 4 else "vote",
             "min_block_votes": max(2, len(blocks) - 1),
@@ -509,6 +519,7 @@ def generate_hypotheses(request: HypothesisDiscoveryRequest) -> list[HypothesisS
                 block_groups=request.grammar_block_groups,
                 complexity=request.grammar_complexity,
                 randomness=request.grammar_randomness,
+                grammar_timeframes=request.grammar_timeframes or (request.timeframe,),
             )
             if lineage == "strategy_grammar"
             else BUILDERS[lineage]()

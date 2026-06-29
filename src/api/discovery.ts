@@ -72,6 +72,7 @@ export interface HypothesisDiscoveryRequest {
   dataset_id: string;
   symbol: "XAUUSD";
   timeframe: "m1" | "m5" | "m10" | "m15";
+  grammar_timeframes?: ("m1" | "m5" | "m10" | "m15")[];
   date_from: string;
   date_to: string;
   families?: HypothesisFamily[];

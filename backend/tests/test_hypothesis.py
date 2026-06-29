@@ -10,7 +10,7 @@ from app.hypothesis.challenge import evaluate_challenge
 from app.hypothesis.grammar import generate_hypotheses
 from app.hypothesis.models import FTMOChallengeConfig, HypothesisBarRequest, HypothesisDiscoveryRequest, HypothesisSpec
 from app.hypothesis.service import HypothesisResearchService
-from app.hypothesis.signals import apply_signal_rules
+from app.hypothesis.signals import align_signal_timeframe, apply_signal_rules
 
 
 NEW_HYPOTHESIS_FAMILIES = (
@@ -513,6 +513,30 @@ def test_strategy_grammar_generates_rule_trees() -> None:
     assert all(item.parameters.get("rule_blocks") for item in specs)
 
 
+def test_strategy_grammar_assigns_block_signal_timeframes() -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        timeframe="m5",
+        grammar_timeframes=("m5", "m10"),
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        families=("strategy_grammar",),
+        max_variants=80,
+    )
+
+    specs = generate_hypotheses(request)
+    block_timeframes = {
+        block["timeframe"]
+        for spec in specs
+        for block in spec.parameters["rule_blocks"]  # type: ignore[index]
+    }
+
+    assert request.grammar_timeframes == ("m5", "m10")
+    assert block_timeframes <= {"m5", "m10"}
+    assert {"m5", "m10"} <= block_timeframes
+    assert all("grammar_timeframes" in spec.parameters for spec in specs)
+
+
 def test_strategy_grammar_respects_block_group_controls() -> None:
     request = HypothesisDiscoveryRequest(
         dataset_id="test",
@@ -572,6 +596,42 @@ def test_strategy_grammar_fvg_retrace_block_detects_closed_bar_entry() -> None:
 
     assert signals.loc[times[2], "signal_direction"] == 1
     assert signals.loc[times[3], "signal_direction"] == 1
+
+
+def test_strategy_grammar_aligns_cross_timeframe_blocks_after_source_bar_close() -> None:
+    primary_times = pd.date_range("2025-01-01T00:00:00Z", periods=7, freq="5min", name="time")
+    m10_times = pd.date_range("2025-01-01T00:00:00Z", periods=3, freq="10min", name="time")
+    primary = _base_frame(primary_times)
+    m10_source = _base_frame(
+        m10_times,
+        open=[100.0, 100.5, 101.0],
+        high=[100.2, 100.8, 102.2],
+        low=[99.8, 100.1, 101.0],
+        close=[100.1, 100.6, 101.8],
+    )
+    aligned_m10 = align_signal_timeframe(primary, m10_source, "m10", "m5")
+    strategy = HypothesisSpec(
+        strategy_id="grammar_mtf_fvg_test",
+        lineage="strategy_grammar",
+        timeframe="m5",
+        hypothesis="A higher-timeframe fair value gap should become available only after that bar closes.",
+        parameters={
+            "rule_blocks": [{"name": "fair_value_gap", "mode": "new", "timeframe": "m10"}],
+            "block_logic": "all",
+            "direction_mode": "long_only",
+            "session_start_utc": 0,
+            "session_end_utc": 24,
+            "volatility_filter": "none",
+            "atr_stop": 1.0,
+            "reward_risk": 1.0,
+            "max_hold_bars": 4,
+        },
+    )
+
+    signals = apply_signal_rules(primary, strategy, {"m10": aligned_m10})
+
+    assert signals.loc[primary_times[6], "signal_direction"] == 1
+    assert signals.loc[primary_times[5], "signal_direction"] == 0
 
 
 def test_strategy_grammar_smt_requires_external_proxy_data() -> None:

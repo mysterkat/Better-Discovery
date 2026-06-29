@@ -338,7 +338,11 @@ def evaluate_rule_block(frame: pd.DataFrame, block: dict[str, Any], side: Side) 
     raise ValueError(f"unsupported strategy grammar block: {name}")
 
 
-def apply_strategy_grammar(frame: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+def apply_strategy_grammar(
+    frame: pd.DataFrame,
+    params: dict[str, Any],
+    block_frames: dict[str, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
     direction = pd.Series(0, index=frame.index, dtype="int8")
     blocks = list(params.get("rule_blocks") or [])
     if not blocks:
@@ -354,7 +358,14 @@ def apply_strategy_grammar(frame: pd.DataFrame, params: dict[str, Any]) -> pd.Da
     mode = str(params.get("block_logic", "all"))
     min_votes = int(params.get("min_block_votes", max(1, math.ceil(len(blocks) * 0.7))))
     for side, sign in (("long", 1), ("short", -1)):
-        masks = [evaluate_rule_block(frame, block, side) for block in blocks]
+        masks = [
+            evaluate_rule_block(
+                (block_frames or {}).get(str(block.get("timeframe", "")).lower(), frame),
+                block,
+                side,
+            ).reindex(frame.index, fill_value=False)
+            for block in blocks
+        ]
         if mode == "vote":
             side_mask = sum(mask.astype(int) for mask in masks) >= min_votes
         elif mode == "any":
@@ -388,4 +399,3 @@ def apply_strategy_grammar(frame: pd.DataFrame, params: dict[str, Any]) -> pd.Da
         "trail_atr": trail,
         "max_hold_bars": max_hold,
     }, index=frame.index)
-

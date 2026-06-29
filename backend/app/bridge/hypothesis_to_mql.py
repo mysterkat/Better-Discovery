@@ -196,7 +196,7 @@ def _mql_text(value: Any, default: str = "") -> str:
     return _mql_string(raw)
 
 
-def _grammar_block_function(index: int, block: dict[str, Any]) -> str:
+def _grammar_block_function(index: int, block: dict[str, Any], default_timeframe: str = "m15") -> str:
     name = str(block.get("name", ""))
     lookback = _mql_int(block.get("lookback", 24), 24)
     buffer_atr = _mql_num(block.get("buffer_atr", 0.0), 0.0)
@@ -226,12 +226,14 @@ def _grammar_block_function(index: int, block: dict[str, Any]) -> str:
     max_rng_atr = _mql_num(block.get("max_rng_atr", 3.0), 3.0)
     trend_open_atr = _mql_num(block.get("trend_open_atr", 0.35), 0.35)
     quantile_factor = _mql_num(0.75 + float(block.get("quantile", 0.25) or 0.25), 1.0)
+    timeframe = _timeframe_constant(str(block.get("timeframe", default_timeframe)))
 
     header = f"""bool GrammarBlock{index}(const int direction)
 {{
+   ENUM_TIMEFRAMES tf = {timeframe};
    MqlRates b, prev;
-   if(!Bar(1, b) || !Bar(2, prev)) return false;
-   double atr = ATR(1);
+   if(!GBar(tf, 1, b) || !GBar(tf, 2, prev)) return false;
+   double atr = GATR(tf, 1);
 """
     footer = "\n   return false;\n}\n"
 
@@ -429,6 +431,26 @@ def _grammar_block_function(index: int, block: dict[str, Any]) -> str:
    // Unsupported generated block: {name}
    return false;
 """
+    replacements = (
+        ("RangeWindowLevels(", "GRangeWindowLevels(tf, "),
+        ("HighestHigh(", "GHighestHigh(tf, "),
+        ("LowestLow(", "GLowestLow(tf, "),
+        ("LatestSwingHigh(", "GLatestSwingHigh(tf, "),
+        ("LatestSwingLow(", "GLatestSwingLow(tf, "),
+        ("FreshFvg(", "GFreshFvg(tf, "),
+        ("FindLatestFvg(", "GFindLatestFvg(tf, "),
+        ("OrderBlockTouch(", "GOrderBlockTouch(tf, "),
+        ("BreakerBlockTouch(", "GBreakerBlockTouch(tf, "),
+        ("IsInsidePrevious()", "GIsInsidePrevious(tf)"),
+        ("EMAByLength(", "GEMAByLength(tf, "),
+        ("RangeAtr(", "GRangeAtr(tf, "),
+        ("AvgBBWidth(", "GAvgBBWidth(tf, "),
+        ("BBWidth(", "GBBWidth(tf, "),
+        ("RSI(", "GRSI(tf, "),
+        ("Bar(", "GBar(tf, "),
+    )
+    for old, new in replacements:
+        body = body.replace(old, new)
     return header + body + footer
 
 
@@ -437,11 +459,244 @@ def _grammar_helpers(strategy: HypothesisSpec) -> str:
         return ""
     blocks = list(strategy.parameters.get("rule_blocks") or [])
     block_functions = "\n".join(
-        _grammar_block_function(index, block)
+        _grammar_block_function(index, block, strategy.timeframe)
         for index, block in enumerate(blocks)
         if isinstance(block, dict)
     )
     return f"""
+bool GBar(const ENUM_TIMEFRAMES tf, const int shift, MqlRates &bar)
+{{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, tf, shift, 1, rates) != 1)
+      return false;
+   bar = rates[0];
+   return true;
+}}
+
+bool GRatesFrom(const ENUM_TIMEFRAMES tf, const int shift, const int count, MqlRates &rates[])
+{{
+   ArraySetAsSeries(rates, true);
+   return CopyRates(_Symbol, tf, shift, count, rates) == count;
+}}
+
+double GBufferValue(const int handle, const int buffer, const int shift)
+{{
+   double values[];
+   ArraySetAsSeries(values, true);
+   if(CopyBuffer(handle, buffer, shift, 1, values) != 1)
+      return 0.0;
+   return values[0];
+}}
+
+double GATR(const ENUM_TIMEFRAMES tf, const int shift)
+{{
+   int handle = iATR(_Symbol, tf, 14);
+   if(handle == INVALID_HANDLE) return _Point;
+   double value = MathMax(GBufferValue(handle, 0, shift), _Point);
+   IndicatorRelease(handle);
+   return value;
+}}
+
+double GRSI(const ENUM_TIMEFRAMES tf, const int shift)
+{{
+   int handle = iRSI(_Symbol, tf, 14, PRICE_CLOSE);
+   if(handle == INVALID_HANDLE) return 50.0;
+   double value = GBufferValue(handle, 0, shift);
+   IndicatorRelease(handle);
+   return value;
+}}
+
+double GEMAByLength(const ENUM_TIMEFRAMES tf, const int length, const int shift)
+{{
+   int period = length <= 20 ? 20 : (length <= 50 ? 50 : 200);
+   int handle = iMA(_Symbol, tf, period, 0, MODE_EMA, PRICE_CLOSE);
+   if(handle == INVALID_HANDLE) return 0.0;
+   double value = GBufferValue(handle, 0, shift);
+   IndicatorRelease(handle);
+   return value;
+}}
+
+double GRangeAtr(const ENUM_TIMEFRAMES tf, const MqlRates &bar, const int shift) {{ return (bar.high - bar.low) / GATR(tf, shift); }}
+
+double GHighestHigh(const ENUM_TIMEFRAMES tf, const int start_shift, const int count)
+{{
+   MqlRates rates[];
+   if(!GRatesFrom(tf, start_shift, MathMax(count, 1), rates)) return 0.0;
+   double value = rates[0].high;
+   for(int i = 1; i < ArraySize(rates); i++) value = MathMax(value, rates[i].high);
+   return value;
+}}
+
+double GLowestLow(const ENUM_TIMEFRAMES tf, const int start_shift, const int count)
+{{
+   MqlRates rates[];
+   if(!GRatesFrom(tf, start_shift, MathMax(count, 1), rates)) return 0.0;
+   double value = rates[0].low;
+   for(int i = 1; i < ArraySize(rates); i++) value = MathMin(value, rates[i].low);
+   return value;
+}}
+
+double GMeanClose(const ENUM_TIMEFRAMES tf, const int shift, const int count)
+{{
+   MqlRates rates[];
+   if(!GRatesFrom(tf, shift, MathMax(count, 1), rates)) return 0.0;
+   double sum = 0.0;
+   for(int i = 0; i < ArraySize(rates); i++) sum += rates[i].close;
+   return sum / MathMax(ArraySize(rates), 1);
+}}
+
+double GStdClose(const ENUM_TIMEFRAMES tf, const int shift, const int count)
+{{
+   MqlRates rates[];
+   if(!GRatesFrom(tf, shift, MathMax(count, 2), rates)) return 0.0;
+   double mean = 0.0;
+   for(int i = 0; i < ArraySize(rates); i++) mean += rates[i].close;
+   mean /= MathMax(ArraySize(rates), 1);
+   double var = 0.0;
+   for(int i = 0; i < ArraySize(rates); i++) var += MathPow(rates[i].close - mean, 2.0);
+   return MathSqrt(var / MathMax(ArraySize(rates), 1));
+}}
+
+double GBBWidth(const ENUM_TIMEFRAMES tf, const int shift)
+{{
+   double mean = GMeanClose(tf, shift, 20);
+   if(mean <= 0.0) return 0.0;
+   return 4.0 * GStdClose(tf, shift, 20) / mean;
+}}
+
+double GAvgBBWidth(const ENUM_TIMEFRAMES tf, const int shift, const int count)
+{{
+   double sum = 0.0;
+   int n = MathMax(count, 1);
+   for(int i = 0; i < n; i++) sum += GBBWidth(tf, shift + i);
+   return sum / n;
+}}
+
+bool GRangeWindowLevels(const ENUM_TIMEFRAMES tf, const int shift, const int start_hour, const int end_hour, double &range_high, double &range_low)
+{{
+   MqlRates signal_bar;
+   if(!GBar(tf, shift, signal_bar)) return false;
+   int key = DayKey(signal_bar.time);
+   MqlRates rates[];
+   if(!GRatesFrom(tf, shift, 400, rates)) return false;
+   bool found = false;
+   range_high = -DBL_MAX;
+   range_low = DBL_MAX;
+   for(int i = 0; i < ArraySize(rates); i++)
+   {{
+      if(DayKey(rates[i].time) != key) continue;
+      int hour = UtcHour(rates[i].time);
+      if(hour >= start_hour && hour < end_hour)
+      {{
+         found = true;
+         range_high = MathMax(range_high, rates[i].high);
+         range_low = MathMin(range_low, rates[i].low);
+      }}
+   }}
+   return found;
+}}
+
+bool GIsInsidePrevious(const ENUM_TIMEFRAMES tf)
+{{
+   MqlRates prev, mother;
+   if(!GBar(tf, 2, prev) || !GBar(tf, 3, mother)) return false;
+   return prev.high < mother.high && prev.low > mother.low;
+}}
+
+bool GLatestSwingHigh(const ENUM_TIMEFRAMES tf, const int left, const int right, double &level)
+{{
+   for(int shift = 1 + right; shift < 220; shift++)
+   {{
+      MqlRates candidate, other;
+      if(!GBar(tf, shift, candidate)) return false;
+      bool ok = true;
+      for(int k = 1; k <= left; k++) {{ if(!GBar(tf, shift + k, other) || candidate.high < other.high) ok = false; }}
+      for(int k = 1; k <= right; k++) {{ if(!GBar(tf, shift - k, other) || candidate.high < other.high) ok = false; }}
+      if(ok) {{ level = candidate.high; return true; }}
+   }}
+   return false;
+}}
+
+bool GLatestSwingLow(const ENUM_TIMEFRAMES tf, const int left, const int right, double &level)
+{{
+   for(int shift = 1 + right; shift < 220; shift++)
+   {{
+      MqlRates candidate, other;
+      if(!GBar(tf, shift, candidate)) return false;
+      bool ok = true;
+      for(int k = 1; k <= left; k++) {{ if(!GBar(tf, shift + k, other) || candidate.low > other.low) ok = false; }}
+      for(int k = 1; k <= right; k++) {{ if(!GBar(tf, shift - k, other) || candidate.low > other.low) ok = false; }}
+      if(ok) {{ level = candidate.low; return true; }}
+   }}
+   return false;
+}}
+
+bool GFreshFvg(const ENUM_TIMEFRAMES tf, const int direction, double &lower, double &upper)
+{{
+   MqlRates b, older;
+   if(!GBar(tf, 1, b) || !GBar(tf, 3, older)) return false;
+   if(direction > 0 && b.low > older.high) {{ lower = older.high; upper = b.low; return true; }}
+   if(direction < 0 && b.high < older.low) {{ lower = b.high; upper = older.low; return true; }}
+   return false;
+}}
+
+bool GFindLatestFvg(const ENUM_TIMEFRAMES tf, const int direction, const int lookback, double &lower, double &upper)
+{{
+   for(int shift = 1; shift <= lookback; shift++)
+   {{
+      MqlRates b, older;
+      if(!GBar(tf, shift, b) || !GBar(tf, shift + 2, older)) return false;
+      if(direction > 0 && b.low > older.high) {{ lower = older.high; upper = b.low; return true; }}
+      if(direction < 0 && b.high < older.low) {{ lower = b.high; upper = older.low; return true; }}
+   }}
+   return false;
+}}
+
+bool GOrderBlockTouch(const ENUM_TIMEFRAMES tf, const int direction, const int lookback, const double displacement_atr, const bool require_reject)
+{{
+   MqlRates b;
+   if(!GBar(tf, 1, b)) return false;
+   for(int shift = 2; shift <= lookback + 2; shift++)
+   {{
+      MqlRates impulse, zone;
+      if(!GBar(tf, shift - 1, impulse) || !GBar(tf, shift, zone)) continue;
+      bool displacement = GRangeAtr(tf, impulse, shift - 1) >= displacement_atr && BodyPct(impulse) >= 0.55;
+      if(direction > 0 && displacement && impulse.close > impulse.open && zone.close < zone.open)
+      {{
+         bool touched = b.low <= zone.high && b.close >= zone.low;
+         return touched && (!require_reject || b.close > b.open);
+      }}
+      if(direction < 0 && displacement && impulse.close < impulse.open && zone.close > zone.open)
+      {{
+         bool touched = b.high >= zone.low && b.close <= zone.high;
+         return touched && (!require_reject || b.close < b.open);
+      }}
+   }}
+   return false;
+}}
+
+bool GBreakerBlockTouch(const ENUM_TIMEFRAMES tf, const int direction, const int lookback, const double displacement_atr, const int retest_bars)
+{{
+   MqlRates b;
+   if(!GBar(tf, 1, b)) return false;
+   for(int shift = 2; shift <= lookback + retest_bars + 2; shift++)
+   {{
+      MqlRates impulse, zone;
+      if(!GBar(tf, shift - 1, impulse) || !GBar(tf, shift, zone)) continue;
+      bool displacement = GRangeAtr(tf, impulse, shift - 1) >= displacement_atr && BodyPct(impulse) >= 0.55;
+      if(direction > 0 && displacement && impulse.close < impulse.open && zone.close > zone.open)
+      {{
+         if(b.close > zone.high && b.low <= zone.high) return true;
+      }}
+      if(direction < 0 && displacement && impulse.close > impulse.open && zone.close < zone.open)
+      {{
+         if(b.close < zone.low && b.high >= zone.low) return true;
+      }}
+   }}
+   return false;
+}}
+
 bool LatestSwingHigh(const int left, const int right, double &level)
 {{
    for(int shift = 1 + right; shift < 220; shift++)

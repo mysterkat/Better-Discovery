@@ -8,6 +8,9 @@ from .block_engine import apply_strategy_grammar
 from .models import HypothesisSpec
 
 
+TIMEFRAME_MINUTES = {"m1": 1, "m5": 5, "m10": 10, "m15": 15}
+
+
 def _merge_context(primary: pd.DataFrame, context: pd.DataFrame, prefix: str) -> pd.DataFrame:
     features = build_features(context)
     selected = features[["trend", "ema50", "ema200", "atr14", "atr_pct"]].shift(1).reset_index()
@@ -27,6 +30,37 @@ def _merge_context(primary: pd.DataFrame, context: pd.DataFrame, prefix: str) ->
         direction="backward",
     )
     return merged.drop(columns=[f"{prefix}_time"]).set_index("time")
+
+
+def align_signal_timeframe(
+    primary: pd.DataFrame,
+    signal_frame: pd.DataFrame,
+    signal_timeframe: str,
+    primary_timeframe: str,
+) -> pd.DataFrame:
+    """Project a signal-timeframe feature frame onto the execution frame.
+
+    Same-timeframe blocks preserve historical behavior. Other timeframes are
+    made available only after their source bar has closed, then forward-filled
+    by merge_asof onto the execution timestamps.
+    """
+    signal_timeframe = signal_timeframe.lower()
+    primary_timeframe = primary_timeframe.lower()
+    if signal_timeframe == primary_timeframe:
+        return signal_frame.reindex(primary.index).ffill()
+    minutes = TIMEFRAME_MINUTES.get(signal_timeframe)
+    if minutes is None:
+        raise ValueError(f"unsupported grammar signal timeframe: {signal_timeframe}")
+    available = signal_frame.copy()
+    available["available_time"] = available.index + pd.Timedelta(minutes=minutes)
+    merged = pd.merge_asof(
+        primary.reset_index()[["time"]].sort_values("time"),
+        available.reset_index().rename(columns={"time": f"{signal_timeframe}_source_time"}).sort_values("available_time"),
+        left_on="time",
+        right_on="available_time",
+        direction="backward",
+    )
+    return merged.drop(columns=[col for col in (f"{signal_timeframe}_source_time", "available_time") if col in merged]).set_index("time")
 
 
 def build_base_frame(
@@ -106,7 +140,11 @@ def _regime_mask(frame: pd.DataFrame, mode: str) -> pd.Series:
     raise ValueError(f"unsupported regime_mode: {mode}")
 
 
-def apply_signal_rules(base_frame: pd.DataFrame, strategy: HypothesisSpec) -> pd.DataFrame:
+def apply_signal_rules(
+    base_frame: pd.DataFrame,
+    strategy: HypothesisSpec,
+    grammar_frames: dict[str, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
     frame = base_frame.copy()
     params = strategy.parameters
     direction = pd.Series(0, index=frame.index, dtype="int8")
@@ -123,7 +161,7 @@ def apply_signal_rules(base_frame: pd.DataFrame, strategy: HypothesisSpec) -> pd
     h4_down = frame["h4_trend"] < 0
 
     if strategy.lineage == "strategy_grammar":
-        grammar_signals = apply_strategy_grammar(frame, params)
+        grammar_signals = apply_strategy_grammar(frame, params, grammar_frames)
         direction = grammar_signals["signal_direction"].astype("int8")
         stop_distance = grammar_signals["stop_distance"].astype(float)
         target_distance = grammar_signals["target_distance"].astype(float)
@@ -516,6 +554,21 @@ def build_signal_frame(
     bars: pd.DataFrame,
     contexts: dict[str, pd.DataFrame],
     strategy: HypothesisSpec,
+    grammar_bars: dict[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     base = build_base_frame(bars, contexts, strategy.context_timeframes)
-    return apply_signal_rules(base, strategy)
+    grammar_frames: dict[str, pd.DataFrame] | None = None
+    if strategy.lineage == "strategy_grammar" and grammar_bars:
+        requested = {
+            str(block.get("timeframe", strategy.timeframe)).lower()
+            for block in list(strategy.parameters.get("rule_blocks") or [])
+            if isinstance(block, dict)
+        }
+        grammar_frames = {}
+        for timeframe in requested:
+            source = bars if timeframe == strategy.timeframe else grammar_bars.get(timeframe)
+            if source is None or source.empty:
+                raise ValueError(f"missing grammar timeframe bars: {timeframe}")
+            signal_frame = base if timeframe == strategy.timeframe else build_base_frame(source, contexts, strategy.context_timeframes)
+            grammar_frames[timeframe] = align_signal_timeframe(base, signal_frame, timeframe, strategy.timeframe)
+    return apply_signal_rules(base, strategy, grammar_frames)

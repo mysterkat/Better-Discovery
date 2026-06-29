@@ -62,9 +62,9 @@ def test_hypothesis_export_translates_strategy_grammar_rule_tree() -> None:
         hypothesis="A generated rule tree should export as explicit MQL block functions.",
         parameters={
             "rule_blocks": [
-                {"name": "liquidity_sweep_reclaim", "lookback": 24, "penetration_atr": 0.1},
-                {"name": "market_structure_shift", "swing_left": 2, "swing_right": 2},
-                {"name": "fair_value_gap", "mode": "new_or_retrace"},
+                {"name": "liquidity_sweep_reclaim", "lookback": 24, "penetration_atr": 0.1, "timeframe": "m5"},
+                {"name": "market_structure_shift", "swing_left": 2, "swing_right": 2, "timeframe": "m10"},
+                {"name": "fair_value_gap", "mode": "new_or_retrace", "timeframe": "m15"},
             ],
             "block_logic": "all",
             "stop_mode": "structure",
@@ -87,7 +87,10 @@ def test_hypothesis_export_translates_strategy_grammar_rule_tree() -> None:
     assert "bool GrammarBlock1(const int direction)" in mq5_text
     assert "bool GrammarBlock2(const int direction)" in mq5_text
     assert 'else if(InpLineage == "strategy_grammar")' in mq5_text
-    assert "LatestSwingLow(2, 2, level)" in mq5_text
+    assert "ENUM_TIMEFRAMES tf = PERIOD_M5;" in mq5_text
+    assert "ENUM_TIMEFRAMES tf = PERIOD_M10;" in mq5_text
+    assert "ENUM_TIMEFRAMES tf = PERIOD_M15;" in mq5_text
+    assert "GLatestSwingLow(tf, 2, 2, level)" in mq5_text
     assert "InpGrammarStopMode=structure" in set_text
 
 

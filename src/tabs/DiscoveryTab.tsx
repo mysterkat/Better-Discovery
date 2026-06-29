@@ -27,6 +27,7 @@ type DiscoveryQueueItem = {
   id: string;
   label: string;
   timeframe: ExecutionTimeframe;
+  grammarTimeframes: ExecutionTimeframe[];
   families: HypothesisFamily[];
   status: QueueStatus;
   jobId?: string;
@@ -63,6 +64,13 @@ const GRAMMAR_BLOCK_GROUPS: Array<{ id: GrammarBlockGroup; label: string; hint: 
   { id: "sessions", label: "Sessions", hint: "Asian, London, NY, opening ranges" },
   { id: "volatility", label: "Volatility", hint: "Compression, expansion, spike reversal" },
   { id: "smt", label: "SMT", hint: "Strict proxy divergence; only trades when proxy data exists" },
+];
+
+const GRAMMAR_SIGNAL_TIMEFRAMES: Array<{ id: ExecutionTimeframe; label: string }> = [
+  { id: "m1", label: "M1" },
+  { id: "m5", label: "M5" },
+  { id: "m10", label: "M10" },
+  { id: "m15", label: "M15" },
 ];
 
 const HYPOTHESIS_FAMILY_GROUPS: Array<{
@@ -193,6 +201,7 @@ export default function DiscoveryTab() {
   const [grammarBlockGroups, setGrammarBlockGroups] = useState<GrammarBlockGroup[]>([
     "liquidity", "structure", "imbalance", "orderflow", "sessions", "volatility",
   ]);
+  const [grammarTimeframes, setGrammarTimeframes] = useState<ExecutionTimeframe[]>(["m5", "m10"]);
   const [grammarComplexity, setGrammarComplexity] = useState<"simple" | "medium" | "complex">("medium");
   const [grammarRandomness, setGrammarRandomness] = useState<"low" | "balanced" | "high">("balanced");
   const [maxVariants, setMaxVariants] = useState("5000");
@@ -268,7 +277,14 @@ export default function DiscoveryTab() {
   }, [selectedDatasetId, timeframe, xauusdDatasets]);
 
   const selectedDataset = xauusdDatasets.find((dataset) => dataset.dataset_id === selectedDatasetId) ?? null;
-  const requiredTimeframes = useMemo(() => [timeframe, "h1", "h4"], [timeframe]);
+  const effectiveGrammarTimeframes = useMemo(
+    () => Array.from(new Set<ExecutionTimeframe>([timeframe, ...grammarTimeframes])),
+    [grammarTimeframes, timeframe],
+  );
+  const requiredTimeframes = useMemo(
+    () => hypothesisMode === "grammar" ? [...effectiveGrammarTimeframes, "h1", "h4"] : [timeframe, "h1", "h4"],
+    [effectiveGrammarTimeframes, hypothesisMode, timeframe],
+  );
   const missingRequiredTimeframes = selectedDataset
     ? requiredTimeframes.filter((value) => !selectedDataset.timeframes.includes(value))
     : requiredTimeframes;
@@ -400,6 +416,12 @@ export default function DiscoveryTab() {
     );
   };
 
+  const toggleGrammarTimeframe = (id: ExecutionTimeframe) => {
+    setGrammarTimeframes((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
+    );
+  };
+
   const applyFamilyGroup = (group: typeof HYPOTHESIS_FAMILY_GROUPS[number]) => {
     setFamilies(group.families);
     setTimeframe(group.timeframe);
@@ -407,7 +429,7 @@ export default function DiscoveryTab() {
 
   const validateHypothesisForm = () => {
     if (!selectedDataset) return "Select a completed XAUUSD dataset first.";
-    const required = [timeframe, "h1", "h4"];
+    const required = hypothesisMode === "grammar" ? [...effectiveGrammarTimeframes, "h1", "h4"] : [timeframe, "h1", "h4"];
     const missing = required.filter((value) => !selectedDataset.timeframes.includes(value));
     if (missing.length) return `Selected dataset is missing ${missing.map((value) => value.toUpperCase()).join(", ")}.`;
     const risk = parseNumberList(riskFractions);
@@ -418,6 +440,7 @@ export default function DiscoveryTab() {
     }
     if (hypothesisMode === "focused" && !families.length) return "Select at least one hypothesis family.";
     if (hypothesisMode === "grammar" && !grammarBlockGroups.length) return "Select at least one grammar block group.";
+    if (hypothesisMode === "grammar" && !effectiveGrammarTimeframes.length) return "Select at least one grammar signal timeframe.";
     const variants = Math.trunc(Number(maxVariants));
     const minTradesPerFiveDays = Number(minTradesPerWeek);
     const workers = Math.trunc(Number(parallelWorkers));
@@ -428,13 +451,17 @@ export default function DiscoveryTab() {
     return null;
   };
 
-  const selectedDatasetHasTimeframe = (value: ExecutionTimeframe) =>
-    !!selectedDataset && selectedDataset.timeframes.includes(value) && selectedDataset.timeframes.includes("h1") && selectedDataset.timeframes.includes("h4");
+  const selectedDatasetHasTimeframe = (value: ExecutionTimeframe, grammarTfs: ExecutionTimeframe[] = []) =>
+    !!selectedDataset &&
+    Array.from(new Set([value, ...grammarTfs, "h1", "h4"])).every((tf) => selectedDataset.timeframes.includes(tf));
 
-  const startHypothesisRun = async (runTimeframe: ExecutionTimeframe, runFamilies: HypothesisFamily[]) => {
+  const startHypothesisRun = async (runTimeframe: ExecutionTimeframe, runFamilies: HypothesisFamily[], runGrammarTimeframes: ExecutionTimeframe[] = grammarTimeframes) => {
     if (!selectedDataset) throw new Error("Select a completed XAUUSD dataset first.");
-    if (!selectedDatasetHasTimeframe(runTimeframe)) {
-      throw new Error(`Selected dataset must include ${runTimeframe.toUpperCase()}, H1, and H4.`);
+    const grammarRun = runFamilies.length === 1 && runFamilies[0] === "strategy_grammar";
+    const effectiveRunGrammarTimeframes = grammarRun ? Array.from(new Set<ExecutionTimeframe>([runTimeframe, ...runGrammarTimeframes])) : [];
+    if (!selectedDatasetHasTimeframe(runTimeframe, effectiveRunGrammarTimeframes)) {
+      const required = Array.from(new Set([runTimeframe, ...effectiveRunGrammarTimeframes, "h1", "h4"]));
+      throw new Error(`Selected dataset must include ${required.map((tf) => tf.toUpperCase()).join(", ")}.`);
     }
     const risk = parseNumberList(riskFractions);
     const stops = parseNumberList(dailyStops);
@@ -443,7 +470,6 @@ export default function DiscoveryTab() {
     const minTradesPerFiveDays = Number(minTradesPerWeek);
     const workers = Math.trunc(Number(parallelWorkers));
     const attemptDays = Math.trunc(Number(maxAttemptDays));
-    const grammarRun = runFamilies.length === 1 && runFamilies[0] === "strategy_grammar";
     return startHypothesisDiscovery({
       dataset_id: selectedDataset.dataset_id,
       symbol: "XAUUSD",
@@ -451,6 +477,7 @@ export default function DiscoveryTab() {
       date_from: `${dateFrom}T00:00:00Z`,
       date_to: `${dateTo}T23:59:59Z`,
       families: runFamilies,
+      grammar_timeframes: grammarRun ? effectiveRunGrammarTimeframes : undefined,
       grammar_block_groups: grammarRun ? grammarBlockGroups : undefined,
       grammar_complexity: grammarRun ? grammarComplexity : undefined,
       grammar_randomness: grammarRun ? grammarRandomness : undefined,
@@ -486,8 +513,9 @@ export default function DiscoveryTab() {
       ...current,
       {
         id: `queue_${Date.now()}_${current.length}`,
-        label: hypothesisMode === "grammar" ? `Autonomous Grammar (${grammarComplexity})` : group?.label ?? `${families.length} custom families`,
+        label: hypothesisMode === "grammar" ? `Autonomous Grammar (${grammarComplexity}, ${effectiveGrammarTimeframes.map((tf) => tf.toUpperCase()).join("+")})` : group?.label ?? `${families.length} custom families`,
         timeframe,
+        grammarTimeframes: hypothesisMode === "grammar" ? effectiveGrammarTimeframes : [],
         families: runFamilies,
         status: "queued",
       },
@@ -511,6 +539,7 @@ export default function DiscoveryTab() {
         id: `queue_${Date.now()}_${current.length + index}`,
         label: group.label,
         timeframe: group.timeframe,
+        grammarTimeframes: group.id === "autonomous_grammar" ? [group.timeframe] : [],
         families: [...group.families],
         status: "queued" as QueueStatus,
       })),
@@ -564,7 +593,7 @@ export default function DiscoveryTab() {
           candidate.id === item.id ? { ...candidate, status: "starting" } : candidate
         ));
         try {
-          const ref = await startHypothesisRun(item.timeframe, item.families);
+          const ref = await startHypothesisRun(item.timeframe, item.families, item.grammarTimeframes);
           setQueueItems((current) => current.map((candidate) =>
             candidate.id === item.id ? { ...candidate, status: "running", jobId: ref.job_id } : candidate
           ));
@@ -910,6 +939,16 @@ export default function DiscoveryTab() {
                 <span className="field-hint">Controls how broadly the generator samples valid strategy recipes.</span>
               </div>
             </div>
+            <div className="section-label" style={{ marginTop: 14 }}>Signal Timeframes</div>
+            <div className="timeframe-grid hypothesis-family-grid" style={{ marginTop: 8 }}>
+              {GRAMMAR_SIGNAL_TIMEFRAMES.map((tf) => (
+                <label className="check-option" key={tf.id}>
+                  <input type="checkbox" checked={effectiveGrammarTimeframes.includes(tf.id)} onChange={() => toggleGrammarTimeframe(tf.id)} disabled={isRunning || tf.id === timeframe} />
+                  <span>{tf.label}</span>
+                </label>
+              ))}
+            </div>
+            <span className="field-hint">The test timeframe is always included for execution; selected signal timeframes can be assigned per grammar block.</span>
             <div className="timeframe-grid hypothesis-family-grid" style={{ marginTop: 12 }}>
               {GRAMMAR_BLOCK_GROUPS.map((group) => (
                 <label className="check-option" key={group.id} title={group.hint}>
@@ -1052,7 +1091,7 @@ export default function DiscoveryTab() {
                   <div className="discovery-queue-main">
                     <strong>{index + 1}. {item.label}</strong>
                     <span>
-                      {item.timeframe.toUpperCase()} - {item.families.includes("strategy_grammar") ? "grammar" : `${item.families.length} families`} {stage ? `- ${stage}` : ""}
+                      {item.timeframe.toUpperCase()} - {item.families.includes("strategy_grammar") ? `grammar ${item.grammarTimeframes.map((tf) => tf.toUpperCase()).join("+")}` : `${item.families.length} families`} {stage ? `- ${stage}` : ""}
                     </span>
                     {item.error && <span className="queue-error">{item.error}</span>}
                   </div>

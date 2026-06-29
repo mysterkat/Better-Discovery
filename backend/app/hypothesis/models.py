@@ -116,6 +116,7 @@ class HypothesisDiscoveryRequest(BaseModel):
     dataset_id: str
     symbol: str = "XAUUSD"
     timeframe: Literal["m1", "m5", "m10", "m15"] = "m5"
+    grammar_timeframes: tuple[Literal["m1", "m5", "m10", "m15"], ...] | None = None
     date_from: datetime
     date_to: datetime
     families: tuple[Lineage, ...] | None = None
@@ -147,6 +148,9 @@ class HypothesisDiscoveryRequest(BaseModel):
         self.symbol = self.symbol.upper()
         self.date_from = self._utc(self.date_from)
         self.date_to = self._utc(self.date_to)
+        if self.grammar_timeframes is not None:
+            ordered = tuple(dict.fromkeys((self.timeframe, *self.grammar_timeframes)))
+            self.grammar_timeframes = ordered
         if self.symbol != "XAUUSD":
             raise ValueError("hypothesis discovery is currently locked to XAUUSD")
         if self.date_to <= self.date_from:
