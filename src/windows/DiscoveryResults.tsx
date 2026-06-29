@@ -284,8 +284,9 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
         max_loss_pct: 8.0,
         max_trades_per_day: candidate.max_trades_per_day,
       });
-      setExportNotice(`Exported EA: ${exported.mq5_path}`);
-      setExportPath(exported.mq5_path);
+      const preferredPath = exported.preferred_mq5_path ?? exported.mq5_path;
+      setExportNotice(`${exported.mt5_installed ? "Installed EA to active MT5" : "Exported EA"}: ${preferredPath}`);
+      setExportPath(preferredPath);
     } catch (e) {
       setExportError(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {

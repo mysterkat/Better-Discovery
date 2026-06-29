@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from ..paths import USER_DATA
 
 
 _OUTPUT_DIR = USER_DATA / "mql" / "hypothesis"
+_MT5_EXPORT_SUBDIR = Path("MQL5") / "Experts" / "BetterDiscovery" / "Hypothesis"
 
 
 def _safe_name(value: str) -> str:
@@ -59,6 +61,63 @@ def _timeframe_constant(timeframe: str) -> str:
 
 def _timeframe_set_value(value: object) -> str:
     return {"PERIOD_M1": "1", "PERIOD_M5": "5", "PERIOD_M10": "10", "PERIOD_M15": "15"}.get(str(value), str(value))
+
+
+def _install_to_active_mt5(mq5_path: Path, set_path: Path, spec_path: Path) -> dict[str, Any]:
+    """Copy exported files into the currently connected MT5 data folder.
+
+    This avoids Windows file association opening a different, clean terminal.
+    If MT5 is unavailable, export remains valid in userdata and the caller gets
+    a warning instead of a hard failure.
+    """
+    try:
+        from .mt5_setup import _resolve_mt5_paths  # noqa: WPS433
+
+        paths = _resolve_mt5_paths()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "installed": False,
+            "preferred_mq5_path": str(mq5_path),
+            "mt5_data_path": None,
+            "warning": (
+                "Could not resolve active MT5 data folder. Open your normal MT5 terminal, "
+                f"log in, then export again. Detail: {type(exc).__name__}: {exc}"
+            ),
+        }
+
+    data_path = Path(str(paths.get("data") or ""))
+    if not data_path.is_dir():
+        return {
+            "installed": False,
+            "preferred_mq5_path": str(mq5_path),
+            "mt5_data_path": str(data_path),
+            "warning": f"Resolved MT5 data folder does not exist: {data_path}",
+        }
+
+    target_dir = data_path / _MT5_EXPORT_SUBDIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    mt5_mq5 = target_dir / mq5_path.name
+    mt5_set = target_dir / set_path.name
+    mt5_spec = target_dir / spec_path.name
+    shutil.copy2(mq5_path, mt5_mq5)
+    shutil.copy2(set_path, mt5_set)
+    shutil.copy2(spec_path, mt5_spec)
+    warnings: list[str] = []
+    trade_include = data_path / "MQL5" / "Include" / "Trade" / "Trade.mqh"
+    if not trade_include.is_file():
+        warnings.append(
+            f"MT5 standard library include is missing in this terminal: {trade_include}"
+        )
+    return {
+        "installed": True,
+        "preferred_mq5_path": str(mt5_mq5),
+        "mt5_mq5_path": str(mt5_mq5),
+        "mt5_set_path": str(mt5_set),
+        "mt5_spec_path": str(mt5_spec),
+        "mt5_data_path": str(data_path),
+        "mt5_experts_folder": str(target_dir),
+        "warnings": warnings,
+    }
 
 
 def _default_max_hold(strategy: HypothesisSpec) -> int:
@@ -1482,15 +1541,27 @@ def export(
     mq5_path.write_text(_ea_source(strategy, values), encoding="utf-8", newline="\n")
     set_path.write_text(_set_text(values), encoding="utf-8", newline="\n")
     spec_path.write_text(strategy.model_dump_json(indent=2), encoding="utf-8")
+    mt5_install = _install_to_active_mt5(mq5_path, set_path, spec_path)
+    warnings = [
+        "Generated EA uses MT5 server bars and closed-bar logic; results can differ from Python bar replay because broker time, spread, and indicator implementations differ.",
+        "Use this for MT5 validation/backtesting before any live or funded use.",
+    ]
+    if mt5_install.get("warning"):
+        warnings.append(str(mt5_install["warning"]))
+    warnings.extend(str(item) for item in mt5_install.get("warnings", []))
     return {
         "mq5_path": str(mq5_path.resolve()),
         "set_path": str(set_path.resolve()),
         "spec_path": str(spec_path.resolve()),
+        "preferred_mq5_path": str(mt5_install.get("preferred_mq5_path") or mq5_path.resolve()),
+        "mt5_installed": bool(mt5_install.get("installed", False)),
+        "mt5_mq5_path": mt5_install.get("mt5_mq5_path"),
+        "mt5_set_path": mt5_install.get("mt5_set_path"),
+        "mt5_spec_path": mt5_install.get("mt5_spec_path"),
+        "mt5_data_path": mt5_install.get("mt5_data_path"),
+        "mt5_experts_folder": mt5_install.get("mt5_experts_folder"),
         "strategy_id": strategy.strategy_id,
         "lineage": strategy.lineage,
         "magic_number": magic_number,
-        "warnings": [
-            "Generated EA uses MT5 server bars and closed-bar logic; results can differ from Python bar replay because broker time, spread, and indicator implementations differ.",
-            "Use this for MT5 validation/backtesting before any live or funded use.",
-        ],
+        "warnings": warnings,
     }

@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.bridge import hypothesis_to_mql
+from app.bridge import mt5_setup
 from app.hypothesis.models import HypothesisSpec
 from app.main import app
 
@@ -52,6 +53,48 @@ def test_hypothesis_export_writes_standalone_ea_set_and_spec() -> None:
     assert "InpRiskFraction=0.015" in set_text
     assert "InpMaxTradesPerDay=6" in set_text
     assert '"strategy_id": "sweep_reclaim_export_test"' in spec_text
+
+
+def test_hypothesis_export_installs_copy_to_active_mt5_data_folder(tmp_path, monkeypatch) -> None:
+    data_path = tmp_path / "terminal_data"
+    include_path = data_path / "MQL5" / "Include" / "Trade"
+    include_path.mkdir(parents=True)
+    (include_path / "Trade.mqh").write_text("// standard lib placeholder", encoding="utf-8")
+    monkeypatch.setattr(
+        mt5_setup,
+        "_resolve_mt5_paths",
+        lambda: {"install": str(tmp_path / "terminal"), "data": str(data_path), "common": str(tmp_path / "common")},
+    )
+    strategy = HypothesisSpec(
+        strategy_id="mt5_install_export_test",
+        lineage="liquidity_sweep_reclaim",
+        timeframe="m5",
+        hypothesis="A swept XAUUSD swing low that closes back above the level can reverse.",
+        parameters={
+            "sweep_lookback": 24,
+            "penetration_atr": 0.1,
+            "reclaim_buffer_atr": 0.0,
+            "wick_reject_min": 0.45,
+            "close_location_min": 0.55,
+            "atr_stop": 1.2,
+            "reward_risk": 1.5,
+            "max_hold_bars": 12,
+            "context_filter": "none",
+            "direction_mode": "both",
+            "session_start_utc": 0,
+            "session_end_utc": 24,
+            "volatility_filter": "none",
+        },
+    )
+
+    result = hypothesis_to_mql.export(strategy, output_name="_test_mt5_install_export")
+
+    preferred = Path(result["preferred_mq5_path"])
+    assert result["mt5_installed"] is True
+    assert preferred.is_file()
+    assert preferred.parent == data_path / "MQL5" / "Experts" / "BetterDiscovery" / "Hypothesis"
+    assert Path(result["mt5_set_path"]).is_file()
+    assert Path(result["mt5_spec_path"]).is_file()
 
 
 def test_hypothesis_export_translates_strategy_grammar_rule_tree() -> None:
