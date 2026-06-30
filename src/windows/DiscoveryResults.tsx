@@ -59,6 +59,18 @@ interface HypothesisDiscoveryResult {
     parent_min_profit_factor?: number;
     final_min_profit_factor?: number;
     final_min_active_pass_rate?: number;
+    market_mind_plan?: {
+      regime_id?: string;
+      summary?: Record<string, unknown>;
+      recipes?: Array<{
+        name?: string;
+        weight?: number;
+        groups?: string[];
+        why?: string;
+      }>;
+      block_group_weights?: Record<string, number>;
+      exploration_pct?: number;
+    } | null;
   } | null;
   parallel_workers?: number;
   artifact_folder: string;
@@ -341,9 +353,41 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
         )}
       </div>
 
+      {result.search_summary?.market_mind_plan && (
+        <details className="nested-section" open style={{ marginBottom: 16 }}>
+          <summary>Market Mind Plan</summary>
+          <div className="pattern-detail-grid" style={{ marginBottom: 12 }}>
+            <div><span className="kv-key">Regime</span><span>{result.search_summary.market_mind_plan.regime_id ?? "-"}</span></div>
+            <div><span className="kv-key">Exploration</span><span>{formatPct(result.search_summary.market_mind_plan.exploration_pct)}</span></div>
+            <div><span className="kv-key">History days</span><span>{String(result.search_summary.market_mind_plan.summary?.history_days ?? "-")}</span></div>
+            <div><span className="kv-key">Vol percentile</span><span>{formatPct(result.search_summary.market_mind_plan.summary?.volatility_percentile as number | undefined)}</span></div>
+          </div>
+          <table className="patterns-table">
+            <thead>
+              <tr>
+                <th>Recipe</th>
+                <th className="num">Weight</th>
+                <th>Groups</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(result.search_summary.market_mind_plan.recipes ?? []).map((recipe, index) => (
+                <tr key={`${recipe.name ?? "recipe"}-${index}`}>
+                  <td>{titleCase(recipe.name ?? "-")}</td>
+                  <td className="num">{formatPct(recipe.weight)}</td>
+                  <td>{(recipe.groups ?? []).map(titleCase).join(", ")}</td>
+                  <td>{recipe.why ?? "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      )}
+
       {result.search_summary?.generations && result.search_summary.generations.length > 0 && (
         <details className="nested-section" style={{ marginBottom: 16 }}>
-          <summary>Guided Search Generations</summary>
+          <summary>{result.search_summary.mode === "market_mind" ? "Market Mind Generations" : "Guided Search Generations"}</summary>
           <table className="patterns-table">
             <thead>
               <tr>

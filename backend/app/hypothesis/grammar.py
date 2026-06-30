@@ -660,13 +660,120 @@ BUILDERS = {
 }
 
 
-def generate_hypotheses(request: HypothesisDiscoveryRequest) -> list[HypothesisSpec]:
+def _spec_from_grammar_profile(
+    profile: HypothesisProfile,
+    timeframe: str,
+    *,
+    market_mind: dict[str, object] | None = None,
+) -> HypothesisSpec:
+    params = dict(profile.parameters)
+    if market_mind:
+        params.update(market_mind)
+    return HypothesisSpec(
+        strategy_id=_id(profile.lineage, params),  # type: ignore[arg-type]
+        lineage=profile.lineage,
+        hypothesis=profile.thesis,
+        timeframe=timeframe,  # type: ignore[arg-type]
+        parameters=params,
+    )
+
+
+def _generate_market_mind_hypotheses(
+    request: HypothesisDiscoveryRequest,
+    market_mind_plan: dict[str, object],
+) -> list[HypothesisSpec]:
+    recipes = [
+        recipe for recipe in list(market_mind_plan.get("recipes") or [])
+        if isinstance(recipe, dict)
+    ]
+    bias_pct = float(market_mind_plan.get("bias_pct", request.market_mind_bias_pct))
+    biased_budget = int(round(request.max_variants * max(0.0, min(1.0, bias_pct))))
+    explore_budget = max(0, request.max_variants - biased_budget)
+    timeframe_pool = request.grammar_timeframes or (request.timeframe,)
+    specs: list[HypothesisSpec] = []
+    seen: set[str] = set()
+
+    recipe_total = sum(float(recipe.get("weight", 0.0) or 0.0) for recipe in recipes) or 1.0
+    for index, recipe in enumerate(recipes):
+        share = float(recipe.get("weight", 0.0) or 0.0) / recipe_total
+        count = max(1, int(round(biased_budget * share))) if biased_budget > 0 else 0
+        groups = tuple(
+            str(group)
+            for group in list(recipe.get("groups") or [])
+            if str(group) in {"liquidity", "structure", "imbalance", "orderflow", "sessions", "volatility", "smt"}
+        )
+        profiles = _strategy_grammar(
+            count,
+            seed=710400 + index * 997,
+            block_groups=groups or request.grammar_block_groups,
+            complexity=request.grammar_complexity,
+            randomness=request.grammar_randomness,
+            grammar_timeframes=timeframe_pool,
+        )
+        for profile in profiles:
+            spec = _spec_from_grammar_profile(
+                profile,
+                request.timeframe,
+                market_mind={
+                    "recipe": "market_mind",
+                    "market_mind_regime": str(market_mind_plan.get("regime_id", "unknown")),
+                    "market_mind_focus": str(recipe.get("name", "unknown")),
+                    "market_mind_reason": str(recipe.get("why", "")),
+                    "market_mind_groups": ",".join(groups),
+                    "market_mind_bias_pct": bias_pct,
+                },
+            )
+            if spec.strategy_id in seen:
+                continue
+            seen.add(spec.strategy_id)
+            specs.append(spec)
+            if len(specs) >= request.max_variants:
+                return specs
+
+    if explore_budget > 0 and len(specs) < request.max_variants:
+        explore_profiles = _strategy_grammar(
+            max(explore_budget, request.max_variants - len(specs)),
+            seed=810400,
+            block_groups=request.grammar_block_groups,
+            complexity=request.grammar_complexity,
+            randomness="high" if request.grammar_randomness != "low" else "balanced",
+            grammar_timeframes=timeframe_pool,
+        )
+        for profile in explore_profiles:
+            spec = _spec_from_grammar_profile(
+                profile,
+                request.timeframe,
+                market_mind={
+                    "recipe": "market_mind",
+                    "market_mind_regime": str(market_mind_plan.get("regime_id", "unknown")),
+                    "market_mind_focus": "exploration",
+                    "market_mind_reason": "reserved random exploration budget",
+                    "market_mind_groups": ",".join(request.grammar_block_groups or ()),
+                    "market_mind_bias_pct": bias_pct,
+                },
+            )
+            if spec.strategy_id in seen:
+                continue
+            seen.add(spec.strategy_id)
+            specs.append(spec)
+            if len(specs) >= request.max_variants:
+                break
+    return specs[: request.max_variants]
+
+
+def generate_hypotheses(
+    request: HypothesisDiscoveryRequest,
+    market_mind_plan: dict[str, object] | None = None,
+) -> list[HypothesisSpec]:
     """Generate a deterministic, explainable hypothesis set.
 
     This is deliberately not a random optimizer. Each variant comes from a coded
     market-behavior profile, then the FTMO challenge replay decides whether it
     deserves deeper MT5 testing.
     """
+    if request.search_mode == "market_mind" and market_mind_plan:
+        return _generate_market_mind_hypotheses(request, market_mind_plan)
+
     requested = request.families or tuple(BUILDERS.keys())  # type: ignore[assignment]
     family_profiles = {
         lineage: (

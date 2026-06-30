@@ -79,7 +79,8 @@ export interface HypothesisDiscoveryRequest {
   grammar_block_groups?: ("liquidity" | "structure" | "imbalance" | "orderflow" | "sessions" | "volatility" | "smt")[];
   grammar_complexity?: "simple" | "medium" | "complex";
   grammar_randomness?: "low" | "balanced" | "high";
-  search_mode?: "broad" | "guided";
+  search_mode?: "market_mind" | "manual" | "broad" | "guided";
+  market_mind_bias_pct?: number;
   guided_initial_fraction?: number;
   guided_generations?: number;
   guided_parents_kept?: number;

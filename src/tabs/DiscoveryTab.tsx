@@ -18,7 +18,7 @@ import JobProgress from "../components/JobProgress";
 import { openResultWindow } from "../lib/windows";
 
 type DiscoveryEngine = "hypothesis" | "legacy";
-type HypothesisMode = "grammar" | "focused";
+type HypothesisMode = "market_mind" | "manual";
 type ExecutionTimeframe = "m1" | "m5" | "m10" | "m15";
 type QueueMode = "sequential" | "parallel";
 type GrammarBlockGroup = "liquidity" | "structure" | "imbalance" | "orderflow" | "sessions" | "volatility" | "smt";
@@ -29,6 +29,7 @@ type DiscoveryQueueItem = {
   timeframe: ExecutionTimeframe;
   grammarTimeframes: ExecutionTimeframe[];
   families: HypothesisFamily[];
+  mode: HypothesisMode;
   status: QueueStatus;
   jobId?: string;
   error?: string;
@@ -84,8 +85,8 @@ const HYPOTHESIS_FAMILY_GROUPS: Array<{
 }> = [
   {
     id: "autonomous_grammar",
-    label: "Autonomous Grammar",
-    hint: "ICT/SMT blocks, sweeps, FVG, OB, sessions",
+    label: "Market Mind",
+    hint: "Regime-biased ICT/SMT blocks, sweeps, FVG, OB, sessions",
     timeframe: "m5",
     families: [
       "strategy_grammar",
@@ -200,7 +201,7 @@ function formatQueueEta(seconds: number | null | undefined): string {
 
 export default function DiscoveryTab() {
   const [engine, setEngine] = useState<DiscoveryEngine>("hypothesis");
-  const [hypothesisMode, setHypothesisMode] = useState<HypothesisMode>("grammar");
+  const [hypothesisMode, setHypothesisMode] = useState<HypothesisMode>("market_mind");
   const [params, setParams] = useState<ParamDef[]>([]);
   const [datasets, setDatasets] = useState<MarketDataset[]>([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
@@ -216,7 +217,8 @@ export default function DiscoveryTab() {
   const [grammarTimeframes, setGrammarTimeframes] = useState<ExecutionTimeframe[]>(["m1", "m5", "m10", "m15"]);
   const [grammarComplexity, setGrammarComplexity] = useState<"simple" | "medium" | "complex">("medium");
   const [grammarRandomness, setGrammarRandomness] = useState<"low" | "balanced" | "high">("balanced");
-  const [searchMode, setSearchMode] = useState<"broad" | "guided">("guided");
+  const [searchMode, setSearchMode] = useState<"market_mind" | "manual" | "broad" | "guided">("market_mind");
+  const [marketMindBiasPct, setMarketMindBiasPct] = useState("0.70");
   const [guidedInitialFraction, setGuidedInitialFraction] = useState("0.35");
   const [guidedGenerations, setGuidedGenerations] = useState("3");
   const [guidedParentsKept, setGuidedParentsKept] = useState("30");
@@ -339,9 +341,10 @@ export default function DiscoveryTab() {
     () => Array.from(new Set<ExecutionTimeframe>([timeframe, ...grammarTimeframes])),
     [grammarTimeframes, timeframe],
   );
+  const usesGrammar = hypothesisMode === "market_mind" || families.includes("strategy_grammar");
   const requiredTimeframes = useMemo(
-    () => hypothesisMode === "grammar" ? [...effectiveGrammarTimeframes, "h1", "h4"] : [timeframe, "h1", "h4"],
-    [effectiveGrammarTimeframes, hypothesisMode, timeframe],
+    () => usesGrammar ? [...effectiveGrammarTimeframes, "h1", "h4"] : [timeframe, "h1", "h4"],
+    [effectiveGrammarTimeframes, usesGrammar, timeframe],
   );
   const missingRequiredTimeframes = selectedDataset
     ? requiredTimeframes.filter((value) => !selectedDataset.timeframes.includes(value))
@@ -504,7 +507,7 @@ export default function DiscoveryTab() {
 
   const validateHypothesisForm = () => {
     if (!selectedDataset) return "Select a completed XAUUSD dataset first.";
-    const required = hypothesisMode === "grammar" ? [...effectiveGrammarTimeframes, "h1", "h4"] : [timeframe, "h1", "h4"];
+    const required = usesGrammar ? [...effectiveGrammarTimeframes, "h1", "h4"] : [timeframe, "h1", "h4"];
     const missing = required.filter((value) => !selectedDataset.timeframes.includes(value));
     if (missing.length) return `Selected dataset is missing ${missing.map((value) => value.toUpperCase()).join(", ")}.`;
     const risk = parseNumberList(riskFractions);
@@ -513,9 +516,9 @@ export default function DiscoveryTab() {
     if (!risk.length || !stops.length || !trades.length) {
       return "Risk, daily-stop, and max-trades grids must each have at least one value.";
     }
-    if (hypothesisMode === "focused" && !families.length) return "Select at least one hypothesis family.";
-    if (hypothesisMode === "grammar" && !grammarBlockGroups.length) return "Select at least one grammar block group.";
-    if (hypothesisMode === "grammar" && !effectiveGrammarTimeframes.length) return "Select at least one grammar signal timeframe.";
+    if (hypothesisMode === "manual" && !families.length) return "Select at least one hypothesis family.";
+    if (usesGrammar && !grammarBlockGroups.length) return "Select at least one grammar block group.";
+    if (usesGrammar && !effectiveGrammarTimeframes.length) return "Select at least one grammar signal timeframe.";
     const variants = Math.trunc(Number(maxVariants));
     const minTradesPerFiveDays = Number(minTradesPerWeek);
     const workers = Math.trunc(Number(parallelWorkers));
@@ -534,8 +537,12 @@ export default function DiscoveryTab() {
     if (!Number.isFinite(variants) || variants <= 0 || !Number.isFinite(minTradesPerFiveDays) || minTradesPerFiveDays <= 0 || !Number.isFinite(workers) || workers <= 0 || !Number.isFinite(attemptDays) || attemptDays <= 0) {
       return "Max variants, minimum trades/week, parallel workers, and max attempt days must be positive numbers.";
     }
-    if (searchMode === "guided" && guidedNums.some((value) => !Number.isFinite(value) || value < 0)) {
-      return "Guided search settings must be valid positive numbers.";
+    const bias = Number(marketMindBiasPct);
+    if (hypothesisMode === "market_mind" && (!Number.isFinite(bias) || bias < 0 || bias > 1)) {
+      return "Market Mind bias must be between 0 and 1.";
+    }
+    if (["guided", "market_mind"].includes(searchMode) && guidedNums.some((value) => !Number.isFinite(value) || value < 0)) {
+      return "Evolution settings must be valid positive numbers.";
     }
     return null;
   };
@@ -544,7 +551,12 @@ export default function DiscoveryTab() {
     !!selectedDataset &&
     Array.from(new Set([value, ...grammarTfs, "h1", "h4"])).every((tf) => selectedDataset.timeframes.includes(tf));
 
-  const startHypothesisRun = async (runTimeframe: ExecutionTimeframe, runFamilies: HypothesisFamily[], runGrammarTimeframes: ExecutionTimeframe[] = grammarTimeframes) => {
+  const startHypothesisRun = async (
+    runTimeframe: ExecutionTimeframe,
+    runFamilies: HypothesisFamily[],
+    runGrammarTimeframes: ExecutionTimeframe[] = grammarTimeframes,
+    runMode: HypothesisMode = hypothesisMode,
+  ) => {
     if (!selectedDataset) throw new Error("Select a completed XAUUSD dataset first.");
     const grammarRun = runFamilies.length === 1 && runFamilies[0] === "strategy_grammar";
     const effectiveRunGrammarTimeframes = grammarRun ? Array.from(new Set<ExecutionTimeframe>([runTimeframe, ...runGrammarTimeframes])) : [];
@@ -570,7 +582,8 @@ export default function DiscoveryTab() {
       grammar_block_groups: grammarRun ? grammarBlockGroups : undefined,
       grammar_complexity: grammarRun ? grammarComplexity : undefined,
       grammar_randomness: grammarRun ? grammarRandomness : undefined,
-      search_mode: grammarRun ? searchMode : "broad",
+      search_mode: runMode === "market_mind" ? "market_mind" : grammarRun ? "guided" : "manual",
+      market_mind_bias_pct: runMode === "market_mind" ? Number(marketMindBiasPct) : undefined,
       guided_initial_fraction: Number(guidedInitialFraction),
       guided_generations: Math.trunc(Number(guidedGenerations)),
       guided_parents_kept: Math.trunc(Number(guidedParentsKept)),
@@ -607,15 +620,16 @@ export default function DiscoveryTab() {
     const group = HYPOTHESIS_FAMILY_GROUPS.find((item) =>
       item.families.length === families.length && item.families.every((id) => families.includes(id))
     );
-    const runFamilies: HypothesisFamily[] = hypothesisMode === "grammar" ? ["strategy_grammar"] : [...families];
+    const runFamilies: HypothesisFamily[] = hypothesisMode === "market_mind" ? ["strategy_grammar"] : [...families];
     setQueueItems((current) => [
       ...current,
       {
         id: `queue_${Date.now()}_${current.length}`,
-        label: hypothesisMode === "grammar" ? `Autonomous Grammar (${grammarComplexity}, ${effectiveGrammarTimeframes.map((tf) => tf.toUpperCase()).join("+")})` : group?.label ?? `${families.length} custom families`,
+        label: hypothesisMode === "market_mind" ? `Market Mind (${grammarComplexity}, ${effectiveGrammarTimeframes.map((tf) => tf.toUpperCase()).join("+")})` : group?.label ?? `${families.length} custom families`,
         timeframe,
-        grammarTimeframes: hypothesisMode === "grammar" ? effectiveGrammarTimeframes : [],
+        grammarTimeframes: usesGrammar ? effectiveGrammarTimeframes : [],
         families: runFamilies,
+        mode: hypothesisMode,
         status: "queued",
       },
     ]);
@@ -640,6 +654,7 @@ export default function DiscoveryTab() {
         timeframe: group.timeframe,
         grammarTimeframes: group.id === "autonomous_grammar" ? [group.timeframe] : [],
         families: [...group.families],
+        mode: (group.id === "autonomous_grammar" ? "market_mind" : "manual") as HypothesisMode,
         status: "queued" as QueueStatus,
       })),
     ]);
@@ -692,7 +707,7 @@ export default function DiscoveryTab() {
           candidate.id === item.id ? { ...candidate, status: "starting" } : candidate
         ));
         try {
-          const ref = await startHypothesisRun(item.timeframe, item.families, item.grammarTimeframes);
+          const ref = await startHypothesisRun(item.timeframe, item.families, item.grammarTimeframes, item.mode ?? "manual");
           setQueueItems((current) => current.map((candidate) =>
             candidate.id === item.id ? { ...candidate, status: "running", jobId: ref.job_id } : candidate
           ));
@@ -729,7 +744,7 @@ export default function DiscoveryTab() {
     setError(null);
     setJobId(null);
     try {
-      const ref = await startHypothesisRun(timeframe, hypothesisMode === "grammar" ? ["strategy_grammar"] : families);
+      const ref = await startHypothesisRun(timeframe, hypothesisMode === "market_mind" ? ["strategy_grammar"] : families, grammarTimeframes, hypothesisMode);
       setJobId(ref.job_id);
       setActiveJob("discovery", ref.job_id);
     } catch (e) {
@@ -1008,17 +1023,22 @@ export default function DiscoveryTab() {
       <div className="form-section">
         <div className="section-label">Research Mode</div>
         <div className="segmented-control" role="tablist" aria-label="Hypothesis research mode">
-          <button type="button" className={hypothesisMode === "grammar" ? "active" : ""} onClick={() => setHypothesisMode("grammar")} disabled={isRunning}>
-            Autonomous Grammar
+          <button type="button" className={hypothesisMode === "market_mind" ? "active" : ""} onClick={() => { setHypothesisMode("market_mind"); setSearchMode("market_mind"); }} disabled={isRunning}>
+            Market Mind
           </button>
-          <button type="button" className={hypothesisMode === "focused" ? "active" : ""} onClick={() => setHypothesisMode("focused")} disabled={isRunning}>
-            Focused Families
+          <button type="button" className={hypothesisMode === "manual" ? "active" : ""} onClick={() => { setHypothesisMode("manual"); setSearchMode("manual"); }} disabled={isRunning}>
+            Manual
           </button>
         </div>
 
-        {hypothesisMode === "grammar" ? (
+        {hypothesisMode === "market_mind" ? (
           <>
             <div className="form-grid-2 hypothesis-grid" style={{ marginTop: 14 }}>
+              <div className="field">
+                <label className="field-label">Market bias %</label>
+                <input className="field-input" value={marketMindBiasPct} onChange={(event) => setMarketMindBiasPct(event.target.value)} disabled={isRunning} inputMode="decimal" />
+                <span className="field-hint">0.70 means 70% regime-biased generation and 30% random exploration.</span>
+              </div>
               <div className="field">
                 <label className="field-label">Strategy complexity</label>
                 <select className="field-input" value={grammarComplexity} onChange={(event) => setGrammarComplexity(event.target.value as typeof grammarComplexity)} disabled={isRunning}>
@@ -1060,6 +1080,24 @@ export default function DiscoveryTab() {
           </>
         ) : (
           <>
+            <div className="form-grid-2 hypothesis-grid" style={{ marginTop: 14 }}>
+              <div className="field">
+                <label className="field-label">Manual grammar complexity</label>
+                <select className="field-input" value={grammarComplexity} onChange={(event) => setGrammarComplexity(event.target.value as typeof grammarComplexity)} disabled={isRunning}>
+                  <option value="simple">Simple</option>
+                  <option value="medium">Medium</option>
+                  <option value="complex">Complex</option>
+                </select>
+              </div>
+              <div className="field">
+                <label className="field-label">Manual randomness</label>
+                <select className="field-input" value={grammarRandomness} onChange={(event) => setGrammarRandomness(event.target.value as typeof grammarRandomness)} disabled={isRunning}>
+                  <option value="low">Low</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="high">High</option>
+                </select>
+              </div>
+            </div>
             <div className="hypothesis-family-presets" style={{ marginTop: 12 }}>
               {HYPOTHESIS_FAMILY_GROUPS.filter((group) => group.id !== "autonomous_grammar").map((group) => {
                 const active = group.families.length === families.length && group.families.every((id) => families.includes(id));
@@ -1104,22 +1142,35 @@ export default function DiscoveryTab() {
                 </label>
               ))}
             </div>
+            {families.includes("strategy_grammar") && (
+              <>
+                <div className="section-label" style={{ marginTop: 14 }}>Manual Grammar Blocks</div>
+                <div className="timeframe-grid hypothesis-family-grid" style={{ marginTop: 8 }}>
+                  {GRAMMAR_SIGNAL_TIMEFRAMES.map((tf) => (
+                    <label className="check-option" key={tf.id}>
+                      <input type="checkbox" checked={effectiveGrammarTimeframes.includes(tf.id)} onChange={() => toggleGrammarTimeframe(tf.id)} disabled={isRunning || tf.id === timeframe} />
+                      <span>{tf.label}</span>
+                    </label>
+                  ))}
+                </div>
+                <div className="timeframe-grid hypothesis-family-grid" style={{ marginTop: 12 }}>
+                  {GRAMMAR_BLOCK_GROUPS.map((group) => (
+                    <label className="check-option" key={group.id} title={group.hint}>
+                      <input type="checkbox" checked={grammarBlockGroups.includes(group.id)} onChange={() => toggleGrammarBlockGroup(group.id)} disabled={isRunning} />
+                      <span>{group.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </>
+            )}
           </>
         )}
       </div>
 
       <div className="form-section">
         <div className="section-label">Search Quality</div>
-        <div className="segmented-control" role="tablist" aria-label="Search method">
-          <button type="button" className={searchMode === "guided" ? "active" : ""} onClick={() => setSearchMode("guided")} disabled={isRunning}>
-            Guided Evolution
-          </button>
-          <button type="button" className={searchMode === "broad" ? "active" : ""} onClick={() => setSearchMode("broad")} disabled={isRunning}>
-            Broad Scan
-          </button>
-        </div>
         <span className="field-hint">
-          Guided Evolution mutates only profitable parents and keeps a smaller exploration stream for fresh ideas.
+          Market Mind and manual grammar mutate only profitable parents and keep a smaller exploration stream for fresh ideas.
         </span>
         <div className="form-grid-2 hypothesis-grid" style={{ marginTop: 14 }}>
           <div className="field">
@@ -1141,7 +1192,7 @@ export default function DiscoveryTab() {
             <input className="field-input" value={maxCandidateDrawdownPct} onChange={(event) => setMaxCandidateDrawdownPct(event.target.value)} disabled={isRunning} inputMode="decimal" />
           </div>
         </div>
-        {searchMode === "guided" && (
+        {hypothesisMode === "market_mind" || families.includes("strategy_grammar") ? (
           <div className="form-grid-2 hypothesis-grid" style={{ marginTop: 10 }}>
             <div className="field">
               <label className="field-label">Initial scan fraction</label>
@@ -1164,7 +1215,7 @@ export default function DiscoveryTab() {
               <input className="field-input" value={guidedExplorationPct} onChange={(event) => setGuidedExplorationPct(event.target.value)} disabled={isRunning} inputMode="decimal" />
             </div>
           </div>
-        )}
+        ) : null}
       </div>
 
       <div className="form-section">

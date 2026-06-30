@@ -15,6 +15,7 @@ from ..research.store import ExperimentStore
 from .bar_engine import run_bar_replay, run_bar_replay_fast_metrics
 from .challenge import evaluate_challenge_grid
 from .grammar import generate_hypotheses, mutate_hypothesis
+from .market_mind import analyze_market_mind
 from .models import (
     HypothesisBarRequest,
     HypothesisBarResult,
@@ -90,6 +91,55 @@ class HypothesisResearchService:
             if item.kind == "bars" and item.symbol == symbol and item.timeframe == timeframe
         )
         return self._range(self._read(paths), date_from, date_to)
+
+    def list_market_datasets(self) -> list[dict[str, Any]]:
+        return [manifest.model_dump(mode="json") for manifest in self.catalog.list()]
+
+    def inspect_market_dataset(self, dataset_id: str) -> dict[str, Any]:
+        manifest = self.catalog.load(dataset_id)
+        return manifest.model_dump(mode="json")
+
+    def sample_market_bars(
+        self,
+        dataset_id: str,
+        symbol: str,
+        timeframe: str,
+        date_from,
+        date_to,
+        *,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        manifest = self.catalog.load(dataset_id)
+        bars = self._bars(manifest, symbol.upper(), timeframe.lower(), date_from, date_to)
+        if limit > 0:
+            bars = bars.head(limit)
+        return {
+            "dataset_id": dataset_id,
+            "symbol": symbol.upper(),
+            "timeframe": timeframe.lower(),
+            "rows": int(len(bars)),
+            "bars": bars.to_dict(orient="records"),
+        }
+
+    def analyze_market_dataset(
+        self,
+        dataset_id: str,
+        symbol: str,
+        timeframe: str,
+        date_from,
+        date_to,
+        *,
+        bias_pct: float = 0.70,
+    ) -> dict[str, Any]:
+        manifest = self.catalog.load(dataset_id)
+        bars = self._bars(manifest, symbol.upper(), timeframe.lower(), date_from, date_to)
+        if bars.empty:
+            raise ValueError("no bars in requested range")
+        contexts = {
+            tf: self._bars(manifest, symbol.upper(), tf, date_from, date_to)
+            for tf in ("h1", "h4")
+        }
+        return analyze_market_mind(bars, contexts, bias_pct=bias_pct).model_dump()
 
     @staticmethod
     def _grammar_timeframes(strategy: HypothesisSpec) -> tuple[str, ...]:
@@ -476,7 +526,15 @@ class HypothesisResearchService:
                 for timeframe in ("h1", "h4")
             }
             base_frame = build_base_frame(warm_bars, contexts)
-            specs = generate_hypotheses(request)
+            market_mind_plan = None
+            if request.search_mode == "market_mind":
+                market_mind_plan = analyze_market_mind(
+                    warm_bars,
+                    contexts,
+                    bias_pct=request.market_mind_bias_pct,
+                ).model_dump()
+                market_mind_plan["bias_pct"] = request.market_mind_bias_pct
+            specs = generate_hypotheses(request, market_mind_plan)
             grammar_timeframes = tuple(
                 dict.fromkeys(
                     timeframe
@@ -521,6 +579,7 @@ class HypothesisResearchService:
                 "parent_min_profit_factor": request.parent_min_profit_factor,
                 "final_min_profit_factor": request.final_min_profit_factor,
                 "final_min_active_pass_rate": request.final_min_active_pass_rate,
+                "market_mind_plan": market_mind_plan,
             }
 
             def compact_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -588,7 +647,8 @@ class HypothesisResearchService:
                     add_results([result])
                     write_checkpoint(evaluated, generation_index)
 
-            if request.search_mode == "guided" and specs:
+            generation_label = "Market mind" if request.search_mode == "market_mind" else "Guided"
+            if request.search_mode in {"guided", "market_mind"} and specs:
                 initial_count = min(
                     len(specs),
                     max(
@@ -604,7 +664,7 @@ class HypothesisResearchService:
                     base_frame,
                     grammar_frames,
                     min_required_trades,
-                    label=f"Guided generation 0/{request.guided_generations}: seed scan ({workers} workers)",
+                    label=f"{generation_label} generation 0/{request.guided_generations}: seed scan ({workers} workers)",
                     completed_offset=evaluated_count,
                     total_budget=request.max_variants,
                     current_job=current_job,
@@ -683,7 +743,7 @@ class HypothesisResearchService:
                         base_frame,
                         grammar_frames,
                         min_required_trades,
-                        label=f"Guided generation {generation}/{request.guided_generations}: mutation + exploration ({workers} workers)",
+                        label=f"{generation_label} generation {generation}/{request.guided_generations}: mutation + exploration ({workers} workers)",
                         completed_offset=evaluated_count,
                         total_budget=request.max_variants,
                         current_job=current_job,

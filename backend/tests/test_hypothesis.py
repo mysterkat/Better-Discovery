@@ -8,6 +8,7 @@ import pytest
 from app.hypothesis.bar_engine import run_bar_replay, run_bar_replay_fast_metrics
 from app.hypothesis.challenge import evaluate_challenge
 from app.hypothesis.grammar import generate_hypotheses, mutate_hypothesis
+from app.hypothesis.market_mind import analyze_market_mind
 from app.hypothesis.models import FTMOChallengeConfig, HypothesisBarRequest, HypothesisDiscoveryRequest, HypothesisSpec
 from app.hypothesis.service import HypothesisResearchService
 from app.hypothesis.signals import align_signal_timeframe, apply_signal_rules
@@ -254,10 +255,68 @@ def test_hypothesis_discovery_defaults_to_guided_search() -> None:
         date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
     )
 
-    assert request.search_mode == "guided"
+    assert request.search_mode == "market_mind"
+    assert request.market_mind_bias_pct == pytest.approx(0.70)
     assert request.parent_min_profit_factor == pytest.approx(1.15)
     assert request.final_min_profit_factor == pytest.approx(1.25)
     assert request.max_variants == 5_000
+
+
+def test_market_mind_analyzes_long_term_structure() -> None:
+    times = pd.date_range("2023-01-02", periods=420 * 24, freq="1h", tz="UTC")
+    base = pd.Series(range(len(times)), dtype=float) * 0.02 + 1800.0
+    bars = pd.DataFrame({
+        "time": times,
+        "open": base,
+        "high": base + 2.0,
+        "low": base - 1.5,
+        "close": base + 0.5,
+        "tick_volume": [100] * len(times),
+    })
+
+    plan = analyze_market_mind(bars, bias_pct=0.70).model_dump()
+
+    assert plan["regime_id"]
+    assert plan["summary"]["history_days"] >= 400
+    assert plan["recipes"]
+    assert "structure" in plan["block_group_weights"]
+
+
+def test_market_mind_generation_biases_grammar_and_keeps_exploration() -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        max_variants=80,
+        grammar_timeframes=("m1", "m5"),
+        search_mode="market_mind",
+    )
+    plan = {
+        "regime_id": "uptrend_high_vol_continuation_prone",
+        "bias_pct": 0.70,
+        "recipes": [
+            {
+                "name": "trend_continuation",
+                "weight": 0.7,
+                "groups": ["structure", "imbalance", "orderflow", "volatility"],
+                "why": "test trend",
+            },
+            {
+                "name": "trap_reversal",
+                "weight": 0.3,
+                "groups": ["liquidity", "structure", "volatility"],
+                "why": "test traps",
+            },
+        ],
+    }
+
+    specs = generate_hypotheses(request, plan)
+
+    assert len(specs) == 80
+    focuses = {str(spec.parameters.get("market_mind_focus")) for spec in specs}
+    assert "trend_continuation" in focuses
+    assert "exploration" in focuses
+    assert all(spec.lineage == "strategy_grammar" for spec in specs)
 
 
 def test_strategy_grammar_can_sample_all_m1_to_m15_timeframes() -> None:

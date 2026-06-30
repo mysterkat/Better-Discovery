@@ -48,6 +48,28 @@ TOOLS: list[dict[str, Any]] = [
      "inputSchema": _schema({})},
     {"name": "run_hypothesis_discovery", "description": "Run the deterministic XAUUSD hypothesis-family discovery engine on a manifest-backed bar dataset.",
      "inputSchema": _schema({"request": {"type": "object", "description": "HypothesisDiscoveryRequest fields, including optional parallel_workers."}}, ["request"])},
+    {"name": "list_market_datasets", "description": "List local manifest-backed market datasets available to Better Discovery.",
+     "inputSchema": _schema({})},
+    {"name": "inspect_market_dataset", "description": "Inspect one local market dataset manifest, including symbols, timeframes, file ranges, and quality metadata.",
+     "inputSchema": _schema({"dataset_id": {"type": "string"}}, ["dataset_id"])},
+    {"name": "sample_market_bars", "description": "Return a bounded sample of local MT5/imported bars for Codex-driven strategy research.",
+     "inputSchema": _schema({
+         "dataset_id": {"type": "string"},
+         "symbol": {"type": "string", "default": "XAUUSD"},
+         "timeframe": {"type": "string", "default": "m5"},
+         "date_from": {"type": "string"},
+         "date_to": {"type": "string"},
+         "limit": {"type": "integer", "default": 200},
+     }, ["dataset_id", "date_from", "date_to"])},
+    {"name": "analyze_market_mind", "description": "Analyze years of local bar data and return the 3.4 Market Mind regime plan used to bias grammar discovery.",
+     "inputSchema": _schema({
+         "dataset_id": {"type": "string"},
+         "symbol": {"type": "string", "default": "XAUUSD"},
+         "timeframe": {"type": "string", "default": "m5"},
+         "date_from": {"type": "string"},
+         "date_to": {"type": "string"},
+         "bias_pct": {"type": "number", "default": 0.70},
+     }, ["dataset_id", "date_from", "date_to"])},
     {"name": "export_hypothesis_ea", "description": "Export one HypothesisSpec to a standalone MQL5 EA, .set file, and hypothesis JSON.",
      "inputSchema": _schema({
          "strategy": {"type": "object", "description": "HypothesisSpec fields."},
@@ -109,6 +131,24 @@ def _call(name: str, args: dict[str, Any]) -> Any:
         },
         "run_hypothesis_discovery": lambda: HYPOTHESIS.run_discovery(
             HypothesisDiscoveryRequest(**args["request"])
+        ),
+        "list_market_datasets": lambda: HYPOTHESIS.list_market_datasets(),
+        "inspect_market_dataset": lambda: HYPOTHESIS.inspect_market_dataset(args["dataset_id"]),
+        "sample_market_bars": lambda: HYPOTHESIS.sample_market_bars(
+            args["dataset_id"],
+            args.get("symbol", "XAUUSD"),
+            args.get("timeframe", "m5"),
+            args["date_from"],
+            args["date_to"],
+            limit=int(args.get("limit", 200)),
+        ),
+        "analyze_market_mind": lambda: HYPOTHESIS.analyze_market_dataset(
+            args["dataset_id"],
+            args.get("symbol", "XAUUSD"),
+            args.get("timeframe", "m5"),
+            args["date_from"],
+            args["date_to"],
+            bias_pct=float(args.get("bias_pct", 0.70)),
         ),
         "export_hypothesis_ea": lambda: hypothesis_to_mql.export(
             HypothesisSpec(**args["strategy"]),
