@@ -14,7 +14,7 @@ from ..paths import DEFAULT_RESEARCH
 from ..research.store import ExperimentStore
 from .bar_engine import run_bar_replay, run_bar_replay_fast_metrics
 from .challenge import evaluate_challenge_grid
-from .grammar import generate_hypotheses
+from .grammar import generate_hypotheses, mutate_hypothesis
 from .models import (
     HypothesisBarRequest,
     HypothesisBarResult,
@@ -244,6 +244,33 @@ class HypothesisResearchService:
         }
 
     @staticmethod
+    def _quality_gate(row: dict[str, Any], request: HypothesisDiscoveryRequest, *, stage: str) -> bool:
+        profit_factor = row.get("profit_factor")
+        if row.get("net_profit", 0.0) <= 0:
+            return False
+        if profit_factor is None:
+            return False
+        min_pf = request.parent_min_profit_factor if stage == "parent" else request.final_min_profit_factor
+        if float(profit_factor) < min_pf:
+            return False
+        if float(row.get("expected_payoff") or 0.0) <= 0:
+            return False
+        if float(row.get("max_drawdown_pct") or 0.0) > request.max_candidate_drawdown_pct:
+            return False
+        if stage == "final" and float(row.get("challenge_active_pass_rate") or 0.0) < request.final_min_active_pass_rate:
+            return False
+        return True
+
+    @staticmethod
+    def _parent_rank(row: dict[str, Any]) -> tuple[float, float, float, float]:
+        return (
+            float(row.get("profit_factor") or 0.0),
+            float(row.get("challenge_active_pass_rate") or 0.0),
+            float(row.get("net_profit") or 0.0),
+            -float(row.get("max_drawdown_pct") or 0.0),
+        )
+
+    @staticmethod
     def _minimum_required_trades(request: HypothesisDiscoveryRequest, bars: pd.DataFrame) -> int:
         if request.min_trades_per_week > 0 and not bars.empty:
             times = pd.to_datetime(bars["time"], utc=True)
@@ -286,16 +313,89 @@ class HypothesisResearchService:
             return None
         profit_factor = fast_metrics["profit_factor"]
         expected_payoff = fast_metrics["expected_payoff"]
-        if profit_factor is None or profit_factor < 0.90 or expected_payoff is None or expected_payoff <= 0:
+        fast_min_pf = max(1.0, min(request.parent_min_profit_factor, request.final_min_profit_factor) - 0.10)
+        if profit_factor is None or profit_factor < fast_min_pf or expected_payoff is None or expected_payoff <= 0:
             return None
 
         ledger, metrics = run_bar_replay(bars, signals, replay_request)
         if metrics["trades"] < min_required_trades:
             return None
-        if metrics["profit_factor"] is None or metrics["profit_factor"] < 0.90 or metrics["expected_payoff"] is None or metrics["expected_payoff"] <= 0:
+        if metrics["profit_factor"] is None or metrics["profit_factor"] < fast_min_pf or metrics["expected_payoff"] is None or metrics["expected_payoff"] <= 0:
             return None
         challenge = evaluate_challenge_grid(ledger, request.challenge)
         return self._candidate_row(strategy, metrics, challenge), ledger
+
+    def _evaluate_specs(
+        self,
+        request: HypothesisDiscoveryRequest,
+        specs: list[HypothesisSpec],
+        bars: pd.DataFrame,
+        base_frame: pd.DataFrame,
+        grammar_frames: dict[str, pd.DataFrame] | None,
+        min_required_trades: int,
+        *,
+        label: str,
+        completed_offset: int,
+        total_budget: int,
+        current_job: Any,
+        started_at: float,
+        workers: int,
+    ) -> tuple[list[tuple[dict[str, Any], pd.DataFrame]], int]:
+        accepted: list[tuple[dict[str, Any], pd.DataFrame]] = []
+
+        def update(completed: int) -> None:
+            if current_job is None:
+                return
+            total_completed = completed_offset + completed
+            current_job.mark_stage(label, min(total_completed, total_budget), total_budget)
+            elapsed = max(0.001, time.time() - started_at)
+            rate = max(1, total_completed) / elapsed
+            remaining = max(0, total_budget - total_completed)
+            current_job.eta_seconds = remaining / rate if rate > 0 else None
+            current_job.meta["hypothesis_progress"] = {
+                "completed_variants": total_completed,
+                "total_variants": total_budget,
+                "accepted_variants": len(accepted),
+                "variants_per_hour": rate * 3600.0,
+                "eta_seconds": current_job.eta_seconds,
+                "stage": label,
+            }
+
+        if not specs:
+            return accepted, 0
+
+        if workers <= 1:
+            for index, strategy in enumerate(specs, start=1):
+                check_cancelled()
+                result = self._evaluate_candidate(request, strategy, bars, base_frame, grammar_frames, min_required_trades)
+                if result is not None:
+                    accepted.append(result)
+                update(index)
+            return accepted, len(specs)
+
+        executor = ThreadPoolExecutor(max_workers=workers)
+        futures = {
+            executor.submit(self._evaluate_candidate, request, strategy, bars, base_frame, grammar_frames, min_required_trades): strategy
+            for strategy in specs
+        }
+        cancel_futures = False
+        completed = 0
+        try:
+            for future in as_completed(futures):
+                check_cancelled()
+                completed += 1
+                result = future.result()
+                if result is not None:
+                    accepted.append(result)
+                update(completed)
+        except Exception:
+            cancel_futures = True
+            for future in futures:
+                future.cancel()
+            raise
+        finally:
+            executor.shutdown(wait=not cancel_futures, cancel_futures=cancel_futures)
+        return accepted, len(specs)
 
     def run_discovery(self, request: HypothesisDiscoveryRequest) -> dict[str, Any]:
         manifest = self.catalog.load(request.dataset_id)
@@ -366,59 +466,158 @@ class HypothesisResearchService:
             current_job = get_current_job()
             variant_started_at = time.time()
 
-            def record(result: tuple[dict[str, Any], pd.DataFrame] | None) -> None:
-                if result is None:
-                    return
-                row, ledger = result
-                rows.append(row)
-                top_ledgers[row["strategy_id"]] = ledger
-
             workers = min(request.parallel_workers, len(specs) or 1)
-            def update_variant_progress(index: int, total: int, workers_used: int) -> None:
-                if current_job is None:
-                    return
-                current_job.mark_stage(
-                    f"Hypothesis variants ({workers_used} workers)",
-                    index,
-                    total,
-                )
-                elapsed = max(0.001, time.time() - variant_started_at)
-                completed = max(1, index)
-                rate = completed / elapsed
-                remaining = max(0, total - index)
-                current_job.eta_seconds = remaining / rate if rate > 0 else None
-                current_job.meta["hypothesis_progress"] = {
-                    "completed_variants": index,
-                    "total_variants": total,
-                    "accepted_variants": len(rows),
-                    "variants_per_hour": rate * 3600.0,
-                    "eta_seconds": current_job.eta_seconds,
-                }
+            evaluated_count = 0
+            search_summary: dict[str, Any] = {
+                "mode": request.search_mode,
+                "generations": [],
+                "parent_min_profit_factor": request.parent_min_profit_factor,
+                "final_min_profit_factor": request.final_min_profit_factor,
+                "final_min_active_pass_rate": request.final_min_active_pass_rate,
+            }
 
-            if workers <= 1:
-                for index, strategy in enumerate(specs, start=1):
-                    check_cancelled()
-                    record(self._evaluate_candidate(request, strategy, bars, base_frame, grammar_frames, min_required_trades))
-                    update_variant_progress(index, len(specs), workers)
+            def add_results(results: list[tuple[dict[str, Any], pd.DataFrame]]) -> None:
+                for row, ledger in results:
+                    rows.append(row)
+                    top_ledgers[row["strategy_id"]] = ledger
+
+            if request.search_mode == "guided" and specs:
+                initial_count = min(
+                    len(specs),
+                    max(
+                        request.guided_parents_kept,
+                        int(round(request.max_variants * request.guided_initial_fraction)),
+                    ),
+                )
+                generation_specs = specs[:initial_count]
+                results, used = self._evaluate_specs(
+                    request,
+                    generation_specs,
+                    bars,
+                    base_frame,
+                    grammar_frames,
+                    min_required_trades,
+                    label=f"Guided generation 0 ({workers} workers)",
+                    completed_offset=evaluated_count,
+                    total_budget=request.max_variants,
+                    current_job=current_job,
+                    started_at=variant_started_at,
+                    workers=workers,
+                )
+                evaluated_count += used
+                add_results([result for result in results if self._quality_gate(result[0], request, stage="final")])
+                parents = [
+                    result for result in results
+                    if self._quality_gate(result[0], request, stage="parent")
+                ]
+                parents.sort(key=lambda result: self._parent_rank(result[0]), reverse=True)
+                parents = parents[:request.guided_parents_kept]
+                search_summary["generations"].append({
+                    "generation": 0,
+                    "evaluated": used,
+                    "accepted": len(results),
+                    "parents": len(parents),
+                    "finalists": len(rows),
+                })
+
+                seen_ids = {strategy.strategy_id for strategy in generation_specs}
+                remaining_specs = specs[initial_count:]
+                for generation in range(1, request.guided_generations + 1):
+                    if evaluated_count >= request.max_variants or not parents:
+                        break
+                    budget_left = request.max_variants - evaluated_count
+                    explore_count = min(
+                        len(remaining_specs),
+                        int(round(budget_left * request.guided_exploration_pct)),
+                    )
+                    child_budget = budget_left - explore_count
+                    children: list[HypothesisSpec] = []
+                    for parent_index, (parent_row, _ledger) in enumerate(parents):
+                        if len(children) >= child_budget:
+                            break
+                        parent_strategy = next(
+                            (strategy for strategy in specs if strategy.strategy_id == parent_row["strategy_id"]),
+                            None,
+                        )
+                        if parent_strategy is None:
+                            parent_strategy = HypothesisSpec(
+                                strategy_id=parent_row["strategy_id"],
+                                lineage=parent_row["lineage"],
+                                hypothesis=parent_row["hypothesis"],
+                                timeframe=request.timeframe,
+                                parameters=parent_row["parameters"],
+                            )
+                        for child_index in range(request.guided_children_per_parent):
+                            if len(children) >= child_budget:
+                                break
+                            child = mutate_hypothesis(
+                                parent_strategy,
+                                child_index=parent_index * request.guided_children_per_parent + child_index,
+                                generation=generation,
+                            )
+                            if child.strategy_id in seen_ids:
+                                continue
+                            seen_ids.add(child.strategy_id)
+                            children.append(child)
+                    exploration = remaining_specs[:explore_count]
+                    remaining_specs = remaining_specs[explore_count:]
+                    generation_specs = [*children, *exploration]
+                    if not generation_specs:
+                        break
+                    results, used = self._evaluate_specs(
+                        request,
+                        generation_specs,
+                        bars,
+                        base_frame,
+                        grammar_frames,
+                        min_required_trades,
+                        label=f"Guided generation {generation} ({workers} workers)",
+                        completed_offset=evaluated_count,
+                        total_budget=request.max_variants,
+                        current_job=current_job,
+                        started_at=variant_started_at,
+                        workers=workers,
+                    )
+                    evaluated_count += used
+                    add_results([result for result in results if self._quality_gate(result[0], request, stage="final")])
+                    next_parents = [
+                        result for result in [*parents, *results]
+                        if self._quality_gate(result[0], request, stage="parent")
+                    ]
+                    next_parents.sort(key=lambda result: self._parent_rank(result[0]), reverse=True)
+                    parents = next_parents[:request.guided_parents_kept]
+                    search_summary["generations"].append({
+                        "generation": generation,
+                        "evaluated": used,
+                        "accepted": len(results),
+                        "children": len(children),
+                        "exploration": len(exploration),
+                        "parents": len(parents),
+                        "finalists": len(rows),
+                    })
             else:
-                executor = ThreadPoolExecutor(max_workers=workers)
-                futures = {
-                    executor.submit(self._evaluate_candidate, request, strategy, bars, base_frame, grammar_frames, min_required_trades): strategy
-                    for strategy in specs
-                }
-                cancel_futures = False
-                try:
-                    for index, future in enumerate(as_completed(futures), start=1):
-                        check_cancelled()
-                        record(future.result())
-                        update_variant_progress(index, len(specs), workers)
-                except Exception:
-                    cancel_futures = True
-                    for future in futures:
-                        future.cancel()
-                    raise
-                finally:
-                    executor.shutdown(wait=not cancel_futures, cancel_futures=cancel_futures)
+                results, used = self._evaluate_specs(
+                    request,
+                    specs,
+                    bars,
+                    base_frame,
+                    grammar_frames,
+                    min_required_trades,
+                    label=f"Hypothesis variants ({workers} workers)",
+                    completed_offset=0,
+                    total_budget=len(specs),
+                    current_job=current_job,
+                    started_at=variant_started_at,
+                    workers=workers,
+                )
+                evaluated_count = used
+                add_results([result for result in results if self._quality_gate(result[0], request, stage="final")])
+                search_summary["generations"].append({
+                    "generation": 0,
+                    "evaluated": used,
+                    "accepted": len(results),
+                    "finalists": len(rows),
+                })
 
             rows.sort(
                 key=lambda item: (
@@ -454,9 +653,11 @@ class HypothesisResearchService:
                 "experiment_id": experiment_id,
                 "request": request.model_dump(mode="json"),
                 "variants_generated": len(specs),
+                "variants_evaluated": evaluated_count,
                 "variants_tested": len(rows),
                 "parallel_workers": workers,
                 "min_required_trades": min_required_trades,
+                "search_summary": search_summary,
                 "top_candidates": top_candidates,
             }
             summary_json.write_text(
@@ -470,6 +671,8 @@ class HypothesisResearchService:
                 timeframe=request.timeframe,
                 variants_generated=len(specs),
                 variants_tested=len(rows),
+                variants_evaluated=evaluated_count,
+                search_summary=search_summary,
                 parallel_workers=workers,
                 artifact_folder=str(folder),
                 summary_csv=str(summary_csv),

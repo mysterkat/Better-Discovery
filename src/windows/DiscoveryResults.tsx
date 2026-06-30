@@ -52,6 +52,14 @@ interface HypothesisDiscoveryResult {
   timeframe: string;
   variants_generated: number;
   variants_tested: number;
+  variants_evaluated?: number | null;
+  search_summary?: {
+    mode?: string;
+    generations?: Array<Record<string, unknown>>;
+    parent_min_profit_factor?: number;
+    final_min_profit_factor?: number;
+    final_min_active_pass_rate?: number;
+  } | null;
   parallel_workers?: number;
   artifact_folder: string;
   summary_csv: string;
@@ -315,8 +323,14 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
 
       <div className="results-grid" style={{ marginBottom: 16 }}>
         <div className="result-card"><span className="result-key">Generated</span><span className="result-val">{result.variants_generated}</span></div>
+        {result.variants_evaluated != null && (
+          <div className="result-card"><span className="result-key">Evaluated</span><span className="result-val">{result.variants_evaluated}</span></div>
+        )}
         <div className="result-card"><span className="result-key">Tested</span><span className="result-val">{result.variants_tested}</span></div>
         <div className="result-card"><span className="result-key">Workers</span><span className="result-val">{result.parallel_workers ?? 1}</span></div>
+        {result.search_summary?.mode && (
+          <div className="result-card"><span className="result-key">Search Mode</span><span className="result-val">{titleCase(result.search_summary.mode)}</span></div>
+        )}
         <div className="result-card"><span className="result-key">Dataset</span><span className="result-val result-val-truncate" title={result.dataset_id}>{result.dataset_id}</span></div>
         <div className="result-card"><span className="result-key">Symbol</span><span className="result-val">{result.symbol} {result.timeframe.toUpperCase()}</span></div>
         {best && (
@@ -326,6 +340,38 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
           </>
         )}
       </div>
+
+      {result.search_summary?.generations && result.search_summary.generations.length > 0 && (
+        <details className="nested-section" style={{ marginBottom: 16 }}>
+          <summary>Guided Search Generations</summary>
+          <table className="patterns-table">
+            <thead>
+              <tr>
+                <th>Gen</th>
+                <th className="num">Evaluated</th>
+                <th className="num">Accepted</th>
+                <th className="num">Parents</th>
+                <th className="num">Children</th>
+                <th className="num">Exploration</th>
+                <th className="num">Finalists</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.search_summary.generations.map((generation, index) => (
+                <tr key={index}>
+                  <td>{String(generation.generation ?? index)}</td>
+                  <td className="num">{String(generation.evaluated ?? "-")}</td>
+                  <td className="num">{String(generation.accepted ?? "-")}</td>
+                  <td className="num">{String(generation.parents ?? "-")}</td>
+                  <td className="num">{String(generation.children ?? "-")}</td>
+                  <td className="num">{String(generation.exploration ?? "-")}</td>
+                  <td className="num">{String(generation.finalists ?? "-")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      )}
 
       <div className="action-row" style={{ marginBottom: 16 }}>
         <button className="btn btn-secondary btn-sm" onClick={() => openFolder(result.artifact_folder).catch(() => undefined)} title={result.artifact_folder}>

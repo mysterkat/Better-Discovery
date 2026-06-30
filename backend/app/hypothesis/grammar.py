@@ -5,6 +5,7 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from random import Random
+from copy import deepcopy
 
 from .models import HypothesisDiscoveryRequest, HypothesisSpec, Lineage
 
@@ -39,6 +40,17 @@ def _id(lineage: str, params: dict[str, int | float | str | bool]) -> str:
 def _grammar_id(params: dict[str, object]) -> str:
     raw = json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
     return f"grammar_{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _spec_from_profile(profile: HypothesisProfile, timeframe: str) -> HypothesisSpec:
+    params = dict(profile.parameters)
+    return HypothesisSpec(
+        strategy_id=_id(profile.lineage, params),
+        lineage=profile.lineage,
+        hypothesis=profile.thesis,
+        timeframe=timeframe,  # type: ignore[arg-type]
+        parameters=params,
+    )
 
 
 def _with_common_filters(
@@ -397,6 +409,151 @@ def _strip_group(block: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in block.items() if key != "group"}
 
 
+def _block_groups_from_params(params: dict[str, object]) -> tuple[str, ...]:
+    raw = str(params.get("grammar_block_groups", ""))
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    return values or ("liquidity", "structure", "imbalance", "orderflow", "sessions", "volatility")
+
+
+def _timeframes_from_params(params: dict[str, object], fallback: str) -> tuple[str, ...]:
+    raw = str(params.get("grammar_timeframes", fallback))
+    values = tuple(dict.fromkeys(item.strip().lower() for item in raw.split(",") if item.strip()))
+    return tuple(value for value in values if value in {"m1", "m5", "m10", "m15"}) or (fallback,)
+
+
+def _mutate_numeric(
+    rng: Random,
+    params: dict[str, object],
+    key: str,
+    choices: tuple[int | float, ...],
+) -> None:
+    current = params.get(key)
+    if current not in choices:
+        params[key] = rng.choice(choices)
+        return
+    idx = choices.index(current)  # type: ignore[arg-type]
+    lo = max(0, idx - 1)
+    hi = min(len(choices) - 1, idx + 1)
+    params[key] = choices[rng.randint(lo, hi)]
+
+
+def _mutate_block_value(rng: Random, block: dict[str, object]) -> None:
+    name = str(block.get("name", ""))
+    numeric_choices: dict[str, tuple[int | float, ...]] = {
+        "lookback": (8, 12, 16, 24, 36, 48, 64),
+        "sweep_lookback": (8, 12, 24, 36, 48),
+        "channel_bars": (8, 12, 16, 24, 32, 48, 64),
+        "buffer_atr": (0.0, 0.01, 0.02, 0.03, 0.05, 0.08),
+        "penetration_atr": (0.0, 0.03, 0.05, 0.08, 0.10, 0.15),
+        "wick_min": (0.25, 0.35, 0.45, 0.55, 0.65),
+        "tolerance_atr": (0.05, 0.10, 0.15, 0.20, 0.30),
+        "range_atr": (0.8, 1.0, 1.2, 1.5, 1.8, 2.2),
+        "body_min": (0.25, 0.35, 0.50, 0.60, 0.70),
+        "ema_length": (20, 50, 200),
+        "pullback_atr": (0.25, 0.35, 0.45, 0.60, 0.75, 1.00),
+        "rsi_trigger": (45.0, 48.0, 50.0, 52.0, 55.0),
+        "ob_lookback": (3, 5, 8, 13),
+        "displacement_atr": (0.9, 1.1, 1.2, 1.4, 1.8),
+        "retest_bars": (4, 6, 8, 12, 16),
+        "max_distance_atr": (0.5, 0.75, 1.0, 1.5, 2.0),
+        "trend_open_atr": (0.15, 0.25, 0.30, 0.45, 0.60),
+        "min_rng_atr": (0.5, 0.7, 0.8, 1.0, 1.2),
+        "max_rng_atr": (2.2, 2.8, 3.2, 4.0),
+    }
+    mutable = [key for key in block if key in numeric_choices]
+    if mutable:
+        key = rng.choice(mutable)
+        _mutate_numeric(rng, block, key, numeric_choices[key])
+    if "timeframe" in block:
+        timeframe_pool = str(block.get("_timeframe_pool", "")).split(",")
+        timeframe_pool = [tf for tf in timeframe_pool if tf in {"m1", "m5", "m10", "m15"}]
+        if timeframe_pool and rng.random() < 0.40:
+            block["timeframe"] = rng.choice(timeframe_pool)
+    if name == "day_time_filter" and rng.random() < 0.35:
+        start = rng.choice((0, 3, 6, 8, 12))
+        end = rng.choice((18, 20, 22, 24))
+        block["session_start_utc"] = min(start, end - 1)
+        block["session_end_utc"] = end
+
+
+def mutate_hypothesis(
+    parent: HypothesisSpec,
+    *,
+    child_index: int,
+    generation: int,
+    seed: int = 910300,
+) -> HypothesisSpec:
+    """Create a nearby child from a profitable parent.
+
+    Mutations are deliberately small: exits, session, direction, timeframe,
+    and one rule block at a time. This keeps the search focused around edge
+    instead of reverting to blind random sampling.
+    """
+    raw_seed = f"{parent.fingerprint}:{generation}:{child_index}:{seed}"
+    rng = Random(int(hashlib.sha1(raw_seed.encode("utf-8")).hexdigest()[:12], 16))
+    params: dict[str, object] = deepcopy(parent.parameters)
+
+    if parent.lineage == "strategy_grammar":
+        timeframe_pool = _timeframes_from_params(params, parent.timeframe)
+        blocks = [dict(block) for block in list(params.get("rule_blocks") or []) if isinstance(block, dict)]
+        enabled_groups = set(_block_groups_from_params(params))
+        entry_blocks = _allowed_blocks(GRAMMAR_ENTRY_BLOCKS, enabled_groups)
+        confirmation_blocks = _allowed_blocks(GRAMMAR_CONFIRMATION_BLOCKS, enabled_groups)
+        filter_blocks = [dict(block) for block in GRAMMAR_FILTER_BLOCKS if str(block.get("group")) in enabled_groups]
+        smt_blocks = _allowed_blocks(GRAMMAR_SMT_BLOCKS, enabled_groups) if "smt" in enabled_groups else []
+        block_pool = entry_blocks + confirmation_blocks + filter_blocks + smt_blocks
+
+        if blocks and rng.random() < 0.55:
+            block = dict(rng.choice(blocks))
+            block["_timeframe_pool"] = ",".join(timeframe_pool)
+            _mutate_block_value(rng, block)
+            block.pop("_timeframe_pool", None)
+            replace_at = rng.randrange(len(blocks))
+            blocks[replace_at] = block
+        elif block_pool:
+            fresh = _strip_group(dict(rng.choice(block_pool)))
+            fresh["timeframe"] = rng.choice(timeframe_pool)
+            if len(blocks) < 5 and rng.random() < 0.55:
+                blocks.append(fresh)
+            elif blocks:
+                blocks[rng.randrange(len(blocks))] = fresh
+
+        if len(blocks) > 2 and rng.random() < 0.20:
+            del blocks[rng.randrange(len(blocks))]
+        params["rule_blocks"] = blocks
+        params["block_logic"] = "all" if len(blocks) <= 4 else "vote"
+        params["min_block_votes"] = max(2, len(blocks) - 1)
+
+    for key, choices in {
+        "atr_stop": (0.6, 0.7, 0.9, 1.1, 1.4, 1.8, 2.2),
+        "reward_risk": (0.8, 1.0, 1.25, 1.5, 2.0, 2.5),
+        "atr_trail": (0.0, 0.4, 0.6, 1.0, 1.5, 2.0),
+        "max_hold_bars": (3, 4, 6, 8, 12, 16, 24, 32),
+        "session_start_utc": (0, 3, 6, 8, 12),
+        "session_end_utc": (18, 20, 22, 24),
+    }.items():
+        if key in params and rng.random() < 0.45:
+            _mutate_numeric(rng, params, key, choices)
+
+    if int(params.get("session_start_utc", 0)) >= int(params.get("session_end_utc", 24)):
+        params["session_start_utc"] = 0
+        params["session_end_utc"] = 24
+    if rng.random() < 0.20:
+        params["direction_mode"] = rng.choice(DIRECTION_MODES)
+    if rng.random() < 0.20:
+        params["first_signal_per_day"] = not bool(params.get("first_signal_per_day", False))
+    params["guided_parent"] = parent.strategy_id
+    params["guided_generation"] = generation
+
+    return HypothesisSpec(
+        strategy_id=_id(parent.lineage, params),  # type: ignore[arg-type]
+        lineage=parent.lineage,
+        hypothesis=parent.hypothesis,
+        timeframe=parent.timeframe,
+        parameters=params,
+    )
+
+
 def _allowed_blocks(
     blocks: tuple[dict[str, object], ...],
     enabled_groups: set[str],
@@ -540,15 +697,7 @@ def generate_hypotheses(request: HypothesisDiscoveryRequest) -> list[HypothesisS
             indices[lineage] += 1
             progressed = True
             params = dict(profile.parameters)
-            specs.append(
-                HypothesisSpec(
-                    strategy_id=_id(profile.lineage, params),
-                    lineage=profile.lineage,
-                    hypothesis=profile.thesis,
-                    timeframe=request.timeframe,
-                    parameters=params,
-                )
-            )
+            specs.append(_spec_from_profile(profile, request.timeframe))
             if len(specs) >= request.max_variants:
                 break
         if not progressed:

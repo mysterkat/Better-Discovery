@@ -126,7 +126,17 @@ class HypothesisDiscoveryRequest(BaseModel):
     ] | None = None
     grammar_complexity: Literal["simple", "medium", "complex"] = "medium"
     grammar_randomness: Literal["low", "balanced", "high"] = "balanced"
-    max_variants: int = Field(default=5_000, ge=1, le=5_000)
+    search_mode: Literal["broad", "guided"] = "guided"
+    max_variants: int = Field(default=5_000, ge=1, le=20_000)
+    guided_initial_fraction: float = Field(default=0.35, ge=0.10, le=0.90)
+    guided_generations: int = Field(default=3, ge=0, le=8)
+    guided_parents_kept: int = Field(default=30, ge=1, le=250)
+    guided_children_per_parent: int = Field(default=30, ge=1, le=250)
+    guided_exploration_pct: float = Field(default=0.25, ge=0.0, le=0.75)
+    parent_min_profit_factor: float = Field(default=1.15, ge=1.0, le=5.0)
+    final_min_profit_factor: float = Field(default=1.25, ge=1.0, le=5.0)
+    final_min_active_pass_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+    max_candidate_drawdown_pct: float = Field(default=15.0, gt=0.0, le=100.0)
     min_closed_trades: int = Field(default=180, ge=1)
     min_trades_per_week: float = Field(default=2.5, ge=0)
     parallel_workers: int = Field(default=6, ge=1, le=32)
@@ -165,6 +175,8 @@ class HypothesisDiscoveryResult(BaseModel):
     timeframe: str
     variants_generated: int
     variants_tested: int
+    variants_evaluated: int | None = None
+    search_summary: dict[str, Any] | None = None
     parallel_workers: int = 1
     artifact_folder: str
     summary_csv: str

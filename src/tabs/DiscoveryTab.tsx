@@ -199,13 +199,23 @@ export default function DiscoveryTab() {
     ["liquidity_sweep_reclaim", "failed_breakout_reversal", "volatility_spike_reversal"],
   );
   const [grammarBlockGroups, setGrammarBlockGroups] = useState<GrammarBlockGroup[]>([
-    "liquidity", "structure", "imbalance", "orderflow", "sessions", "volatility",
+    "liquidity", "structure", "imbalance", "orderflow", "sessions", "volatility", "smt",
   ]);
-  const [grammarTimeframes, setGrammarTimeframes] = useState<ExecutionTimeframe[]>(["m5", "m10"]);
+  const [grammarTimeframes, setGrammarTimeframes] = useState<ExecutionTimeframe[]>(["m1", "m5", "m10", "m15"]);
   const [grammarComplexity, setGrammarComplexity] = useState<"simple" | "medium" | "complex">("medium");
   const [grammarRandomness, setGrammarRandomness] = useState<"low" | "balanced" | "high">("balanced");
-  const [maxVariants, setMaxVariants] = useState("5000");
-  const [minTradesPerWeek, setMinTradesPerWeek] = useState("2.5");
+  const [searchMode, setSearchMode] = useState<"broad" | "guided">("guided");
+  const [guidedInitialFraction, setGuidedInitialFraction] = useState("0.35");
+  const [guidedGenerations, setGuidedGenerations] = useState("3");
+  const [guidedParentsKept, setGuidedParentsKept] = useState("30");
+  const [guidedChildrenPerParent, setGuidedChildrenPerParent] = useState("30");
+  const [guidedExplorationPct, setGuidedExplorationPct] = useState("0.25");
+  const [parentMinProfitFactor, setParentMinProfitFactor] = useState("1.15");
+  const [finalMinProfitFactor, setFinalMinProfitFactor] = useState("1.25");
+  const [finalMinActivePassRate, setFinalMinActivePassRate] = useState("0.05");
+  const [maxCandidateDrawdownPct, setMaxCandidateDrawdownPct] = useState("15");
+  const [maxVariants, setMaxVariants] = useState("8000");
+  const [minTradesPerWeek, setMinTradesPerWeek] = useState("5");
   const [parallelWorkers, setParallelWorkers] = useState("6");
   const [targetProfitPct, setTargetProfitPct] = useState("10");
   const [dailyLossPct, setDailyLossPct] = useState("5");
@@ -445,8 +455,22 @@ export default function DiscoveryTab() {
     const minTradesPerFiveDays = Number(minTradesPerWeek);
     const workers = Math.trunc(Number(parallelWorkers));
     const attemptDays = Math.trunc(Number(maxAttemptDays));
+    const guidedNums = [
+      Number(guidedInitialFraction),
+      Math.trunc(Number(guidedGenerations)),
+      Math.trunc(Number(guidedParentsKept)),
+      Math.trunc(Number(guidedChildrenPerParent)),
+      Number(guidedExplorationPct),
+      Number(parentMinProfitFactor),
+      Number(finalMinProfitFactor),
+      Number(finalMinActivePassRate),
+      Number(maxCandidateDrawdownPct),
+    ];
     if (!Number.isFinite(variants) || variants <= 0 || !Number.isFinite(minTradesPerFiveDays) || minTradesPerFiveDays <= 0 || !Number.isFinite(workers) || workers <= 0 || !Number.isFinite(attemptDays) || attemptDays <= 0) {
       return "Max variants, minimum trades/week, parallel workers, and max attempt days must be positive numbers.";
+    }
+    if (searchMode === "guided" && guidedNums.some((value) => !Number.isFinite(value) || value < 0)) {
+      return "Guided search settings must be valid positive numbers.";
     }
     return null;
   };
@@ -481,6 +505,16 @@ export default function DiscoveryTab() {
       grammar_block_groups: grammarRun ? grammarBlockGroups : undefined,
       grammar_complexity: grammarRun ? grammarComplexity : undefined,
       grammar_randomness: grammarRun ? grammarRandomness : undefined,
+      search_mode: grammarRun ? searchMode : "broad",
+      guided_initial_fraction: Number(guidedInitialFraction),
+      guided_generations: Math.trunc(Number(guidedGenerations)),
+      guided_parents_kept: Math.trunc(Number(guidedParentsKept)),
+      guided_children_per_parent: Math.trunc(Number(guidedChildrenPerParent)),
+      guided_exploration_pct: Number(guidedExplorationPct),
+      parent_min_profit_factor: Number(parentMinProfitFactor),
+      final_min_profit_factor: Number(finalMinProfitFactor),
+      final_min_active_pass_rate: Number(finalMinActivePassRate),
+      max_candidate_drawdown_pct: Number(maxCandidateDrawdownPct),
       max_variants: variants,
       min_closed_trades: 1,
       min_trades_per_week: minTradesPerFiveDays,
@@ -610,7 +644,7 @@ export default function DiscoveryTab() {
     })().finally(() => {
       queueStartLock.current = false;
     });
-  }, [queueItems, queueRunning, queueMode, queueParallelLimit, selectedDatasetId, dateFrom, dateTo, maxVariants, minTradesPerWeek, parallelWorkers, targetProfitPct, dailyLossPct, maxLossPct, maxAttemptDays, startFrequency, riskFractions, dailyStops, maxTradesPerDay, slippagePriceUnits]);
+  }, [queueItems, queueRunning, queueMode, queueParallelLimit, selectedDatasetId, dateFrom, dateTo, maxVariants, minTradesPerWeek, parallelWorkers, searchMode, guidedInitialFraction, guidedGenerations, guidedParentsKept, guidedChildrenPerParent, guidedExplorationPct, parentMinProfitFactor, finalMinProfitFactor, finalMinActivePassRate, maxCandidateDrawdownPct, targetProfitPct, dailyLossPct, maxLossPct, maxAttemptDays, startFrequency, riskFractions, dailyStops, maxTradesPerDay, slippagePriceUnits]);
 
   const useDatasetRange = () => {
     if (!selectedDataset) return;
@@ -1006,6 +1040,65 @@ export default function DiscoveryTab() {
               ))}
             </div>
           </>
+        )}
+      </div>
+
+      <div className="form-section">
+        <div className="section-label">Search Quality</div>
+        <div className="segmented-control" role="tablist" aria-label="Search method">
+          <button type="button" className={searchMode === "guided" ? "active" : ""} onClick={() => setSearchMode("guided")} disabled={isRunning}>
+            Guided Evolution
+          </button>
+          <button type="button" className={searchMode === "broad" ? "active" : ""} onClick={() => setSearchMode("broad")} disabled={isRunning}>
+            Broad Scan
+          </button>
+        </div>
+        <span className="field-hint">
+          Guided Evolution mutates only profitable parents and keeps a smaller exploration stream for fresh ideas.
+        </span>
+        <div className="form-grid-2 hypothesis-grid" style={{ marginTop: 14 }}>
+          <div className="field">
+            <label className="field-label">Parent PF gate</label>
+            <input className="field-input" value={parentMinProfitFactor} onChange={(event) => setParentMinProfitFactor(event.target.value)} disabled={isRunning} inputMode="decimal" />
+            <span className="field-hint">Only profitable candidates above this PF are mutated.</span>
+          </div>
+          <div className="field">
+            <label className="field-label">Final PF gate</label>
+            <input className="field-input" value={finalMinProfitFactor} onChange={(event) => setFinalMinProfitFactor(event.target.value)} disabled={isRunning} inputMode="decimal" />
+            <span className="field-hint">Only candidates above this PF appear as finalists.</span>
+          </div>
+          <div className="field">
+            <label className="field-label">Final active pass rate</label>
+            <input className="field-input" value={finalMinActivePassRate} onChange={(event) => setFinalMinActivePassRate(event.target.value)} disabled={isRunning} inputMode="decimal" />
+          </div>
+          <div className="field">
+            <label className="field-label">Max candidate DD %</label>
+            <input className="field-input" value={maxCandidateDrawdownPct} onChange={(event) => setMaxCandidateDrawdownPct(event.target.value)} disabled={isRunning} inputMode="decimal" />
+          </div>
+        </div>
+        {searchMode === "guided" && (
+          <div className="form-grid-2 hypothesis-grid" style={{ marginTop: 10 }}>
+            <div className="field">
+              <label className="field-label">Initial scan fraction</label>
+              <input className="field-input" value={guidedInitialFraction} onChange={(event) => setGuidedInitialFraction(event.target.value)} disabled={isRunning} inputMode="decimal" />
+            </div>
+            <div className="field">
+              <label className="field-label">Generations</label>
+              <input className="field-input" value={guidedGenerations} onChange={(event) => setGuidedGenerations(event.target.value)} disabled={isRunning} inputMode="numeric" />
+            </div>
+            <div className="field">
+              <label className="field-label">Parents kept</label>
+              <input className="field-input" value={guidedParentsKept} onChange={(event) => setGuidedParentsKept(event.target.value)} disabled={isRunning} inputMode="numeric" />
+            </div>
+            <div className="field">
+              <label className="field-label">Children / parent</label>
+              <input className="field-input" value={guidedChildrenPerParent} onChange={(event) => setGuidedChildrenPerParent(event.target.value)} disabled={isRunning} inputMode="numeric" />
+            </div>
+            <div className="field">
+              <label className="field-label">Fresh exploration %</label>
+              <input className="field-input" value={guidedExplorationPct} onChange={(event) => setGuidedExplorationPct(event.target.value)} disabled={isRunning} inputMode="decimal" />
+            </div>
+          </div>
         )}
       </div>
 

@@ -79,6 +79,16 @@ export interface HypothesisDiscoveryRequest {
   grammar_block_groups?: ("liquidity" | "structure" | "imbalance" | "orderflow" | "sessions" | "volatility" | "smt")[];
   grammar_complexity?: "simple" | "medium" | "complex";
   grammar_randomness?: "low" | "balanced" | "high";
+  search_mode?: "broad" | "guided";
+  guided_initial_fraction?: number;
+  guided_generations?: number;
+  guided_parents_kept?: number;
+  guided_children_per_parent?: number;
+  guided_exploration_pct?: number;
+  parent_min_profit_factor?: number;
+  final_min_profit_factor?: number;
+  final_min_active_pass_rate?: number;
+  max_candidate_drawdown_pct?: number;
   max_variants: number;
   min_closed_trades: number;
   min_trades_per_week?: number;

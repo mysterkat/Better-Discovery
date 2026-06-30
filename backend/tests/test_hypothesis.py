@@ -7,7 +7,7 @@ import pytest
 
 from app.hypothesis.bar_engine import run_bar_replay, run_bar_replay_fast_metrics
 from app.hypothesis.challenge import evaluate_challenge
-from app.hypothesis.grammar import generate_hypotheses
+from app.hypothesis.grammar import generate_hypotheses, mutate_hypothesis
 from app.hypothesis.models import FTMOChallengeConfig, HypothesisBarRequest, HypothesisDiscoveryRequest, HypothesisSpec
 from app.hypothesis.service import HypothesisResearchService
 from app.hypothesis.signals import align_signal_timeframe, apply_signal_rules
@@ -245,6 +245,62 @@ def test_hypothesis_discovery_parallel_workers_are_validated() -> None:
             date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
             parallel_workers=33,
         )
+
+
+def test_hypothesis_discovery_defaults_to_guided_search() -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+    )
+
+    assert request.search_mode == "guided"
+    assert request.parent_min_profit_factor == pytest.approx(1.15)
+    assert request.final_min_profit_factor == pytest.approx(1.25)
+    assert request.max_variants == 5_000
+
+
+def test_strategy_grammar_can_sample_all_m1_to_m15_timeframes() -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        families=("strategy_grammar",),
+        timeframe="m5",
+        grammar_timeframes=("m1", "m5", "m10", "m15"),
+        grammar_block_groups=("liquidity", "structure", "imbalance", "orderflow", "sessions", "volatility", "smt"),
+        max_variants=200,
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+    )
+
+    specs = generate_hypotheses(request)
+    block_timeframes = {
+        str(block.get("timeframe"))
+        for spec in specs
+        for block in spec.parameters.get("rule_blocks", [])
+        if isinstance(block, dict)
+    }
+
+    assert {"m1", "m5", "m10", "m15"}.issubset(block_timeframes)
+
+
+def test_mutate_hypothesis_marks_parent_and_changes_strategy_id() -> None:
+    request = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        families=("strategy_grammar",),
+        timeframe="m5",
+        grammar_timeframes=("m1", "m5", "m10", "m15"),
+        max_variants=1,
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+    )
+    parent = generate_hypotheses(request)[0]
+
+    child = mutate_hypothesis(parent, child_index=0, generation=1)
+
+    assert child.strategy_id != parent.strategy_id
+    assert child.parameters["guided_parent"] == parent.strategy_id
+    assert child.parameters["guided_generation"] == 1
+    assert child.timeframe == parent.timeframe
 
 
 @pytest.mark.parametrize("timeframe", ("m1", "m5", "m10", "m15"))
