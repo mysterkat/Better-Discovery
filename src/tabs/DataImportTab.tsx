@@ -9,8 +9,12 @@ import {
   getCurrentImport,
   getDefaultFolder,
   getMarketDataProviders,
+  importExternalData,
+  listExternalData,
   listMarketDatasets,
   type CurrentImport,
+  type ExternalDataItem,
+  type ExternalDataKind,
   type MarketDataProvider,
   type MarketDataset,
   type Mt5CheckResult,
@@ -19,7 +23,7 @@ import {
 import JobProgress from "../components/JobProgress";
 import { useJobs } from "../state/jobs";
 
-type DataSource = "mt5" | "dukascopy";
+type DataSource = "mt5" | "dukascopy" | "external";
 
 const TIMEFRAMES = ["m1", "m5", "m10", "m15", "m30", "h1", "h4", "d1"];
 const MT5_TIMEFRAMES = ["m1", "m5", "m10", "m15", "m30", "h1", "h4", "d1"];
@@ -68,6 +72,7 @@ function datasetQualityLabel(dataset: MarketDataset): string {
 export default function DataImportTab() {
   const [providers, setProviders] = useState<MarketDataProvider[]>([]);
   const [datasets, setDatasets] = useState<MarketDataset[]>([]);
+  const [externalData, setExternalData] = useState<ExternalDataItem[]>([]);
   const [source, setSource] = useState<DataSource>("mt5");
   const [provider, setProvider] = useState<"dukascopy">("dukascopy");
   const [symbols, setSymbols] = useState("XAUUSD");
@@ -77,6 +82,12 @@ export default function DataImportTab() {
   const [includeTicks, setIncludeTicks] = useState(true);
   const [publishDiscovery, setPublishDiscovery] = useState(true);
   const [priceDigits, setPriceDigits] = useState("XAUUSD:3");
+  const [externalKind, setExternalKind] = useState<ExternalDataKind>("vix");
+  const [externalSource, setExternalSource] = useState("");
+  const [externalDateColumn, setExternalDateColumn] = useState("date");
+  const [externalValueColumn, setExternalValueColumn] = useState("");
+  const [externalReleaseColumn, setExternalReleaseColumn] = useState("");
+  const [externalSymbol, setExternalSymbol] = useState("XAUUSD");
   const [mt5Symbols, setMt5Symbols] = useState("XAUUSD");
   const [mt5Timeframes, setMt5Timeframes] = useState<string[]>(["m5", "m15", "h1", "h4"]);
   const [mt5TradingDays, setMt5TradingDays] = useState("2000");
@@ -96,6 +107,7 @@ export default function DataImportTab() {
 
   const refresh = () => {
     listMarketDatasets().then(setDatasets).catch(() => undefined);
+    listExternalData().then(setExternalData).catch(() => undefined);
     getCurrentImport().then(setCurrentImport).catch(() => undefined);
   };
   useEffect(() => {
@@ -265,7 +277,32 @@ export default function DataImportTab() {
     }
   };
 
-  const run = source === "mt5" ? runMt5 : runDukascopy;
+  const runExternal = async () => {
+    if (!externalSource.trim()) {
+      setError("Enter an external CSV path or URL.");
+      return;
+    }
+    setStarting(true);
+    setError(null);
+    try {
+      const result = await importExternalData({
+        kind: externalKind,
+        source: externalSource.trim(),
+        date_column: externalDateColumn.trim() || "date",
+        value_column: externalValueColumn.trim() || undefined,
+        release_time_column: externalReleaseColumn.trim() || undefined,
+        symbol: externalSymbol.trim().toUpperCase() || "XAUUSD",
+      });
+      setJobId(result.job_id);
+      setActiveJob("external_data_import", result.job_id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const run = source === "mt5" ? runMt5 : source === "dukascopy" ? runDukascopy : runExternal;
 
   return (
     <div className="tab-content">
@@ -282,6 +319,9 @@ export default function DataImportTab() {
           </button>
           <button type="button" className={source === "dukascopy" ? "active" : ""} onClick={() => setSource("dukascopy")} disabled={running}>
             Dukascopy Ticks
+          </button>
+          <button type="button" className={source === "external" ? "active" : ""} onClick={() => setSource("external")} disabled={running}>
+            External Context
           </button>
         </div>
       </div>
@@ -408,13 +448,78 @@ export default function DataImportTab() {
         </>
       )}
 
+      {source === "external" && (
+        <>
+          <div className="form-section">
+            <div className="section-label">External Context CSV</div>
+            <div className="form-grid-2">
+              <div className="field">
+                <label className="field-label">Kind</label>
+                <select className="field-input" value={externalKind} onChange={(event) => setExternalKind(event.target.value as ExternalDataKind)} disabled={running}>
+                  <option value="cot">CFTC COT</option>
+                  <option value="vix">VIX</option>
+                  <option value="gvz">GVZ</option>
+                  <option value="gamma">Dealer Gamma</option>
+                </select>
+                <span className="field-hint">Stored separately and used by Market Mind as context.</span>
+              </div>
+              <div className="field">
+                <label className="field-label">Symbol</label>
+                <input className="field-input" value={externalSymbol} onChange={(event) => setExternalSymbol(event.target.value)} disabled={running} />
+              </div>
+              <div className="field">
+                <label className="field-label">CSV path or URL</label>
+                <input className="field-input" value={externalSource} onChange={(event) => setExternalSource(event.target.value)} disabled={running} />
+                <span className="field-hint">CSV or zipped CSV. Use a local file path for paid gamma/vendor data.</span>
+              </div>
+              <div className="field">
+                <label className="field-label">Date column</label>
+                <input className="field-input" value={externalDateColumn} onChange={(event) => setExternalDateColumn(event.target.value)} disabled={running} />
+              </div>
+              <div className="field">
+                <label className="field-label">Value column</label>
+                <input className="field-input" value={externalValueColumn} onChange={(event) => setExternalValueColumn(event.target.value)} disabled={running} />
+                <span className="field-hint">Optional for VIX/GVZ; common names like close/value are auto-detected.</span>
+              </div>
+              <div className="field">
+                <label className="field-label">COT release time column</label>
+                <input className="field-input" value={externalReleaseColumn} onChange={(event) => setExternalReleaseColumn(event.target.value)} disabled={running} />
+                <span className="field-hint">Optional. If omitted, COT is treated as available Friday 20:30 UTC.</span>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
       <div className="action-row">
         <button className="btn btn-primary" onClick={run} disabled={running}>
-          {running ? "Importing..." : source === "mt5" ? "Import from MT5" : "Import Dukascopy Data"}
+          {running ? "Importing..." : source === "mt5" ? "Import from MT5" : source === "dukascopy" ? "Import Dukascopy Data" : "Import External Data"}
         </button>
       </div>
       {error && <div className="alert alert-error">{error}</div>}
       <JobProgress jobId={jobId} onDone={refresh} onError={setError} />
+
+      <div className="form-section">
+        <div className="section-label">External Context Catalog</div>
+        <div className="dataset-table-wrap">
+          <table className="data-table">
+            <thead><tr><th>Kind</th><th>Symbol</th><th>Rows</th><th>Range</th><th>Imported</th><th>Source</th></tr></thead>
+            <tbody>
+              {externalData.map((item) => (
+                <tr key={`${item.kind}-${item.symbol}`}>
+                  <td>{item.kind.toUpperCase()}</td>
+                  <td>{item.symbol}</td>
+                  <td>{item.rows}</td>
+                  <td>{(item.first_date ?? "").slice(0, 10)} to {(item.last_date ?? "").slice(0, 10)}</td>
+                  <td>{item.imported_at.slice(0, 19).replace("T", " ")}</td>
+                  <td title={item.source}>{item.source}</td>
+                </tr>
+              ))}
+              {!externalData.length && <tr><td colSpan={6}>No external context imported.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
 
       <div className="form-section">
         <div className="section-label">Dataset Catalog</div>

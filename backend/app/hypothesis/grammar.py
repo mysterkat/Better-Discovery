@@ -704,7 +704,7 @@ def _generate_market_mind_hypotheses(
         )
         profiles = _strategy_grammar(
             count,
-            seed=710400 + index * 997,
+            seed=request.random_seed + 400000 + index * 997,
             block_groups=groups or request.grammar_block_groups,
             complexity=request.grammar_complexity,
             randomness=request.grammar_randomness,
@@ -733,7 +733,7 @@ def _generate_market_mind_hypotheses(
     if explore_budget > 0 and len(specs) < request.max_variants:
         explore_profiles = _strategy_grammar(
             max(explore_budget, request.max_variants - len(specs)),
-            seed=810400,
+            seed=request.random_seed + 500000,
             block_groups=request.grammar_block_groups,
             complexity=request.grammar_complexity,
             randomness="high" if request.grammar_randomness != "low" else "balanced",
@@ -779,7 +779,7 @@ def generate_hypotheses(
         lineage: (
             _strategy_grammar(
                 request.max_variants,
-                seed=310200 + len(requested),
+                seed=request.random_seed + len(requested),
                 block_groups=request.grammar_block_groups,
                 complexity=request.grammar_complexity,
                 randomness=request.grammar_randomness,

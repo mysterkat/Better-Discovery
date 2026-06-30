@@ -71,7 +71,7 @@ USER_DATA: Path = _resolve_userdata()
 for _sub in (
     "themes", "recent", "cache", "mql", "hist_data", "discovery", "library",
     "research", "research/artifacts", "research/configs", "research/reports",
-    "market_data",
+    "market_data", "external_data",
 ):
     (USER_DATA / _sub).mkdir(exist_ok=True)
 

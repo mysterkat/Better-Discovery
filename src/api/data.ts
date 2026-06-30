@@ -160,6 +160,30 @@ export interface MarketDataset {
   error?: string | null;
 }
 
+export type ExternalDataKind = "cot" | "vix" | "gvz" | "gamma";
+
+export interface ExternalDataImportRequest {
+  kind: ExternalDataKind;
+  source: string;
+  date_column?: string;
+  value_column?: string;
+  release_time_column?: string;
+  symbol?: string;
+}
+
+export interface ExternalDataItem {
+  kind: ExternalDataKind;
+  symbol: string;
+  source: string;
+  rows: number;
+  first_date?: string | null;
+  last_date?: string | null;
+  path: string;
+  sha256: string;
+  imported_at: string;
+  columns: string[];
+}
+
 export interface ProviderFetchRequest {
   provider: "dukascopy";
   symbols: string[];
@@ -186,6 +210,14 @@ export function deleteMarketDataset(datasetId: string): Promise<{ dataset_id: st
 
 export function fetchProviderData(req: ProviderFetchRequest): Promise<JobRef> {
   return api("POST", "/data/provider/fetch", req);
+}
+
+export function listExternalData(): Promise<ExternalDataItem[]> {
+  return api("GET", "/data/external");
+}
+
+export function importExternalData(req: ExternalDataImportRequest): Promise<JobRef> {
+  return api("POST", "/data/external/import", req);
 }
 
 // ── v0.7.0: MT5 indicator install + auto-chart setup ─────────────────────────

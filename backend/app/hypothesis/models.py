@@ -128,6 +128,7 @@ class HypothesisDiscoveryRequest(BaseModel):
     grammar_randomness: Literal["low", "balanced", "high"] = "balanced"
     search_mode: Literal["market_mind", "manual", "broad", "guided"] = "market_mind"
     market_mind_bias_pct: float = Field(default=0.70, ge=0.0, le=1.0)
+    random_seed: int = Field(default=310200, ge=0, le=2_147_483_647)
     max_variants: int = Field(default=5_000, ge=1, le=20_000)
     guided_initial_fraction: float = Field(default=0.35, ge=0.10, le=0.90)
     guided_generations: int = Field(default=3, ge=0, le=8)

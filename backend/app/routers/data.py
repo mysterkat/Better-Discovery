@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException
 
 from pydantic import BaseModel, Field
 
+from ..external_data import EXTERNAL_DATA, ExternalDataImportRequest
 from ..bridge import data_import as di_bridge
 from ..bridge import mt5_import as mt5_bridge
 from ..bridge import mt5_setup as mt5_setup_bridge
@@ -75,6 +76,21 @@ def market_data_dataset_delete(dataset_id: str) -> dict[str, str]:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/data/external")
+def external_data_list() -> list[dict[str, Any]]:
+    return EXTERNAL_DATA.list_data()
+
+
+@router.post("/data/external/import", response_model=JobRef)
+def external_data_import(req: ExternalDataImportRequest) -> JobRef:
+    job = JOBS.create(
+        kind="external_data_import",
+        meta={"kind": req.kind, "symbol": req.symbol, "source": req.source},
+    )
+    run_in_thread(job, lambda: EXTERNAL_DATA.import_data(req))
+    return JobRef(job_id=job.job_id, status=job.status)
 
 
 @router.post("/data/provider/fetch", response_model=JobRef)

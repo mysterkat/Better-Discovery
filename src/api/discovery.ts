@@ -81,6 +81,7 @@ export interface HypothesisDiscoveryRequest {
   grammar_randomness?: "low" | "balanced" | "high";
   search_mode?: "market_mind" | "manual" | "broad" | "guided";
   market_mind_bias_pct?: number;
+  random_seed?: number;
   guided_initial_fraction?: number;
   guided_generations?: number;
   guided_parents_kept?: number;

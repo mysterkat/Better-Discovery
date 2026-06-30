@@ -319,6 +319,25 @@ def test_market_mind_generation_biases_grammar_and_keeps_exploration() -> None:
     assert all(spec.lineage == "strategy_grammar" for spec in specs)
 
 
+def test_random_seed_changes_strategy_generation() -> None:
+    first = HypothesisDiscoveryRequest(
+        dataset_id="test",
+        date_from=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        date_to=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        max_variants=20,
+        families=("strategy_grammar",),
+        random_seed=111,
+        search_mode="guided",
+    )
+    second = first.model_copy(update={"random_seed": 222})
+
+    first_ids = [spec.strategy_id for spec in generate_hypotheses(first)]
+    second_ids = [spec.strategy_id for spec in generate_hypotheses(second)]
+
+    assert first_ids == [spec.strategy_id for spec in generate_hypotheses(first)]
+    assert first_ids != second_ids
+
+
 def test_strategy_grammar_can_sample_all_m1_to_m15_timeframes() -> None:
     request = HypothesisDiscoveryRequest(
         dataset_id="test",

@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 
+from ..external_data import EXTERNAL_DATA
 from ..jobs.runners import CancelledError, check_cancelled, get_current_job
 from ..market_data.catalog import MarketDataCatalog
 from ..paths import DEFAULT_RESEARCH
@@ -139,7 +140,12 @@ class HypothesisResearchService:
             tf: self._bars(manifest, symbol.upper(), tf, date_from, date_to)
             for tf in ("h1", "h4")
         }
-        return analyze_market_mind(bars, contexts, bias_pct=bias_pct).model_dump()
+        return analyze_market_mind(
+            bars,
+            contexts,
+            external_context=EXTERNAL_DATA.context(symbol.upper(), date_to),
+            bias_pct=bias_pct,
+        ).model_dump()
 
     @staticmethod
     def _grammar_timeframes(strategy: HypothesisSpec) -> tuple[str, ...]:
@@ -531,6 +537,7 @@ class HypothesisResearchService:
                 market_mind_plan = analyze_market_mind(
                     warm_bars,
                     contexts,
+                    external_context=EXTERNAL_DATA.context(request.symbol, request.date_to),
                     bias_pct=request.market_mind_bias_pct,
                 ).model_dump()
                 market_mind_plan["bias_pct"] = request.market_mind_bias_pct
@@ -726,6 +733,7 @@ class HypothesisResearchService:
                                 parent_strategy,
                                 child_index=parent_index * request.guided_children_per_parent + child_index,
                                 generation=generation,
+                                seed=request.random_seed,
                             )
                             if child.strategy_id in seen_ids:
                                 continue

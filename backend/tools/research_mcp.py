@@ -18,6 +18,7 @@ if str(BACKEND) not in sys.path:
 from app.research.models import BacktestSpec, MT5Environment, PromotionPolicy  # noqa: E402
 from app.research.service import RESEARCH  # noqa: E402
 from app.bridge import hypothesis_to_mql  # noqa: E402
+from app.external_data import EXTERNAL_DATA, ExternalDataImportRequest  # noqa: E402
 from app.hypothesis.grammar import BUILDERS as HYPOTHESIS_BUILDERS  # noqa: E402
 from app.hypothesis.models import HypothesisDiscoveryRequest, HypothesisSpec  # noqa: E402
 from app.hypothesis.service import HypothesisResearchService  # noqa: E402
@@ -70,6 +71,15 @@ TOOLS: list[dict[str, Any]] = [
          "date_to": {"type": "string"},
          "bias_pct": {"type": "number", "default": 0.70},
      }, ["dataset_id", "date_from", "date_to"])},
+    {"name": "list_external_data", "description": "List imported COT/VIX/GVZ/gamma context datasets available to Market Mind.",
+     "inputSchema": _schema({})},
+    {"name": "import_external_data", "description": "Import a COT, VIX, GVZ, or gamma CSV/URL into the local Market Mind context store.",
+     "inputSchema": _schema({"request": {"type": "object", "description": "ExternalDataImportRequest fields."}}, ["request"])},
+    {"name": "external_context", "description": "Return the latest no-lookahead external context snapshot for a symbol as of a timestamp.",
+     "inputSchema": _schema({
+         "symbol": {"type": "string", "default": "XAUUSD"},
+         "as_of": {"type": "string"},
+     }, ["as_of"])},
     {"name": "export_hypothesis_ea", "description": "Export one HypothesisSpec to a standalone MQL5 EA, .set file, and hypothesis JSON.",
      "inputSchema": _schema({
          "strategy": {"type": "object", "description": "HypothesisSpec fields."},
@@ -149,6 +159,14 @@ def _call(name: str, args: dict[str, Any]) -> Any:
             args["date_from"],
             args["date_to"],
             bias_pct=float(args.get("bias_pct", 0.70)),
+        ),
+        "list_external_data": lambda: EXTERNAL_DATA.list_data(),
+        "import_external_data": lambda: EXTERNAL_DATA.import_data(
+            ExternalDataImportRequest(**args["request"])
+        ),
+        "external_context": lambda: EXTERNAL_DATA.context(
+            args.get("symbol", "XAUUSD"),
+            args["as_of"],
         ),
         "export_hypothesis_ea": lambda: hypothesis_to_mql.export(
             HypothesisSpec(**args["strategy"]),

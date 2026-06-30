@@ -219,6 +219,7 @@ export default function DiscoveryTab() {
   const [grammarRandomness, setGrammarRandomness] = useState<"low" | "balanced" | "high">("balanced");
   const [searchMode, setSearchMode] = useState<"market_mind" | "manual" | "broad" | "guided">("market_mind");
   const [marketMindBiasPct, setMarketMindBiasPct] = useState("0.70");
+  const [randomSeed, setRandomSeed] = useState("310200");
   const [guidedInitialFraction, setGuidedInitialFraction] = useState("0.35");
   const [guidedGenerations, setGuidedGenerations] = useState("3");
   const [guidedParentsKept, setGuidedParentsKept] = useState("30");
@@ -520,6 +521,7 @@ export default function DiscoveryTab() {
     if (usesGrammar && !grammarBlockGroups.length) return "Select at least one grammar block group.";
     if (usesGrammar && !effectiveGrammarTimeframes.length) return "Select at least one grammar signal timeframe.";
     const variants = Math.trunc(Number(maxVariants));
+    const seed = Math.trunc(Number(randomSeed));
     const minTradesPerFiveDays = Number(minTradesPerWeek);
     const workers = Math.trunc(Number(parallelWorkers));
     const attemptDays = Math.trunc(Number(maxAttemptDays));
@@ -534,8 +536,8 @@ export default function DiscoveryTab() {
       Number(finalMinActivePassRate),
       Number(maxCandidateDrawdownPct),
     ];
-    if (!Number.isFinite(variants) || variants <= 0 || !Number.isFinite(minTradesPerFiveDays) || minTradesPerFiveDays <= 0 || !Number.isFinite(workers) || workers <= 0 || !Number.isFinite(attemptDays) || attemptDays <= 0) {
-      return "Max variants, minimum trades/week, parallel workers, and max attempt days must be positive numbers.";
+    if (!Number.isFinite(variants) || variants <= 0 || !Number.isFinite(seed) || seed < 0 || !Number.isFinite(minTradesPerFiveDays) || minTradesPerFiveDays <= 0 || !Number.isFinite(workers) || workers <= 0 || !Number.isFinite(attemptDays) || attemptDays <= 0) {
+      return "Max variants, random seed, minimum trades/week, parallel workers, and max attempt days must be valid positive numbers.";
     }
     const bias = Number(marketMindBiasPct);
     if (hypothesisMode === "market_mind" && (!Number.isFinite(bias) || bias < 0 || bias > 1)) {
@@ -584,6 +586,7 @@ export default function DiscoveryTab() {
       grammar_randomness: grammarRun ? grammarRandomness : undefined,
       search_mode: runMode === "market_mind" ? "market_mind" : grammarRun ? "guided" : "manual",
       market_mind_bias_pct: runMode === "market_mind" ? Number(marketMindBiasPct) : undefined,
+      random_seed: Math.trunc(Number(randomSeed)),
       guided_initial_fraction: Number(guidedInitialFraction),
       guided_generations: Math.trunc(Number(guidedGenerations)),
       guided_parents_kept: Math.trunc(Number(guidedParentsKept)),
@@ -724,7 +727,7 @@ export default function DiscoveryTab() {
     })().finally(() => {
       queueStartLock.current = false;
     });
-  }, [queueItems, queueRunning, queueMode, queueParallelLimit, selectedDatasetId, dateFrom, dateTo, maxVariants, minTradesPerWeek, parallelWorkers, searchMode, guidedInitialFraction, guidedGenerations, guidedParentsKept, guidedChildrenPerParent, guidedExplorationPct, parentMinProfitFactor, finalMinProfitFactor, finalMinActivePassRate, maxCandidateDrawdownPct, targetProfitPct, dailyLossPct, maxLossPct, maxAttemptDays, startFrequency, riskFractions, dailyStops, maxTradesPerDay, slippagePriceUnits]);
+  }, [queueItems, queueRunning, queueMode, queueParallelLimit, selectedDatasetId, dateFrom, dateTo, maxVariants, minTradesPerWeek, parallelWorkers, searchMode, marketMindBiasPct, randomSeed, guidedInitialFraction, guidedGenerations, guidedParentsKept, guidedChildrenPerParent, guidedExplorationPct, parentMinProfitFactor, finalMinProfitFactor, finalMinActivePassRate, maxCandidateDrawdownPct, targetProfitPct, dailyLossPct, maxLossPct, maxAttemptDays, startFrequency, riskFractions, dailyStops, maxTradesPerDay, slippagePriceUnits]);
 
   const useDatasetRange = () => {
     if (!selectedDataset) return;
@@ -1234,6 +1237,21 @@ export default function DiscoveryTab() {
             <label className="field-label">Parallel workers</label>
             <input className="field-input" value={parallelWorkers} onChange={(event) => setParallelWorkers(event.target.value)} disabled={isRunning} inputMode="numeric" />
             <span className="field-hint">Use 1 for lowest memory use; raise for chunked research runs.</span>
+          </div>
+          <div className="field">
+            <label className="field-label">Random seed</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input className="field-input" value={randomSeed} onChange={(event) => setRandomSeed(event.target.value)} disabled={isRunning} inputMode="numeric" />
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setRandomSeed(String(Math.floor(Math.random() * 2_147_483_647)))}
+                disabled={isRunning}
+              >
+                Random
+              </button>
+            </div>
+            <span className="field-hint">Same seed repeats the same candidate generation; Random gives a fresh run.</span>
           </div>
         </div>
       </div>
