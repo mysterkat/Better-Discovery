@@ -73,6 +73,8 @@ const GRAMMAR_SIGNAL_TIMEFRAMES: Array<{ id: ExecutionTimeframe; label: string }
   { id: "m15", label: "M15" },
 ];
 
+const DISCOVERY_QUEUE_STORAGE_KEY = "betterDiscovery.discoveryQueue.v1";
+
 const HYPOTHESIS_FAMILY_GROUPS: Array<{
   id: string;
   label: string;
@@ -186,6 +188,16 @@ function parseIntList(raw: string): number[] {
   return parseNumberList(raw).map((value) => Math.trunc(value)).filter((value) => value > 0);
 }
 
+function formatQueueEta(seconds: number | null | undefined): string {
+  if (seconds == null || !isFinite(seconds) || seconds < 0) return "";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return `${hours}h ${rest}m`;
+}
+
 export default function DiscoveryTab() {
   const [engine, setEngine] = useState<DiscoveryEngine>("hypothesis");
   const [hypothesisMode, setHypothesisMode] = useState<HypothesisMode>("grammar");
@@ -236,10 +248,46 @@ export default function DiscoveryTab() {
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [currentImport, setCurrentImport] = useState<CurrentImport | null>(null);
-  const [queueItems, setQueueItems] = useState<DiscoveryQueueItem[]>([]);
-  const [queueRunning, setQueueRunning] = useState(false);
-  const [queueMode, setQueueMode] = useState<QueueMode>("sequential");
-  const [queueParallelLimit, setQueueParallelLimit] = useState("2");
+  const [queueItems, setQueueItems] = useState<DiscoveryQueueItem[]>(() => {
+    try {
+      const raw = localStorage.getItem(DISCOVERY_QUEUE_STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as { items?: DiscoveryQueueItem[] };
+      return Array.isArray(parsed.items) ? parsed.items : [];
+    } catch {
+      return [];
+    }
+  });
+  const [queueRunning, setQueueRunning] = useState(() => {
+    try {
+      const raw = localStorage.getItem(DISCOVERY_QUEUE_STORAGE_KEY);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw) as { running?: boolean };
+      return !!parsed.running;
+    } catch {
+      return false;
+    }
+  });
+  const [queueMode, setQueueMode] = useState<QueueMode>(() => {
+    try {
+      const raw = localStorage.getItem(DISCOVERY_QUEUE_STORAGE_KEY);
+      if (!raw) return "sequential";
+      const parsed = JSON.parse(raw) as { mode?: QueueMode };
+      return parsed.mode === "parallel" ? "parallel" : "sequential";
+    } catch {
+      return "sequential";
+    }
+  });
+  const [queueParallelLimit, setQueueParallelLimit] = useState(() => {
+    try {
+      const raw = localStorage.getItem(DISCOVERY_QUEUE_STORAGE_KEY);
+      if (!raw) return "2";
+      const parsed = JSON.parse(raw) as { parallelLimit?: string };
+      return parsed.parallelLimit || "2";
+    } catch {
+      return "2";
+    }
+  });
   const queueStartLock = useRef(false);
 
   const persistentDefaults = useParamDefaults((s) => s.defaults);
@@ -309,6 +357,23 @@ export default function DiscoveryTab() {
   const queueActiveCount = queueItems.filter((item) => item.status === "starting" || item.status === "running").length;
   const queuePendingCount = queueItems.filter((item) => item.status === "queued").length;
   const queueTerminalCount = queueItems.filter((item) => ["done", "failed", "cancelled"].includes(item.status)).length;
+  const queueHasActive = queueActiveCount > 0;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        DISCOVERY_QUEUE_STORAGE_KEY,
+        JSON.stringify({
+          items: queueItems,
+          running: queueRunning,
+          mode: queueMode,
+          parallelLimit: queueParallelLimit,
+        }),
+      );
+    } catch {
+      /* ignore storage failures */
+    }
+  }, [queueItems, queueRunning, queueMode, queueParallelLimit]);
 
   const trueDefault = (p: ParamDef): string => {
     const pd = persistentDefaults[p.key];
@@ -1131,7 +1196,7 @@ export default function DiscoveryTab() {
           <button type="button" className="btn btn-secondary btn-sm" onClick={queueRecommendedRuns} disabled={isRunning || queueRunning || !selectedDataset}>
             Queue Preset Set
           </button>
-          <select className="field-input queue-mode-select" value={queueMode} onChange={(event) => setQueueMode(event.target.value as QueueMode)} disabled={queueRunning}>
+          <select className="field-input queue-mode-select" value={queueMode} onChange={(event) => setQueueMode(event.target.value as QueueMode)} disabled={queueRunning || queueHasActive}>
             <option value="sequential">Sequential</option>
             <option value="parallel">Parallel safe</option>
           </select>
@@ -1140,7 +1205,7 @@ export default function DiscoveryTab() {
               className="field-input queue-limit-input"
               value={queueParallelLimit}
               onChange={(event) => setQueueParallelLimit(event.target.value)}
-              disabled={queueRunning}
+              disabled={queueRunning || queueHasActive}
               inputMode="numeric"
               title="Parallel queue is capped at 2 concurrent discovery jobs."
             />
@@ -1155,7 +1220,7 @@ export default function DiscoveryTab() {
           </button>
           {queueRunning && (
             <button type="button" className="btn btn-secondary btn-sm" onClick={() => setQueueRunning(false)}>
-              Pause Queue
+              Pause Starting New
             </button>
           )}
           <button
@@ -1167,7 +1232,7 @@ export default function DiscoveryTab() {
             Clear Waiting/Done
           </button>
         </div>
-        <span className="field-hint">Parallel safe starts at most 2 discovery jobs. Each job still uses its own Parallel workers setting.</span>
+        <span className="field-hint">Parallel safe starts at most 2 discovery jobs. Queue mode is locked while jobs are active; pause only stops new jobs from starting.</span>
         {queueItems.length > 0 && (
           <div className="discovery-queue-list">
             <div className="discovery-queue-summary">
@@ -1176,8 +1241,28 @@ export default function DiscoveryTab() {
             {queueItems.map((item, index) => {
               const queuedJob = item.jobId ? jobs[item.jobId] : undefined;
               const resultJobId = item.jobId;
-              const stage = queuedJob?.stage_index != null && queuedJob?.stage_total != null
-                ? `${queuedJob.stage_index}/${queuedJob.stage_total}`
+              const hypothesisProgress = queuedJob?.meta?.hypothesis_progress as {
+                completed_variants?: number;
+                total_variants?: number;
+                accepted_variants?: number;
+                variants_per_hour?: number;
+                eta_seconds?: number | null;
+                stage?: string;
+                generation_index?: number | null;
+                generation_total?: number | null;
+                generation_phase?: string | null;
+              } | undefined;
+              const completedVariants = hypothesisProgress?.completed_variants ?? queuedJob?.stage_index;
+              const totalVariants = hypothesisProgress?.total_variants ?? queuedJob?.stage_total;
+              const stage = completedVariants != null && totalVariants != null
+                ? `${completedVariants}/${totalVariants}`
+                : "";
+              const generationDetail = hypothesisProgress?.generation_index != null
+                ? `gen ${hypothesisProgress.generation_index}${hypothesisProgress.generation_total != null ? `/${hypothesisProgress.generation_total}` : ""}${hypothesisProgress.generation_phase ? ` ${hypothesisProgress.generation_phase}` : ""}`
+                : "";
+              const eta = formatQueueEta(hypothesisProgress?.eta_seconds ?? queuedJob?.eta_seconds);
+              const rate = hypothesisProgress?.variants_per_hour != null
+                ? `${Math.round(hypothesisProgress.variants_per_hour)}/h`
                 : "";
               return (
                 <div className={`discovery-queue-item queue-status-${item.status}`} key={item.id}>
@@ -1186,6 +1271,11 @@ export default function DiscoveryTab() {
                     <span>
                       {item.timeframe.toUpperCase()} - {item.families.includes("strategy_grammar") ? `grammar ${item.grammarTimeframes.map((tf) => tf.toUpperCase()).join("+")}` : `${item.families.length} families`} {stage ? `- ${stage}` : ""}
                     </span>
+                    {(queuedJob?.stage_name || generationDetail || rate || eta || hypothesisProgress?.accepted_variants != null) && (
+                      <span>
+                        {[queuedJob?.stage_name, generationDetail, hypothesisProgress?.accepted_variants != null ? `${hypothesisProgress.accepted_variants} accepted` : "", rate, eta ? `ETA ${eta}` : ""].filter(Boolean).join(" - ")}
+                      </span>
+                    )}
                     {item.error && <span className="queue-error">{item.error}</span>}
                   </div>
                   <div className="discovery-queue-actions">

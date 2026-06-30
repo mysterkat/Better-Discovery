@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from ..jobs.runners import check_cancelled, get_current_job
+from ..jobs.runners import CancelledError, check_cancelled, get_current_job
 from ..market_data.catalog import MarketDataCatalog
 from ..paths import DEFAULT_RESEARCH
 from ..research.store import ExperimentStore
@@ -340,6 +340,10 @@ class HypothesisResearchService:
         current_job: Any,
         started_at: float,
         workers: int,
+        generation_index: int | None = None,
+        generation_total: int | None = None,
+        generation_phase: str | None = None,
+        checkpoint: Any | None = None,
     ) -> tuple[list[tuple[dict[str, Any], pd.DataFrame]], int]:
         accepted: list[tuple[dict[str, Any], pd.DataFrame]] = []
 
@@ -359,6 +363,9 @@ class HypothesisResearchService:
                 "variants_per_hour": rate * 3600.0,
                 "eta_seconds": current_job.eta_seconds,
                 "stage": label,
+                "generation_index": generation_index,
+                "generation_total": generation_total,
+                "generation_phase": generation_phase,
             }
 
         if not specs:
@@ -370,24 +377,52 @@ class HypothesisResearchService:
                 result = self._evaluate_candidate(request, strategy, bars, base_frame, grammar_frames, min_required_trades)
                 if result is not None:
                     accepted.append(result)
+                    if checkpoint is not None:
+                        checkpoint(result, completed_offset + index, generation_index)
                 update(index)
             return accepted, len(specs)
 
         executor = ThreadPoolExecutor(max_workers=workers)
-        futures = {
-            executor.submit(self._evaluate_candidate, request, strategy, bars, base_frame, grammar_frames, min_required_trades): strategy
-            for strategy in specs
-        }
+        pending_specs = iter(specs)
+        futures = {}
         cancel_futures = False
         completed = 0
+
+        def submit_next() -> bool:
+            try:
+                strategy = next(pending_specs)
+            except StopIteration:
+                return False
+            future = executor.submit(
+                self._evaluate_candidate,
+                request,
+                strategy,
+                bars,
+                base_frame,
+                grammar_frames,
+                min_required_trades,
+            )
+            futures[future] = strategy
+            return True
+
         try:
-            for future in as_completed(futures):
+            for _ in range(min(workers, len(specs))):
+                submit_next()
+            while futures:
                 check_cancelled()
-                completed += 1
-                result = future.result()
-                if result is not None:
-                    accepted.append(result)
-                update(completed)
+                done, _pending = wait(futures, timeout=0.5, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+                for future in done:
+                    futures.pop(future, None)
+                    completed += 1
+                    result = future.result()
+                    if result is not None:
+                        accepted.append(result)
+                        if checkpoint is not None:
+                            checkpoint(result, completed_offset + completed, generation_index)
+                    update(completed)
+                    submit_next()
         except Exception:
             cancel_futures = True
             for future in futures:
@@ -405,6 +440,18 @@ class HypothesisResearchService:
             "hypothesis_discovery",
             request.model_dump(mode="json"),
             dataset_role="development",
+        )
+        folder = self.output / "hypothesis_discovery" / experiment_id
+        folder.mkdir(parents=True, exist_ok=False)
+        summary_json = folder / "summary.json"
+        summary_csv = folder / "summary.csv"
+        request_path = folder / "request.json"
+        live_json = folder / "live_candidates.json"
+        live_csv = folder / "live_candidates.csv"
+        checkpoint_json = folder / "checkpoint.json"
+        request_path.write_text(
+            json.dumps(request.model_dump(mode="json"), indent=2, default=str),
+            encoding="utf-8",
         )
         try:
             bars = self._bars(
@@ -476,10 +523,70 @@ class HypothesisResearchService:
                 "final_min_active_pass_rate": request.final_min_active_pass_rate,
             }
 
+            def compact_row(row: dict[str, Any]) -> dict[str, Any]:
+                return {key: value for key, value in row.items() if key != "challenge"}
+
+            def write_checkpoint(evaluated: int, generation_index: int | None = None) -> None:
+                compact_rows = [compact_row(row) for row in rows]
+                live_json.write_text(
+                    json.dumps(
+                        {
+                            "experiment_id": experiment_id,
+                            "status": "running",
+                            "variants_generated": len(specs),
+                            "variants_evaluated": evaluated,
+                            "candidates_saved": len(rows),
+                            "generation_index": generation_index,
+                            "search_summary": search_summary,
+                            "top_candidates": rows[: request.top_n],
+                        },
+                        indent=2,
+                        default=str,
+                    ),
+                    encoding="utf-8",
+                )
+                pd.DataFrame(compact_rows).to_csv(live_csv, index=False)
+                checkpoint_json.write_text(
+                    json.dumps(
+                        {
+                            "experiment_id": experiment_id,
+                            "job_status": "running",
+                            "variants_evaluated": evaluated,
+                            "generation_index": generation_index,
+                            "candidate_count": len(rows),
+                            "updated_at": time.time(),
+                        },
+                        indent=2,
+                        default=str,
+                    ),
+                    encoding="utf-8",
+                )
+
             def add_results(results: list[tuple[dict[str, Any], pd.DataFrame]]) -> None:
                 for row, ledger in results:
+                    if row["strategy_id"] in top_ledgers:
+                        continue
                     rows.append(row)
                     top_ledgers[row["strategy_id"]] = ledger
+                rows.sort(
+                    key=lambda item: (
+                        item["challenge_score"],
+                        item["challenge_pass_count"],
+                        -(item["median_days_to_target"] or 999.0),
+                        item["profit_factor"] or 0.0,
+                    ),
+                    reverse=True,
+                )
+
+            def live_checkpoint_result(
+                result: tuple[dict[str, Any], pd.DataFrame],
+                evaluated: int,
+                generation_index: int | None,
+            ) -> None:
+                row, _ledger = result
+                if self._quality_gate(row, request, stage="final"):
+                    add_results([result])
+                    write_checkpoint(evaluated, generation_index)
 
             if request.search_mode == "guided" and specs:
                 initial_count = min(
@@ -497,12 +604,16 @@ class HypothesisResearchService:
                     base_frame,
                     grammar_frames,
                     min_required_trades,
-                    label=f"Guided generation 0 ({workers} workers)",
+                    label=f"Guided generation 0/{request.guided_generations}: seed scan ({workers} workers)",
                     completed_offset=evaluated_count,
                     total_budget=request.max_variants,
                     current_job=current_job,
                     started_at=variant_started_at,
                     workers=workers,
+                    generation_index=0,
+                    generation_total=request.guided_generations,
+                    generation_phase="seed scan",
+                    checkpoint=live_checkpoint_result,
                 )
                 evaluated_count += used
                 add_results([result for result in results if self._quality_gate(result[0], request, stage="final")])
@@ -519,6 +630,7 @@ class HypothesisResearchService:
                     "parents": len(parents),
                     "finalists": len(rows),
                 })
+                write_checkpoint(evaluated_count, 0)
 
                 seen_ids = {strategy.strategy_id for strategy in generation_specs}
                 remaining_specs = specs[initial_count:]
@@ -571,12 +683,16 @@ class HypothesisResearchService:
                         base_frame,
                         grammar_frames,
                         min_required_trades,
-                        label=f"Guided generation {generation} ({workers} workers)",
+                        label=f"Guided generation {generation}/{request.guided_generations}: mutation + exploration ({workers} workers)",
                         completed_offset=evaluated_count,
                         total_budget=request.max_variants,
                         current_job=current_job,
                         started_at=variant_started_at,
                         workers=workers,
+                        generation_index=generation,
+                        generation_total=request.guided_generations,
+                        generation_phase="mutation + exploration",
+                        checkpoint=live_checkpoint_result,
                     )
                     evaluated_count += used
                     add_results([result for result in results if self._quality_gate(result[0], request, stage="final")])
@@ -595,6 +711,7 @@ class HypothesisResearchService:
                         "parents": len(parents),
                         "finalists": len(rows),
                     })
+                    write_checkpoint(evaluated_count, generation)
             else:
                 results, used = self._evaluate_specs(
                     request,
@@ -603,12 +720,16 @@ class HypothesisResearchService:
                     base_frame,
                     grammar_frames,
                     min_required_trades,
-                    label=f"Hypothesis variants ({workers} workers)",
+                    label=f"Fixed family scan ({workers} workers)",
                     completed_offset=0,
                     total_budget=len(specs),
                     current_job=current_job,
                     started_at=variant_started_at,
                     workers=workers,
+                    generation_index=0,
+                    generation_total=0,
+                    generation_phase="fixed family scan",
+                    checkpoint=live_checkpoint_result,
                 )
                 evaluated_count = used
                 add_results([result for result in results if self._quality_gate(result[0], request, stage="final")])
@@ -618,6 +739,7 @@ class HypothesisResearchService:
                     "accepted": len(results),
                     "finalists": len(rows),
                 })
+                write_checkpoint(evaluated_count, 0)
 
             rows.sort(
                 key=lambda item: (
@@ -629,15 +751,6 @@ class HypothesisResearchService:
                 reverse=True,
             )
 
-            folder = self.output / "hypothesis_discovery" / experiment_id
-            folder.mkdir(parents=True, exist_ok=False)
-            summary_json = folder / "summary.json"
-            summary_csv = folder / "summary.csv"
-            request_path = folder / "request.json"
-            request_path.write_text(
-                json.dumps(request.model_dump(mode="json"), indent=2, default=str),
-                encoding="utf-8",
-            )
             compact_rows = [
                 {key: value for key, value in row.items() if key != "challenge"}
                 for row in rows
@@ -664,6 +777,20 @@ class HypothesisResearchService:
                 json.dumps(summary_payload, indent=2, default=str),
                 encoding="utf-8",
             )
+            checkpoint_json.write_text(
+                json.dumps(
+                    {
+                        "experiment_id": experiment_id,
+                        "job_status": "done",
+                        "variants_evaluated": evaluated_count,
+                        "candidate_count": len(rows),
+                        "updated_at": time.time(),
+                    },
+                    indent=2,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
             result = HypothesisDiscoveryResult(
                 experiment_id=experiment_id,
                 dataset_id=request.dataset_id,
@@ -681,6 +808,23 @@ class HypothesisResearchService:
             ).model_dump(mode="json")
             self.store.finish(experiment_id, result)
             return result
+        except CancelledError:
+            checkpoint_json.write_text(
+                json.dumps(
+                    {
+                        "experiment_id": experiment_id,
+                        "job_status": "cancelled",
+                        "variants_evaluated": locals().get("evaluated_count", 0),
+                        "candidate_count": len(locals().get("rows", [])),
+                        "updated_at": time.time(),
+                        "note": "Partial live candidates, if any, are in live_candidates.json and live_candidates.csv.",
+                    },
+                    indent=2,
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
+            raise
         except Exception as exc:
             self.store.fail(experiment_id, str(exc))
             raise

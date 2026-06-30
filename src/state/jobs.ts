@@ -45,6 +45,9 @@ export interface Job {
       accepted_variants?: number;
       variants_per_hour?: number;
       eta_seconds?: number | null;
+      generation_index?: number | null;
+      generation_total?: number | null;
+      generation_phase?: string | null;
     };
     [key: string]: unknown;
   };
