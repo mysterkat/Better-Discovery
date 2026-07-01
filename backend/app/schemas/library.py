@@ -11,13 +11,23 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ..hypothesis.models import HypothesisSpec
 
 
 class LibrarySaveRequest(BaseModel):
     pattern_id: str
     set_file: str
     metadata: dict[str, Any]
+
+
+class HypothesisLibrarySaveRequest(BaseModel):
+    strategy: HypothesisSpec
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    source: dict[str, Any] = Field(default_factory=dict)
+    name: str | None = None
+    notes: str = ""
 
 
 class LibraryEntry(BaseModel):
@@ -45,3 +55,19 @@ class LibraryAttachRequest(BaseModel):
     # Raw file bytes encoded as base64. Used because adding python-multipart
     # for one tiny upload (typically <1 MB) isn't worth the dep.
     content_b64: str
+
+
+MergeMode = Literal["regime_switch", "priority", "vote", "portfolio"]
+
+
+class LibraryMergeComponent(BaseModel):
+    pattern_id: str
+    weight: float = 1.0
+    role: str = "component"
+
+
+class LibraryMergeRequest(BaseModel):
+    name: str
+    mode: MergeMode = "regime_switch"
+    components: list[LibraryMergeComponent]
+    notes: str = ""

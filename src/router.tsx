@@ -3,6 +3,8 @@ import { lazy, type ComponentType } from "react";
 export type TabId =
   | "data-import"
   | "discovery"
+  | "strategy-library"
+  | "strategy-merger"
   | "strategy-compare"
   | "research-lab"
   | "set-to-mql"
@@ -27,6 +29,18 @@ export const TABS: TabDef[] = [
     label: "Pattern Discovery",
     icon: "🔍",
     Component: lazy(() => import("./tabs/DiscoveryTab")),
+  },
+  {
+    id: "strategy-library",
+    label: "Strategy Library",
+    icon: "★",
+    Component: lazy(() => import("./tabs/StrategyLibraryTab")),
+  },
+  {
+    id: "strategy-merger",
+    label: "Strategy Merger",
+    icon: "⇄",
+    Component: lazy(() => import("./tabs/StrategyMergerTab")),
   },
   {
     id: "research-lab",

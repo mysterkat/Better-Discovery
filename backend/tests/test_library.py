@@ -133,6 +133,43 @@ def test_mt5_csv_served_after_attach(client, disc_set_file):
     assert "50.0" in resp.text
 
 
+def test_save_hypothesis_and_merge(client, disc_set_file):
+    strategy = {
+        "strategy_id": "hypothesis_test_a",
+        "lineage": "strategy_grammar",
+        "hypothesis": "A test grammar strategy saved from Market Mind results.",
+        "timeframe": "m5",
+        "parameters": {
+            "rule_blocks": [{"name": "liquidity_sweep_reclaim", "lookback": 12}],
+            "block_logic": "all",
+            "atr_stop": 1.0,
+            "reward_risk": 1.5,
+        },
+    }
+    resp = client.post("/library/save-hypothesis", json={
+        "strategy": strategy,
+        "metrics": {"profit_factor": 1.45, "trades": 120},
+        "source": {"experiment_id": "unit"},
+    })
+    assert resp.status_code == 200, resp.text
+    saved_id = resp.json()["entry"]["pattern_id"]
+    assert saved_id == "hypothesis_test_a"
+
+    resp = client.post("/library/merge", json={
+        "name": "unit merged",
+        "mode": "portfolio",
+        "components": [
+            {"pattern_id": PATTERN_ID, "weight": 1.0},
+            {"pattern_id": saved_id, "weight": 1.0},
+        ],
+        "notes": "unit test",
+    })
+    assert resp.status_code == 200, resp.text
+    merged = resp.json()["entry"]
+    assert merged["metadata"]["__kind"] == "merged"
+    assert len(merged["metadata"]["components"]) == 2
+
+
 def test_delete_from_library(client, disc_set_file):
     resp = client.delete(f"/library/{PATTERN_ID}")
     assert resp.status_code == 200

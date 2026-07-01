@@ -1,5 +1,5 @@
 import { api, getBaseUrl } from "./client";
-import type { PatternSummary } from "./discovery";
+import type { HypothesisStrategySpec, PatternSummary } from "./discovery";
 
 export type AttachKind = "mt5_html" | "mt5_csv";
 
@@ -27,6 +27,27 @@ export interface LibrarySaveRequest {
   metadata: PatternSummary | Record<string, unknown>;
 }
 
+export interface HypothesisLibrarySaveRequest {
+  strategy: HypothesisStrategySpec;
+  metrics?: Record<string, unknown>;
+  source?: Record<string, unknown>;
+  name?: string | null;
+  notes?: string;
+}
+
+export type MergeMode = "regime_switch" | "priority" | "vote" | "portfolio";
+
+export interface LibraryMergeRequest {
+  name: string;
+  mode: MergeMode;
+  components: Array<{
+    pattern_id: string;
+    weight: number;
+    role?: string;
+  }>;
+  notes?: string;
+}
+
 export interface LibraryAttachRequest {
   pattern_id: string;
   kind: AttachKind;
@@ -35,6 +56,30 @@ export interface LibraryAttachRequest {
 
 export async function saveToLibrary(req: LibrarySaveRequest): Promise<LibrarySaveResponse> {
   return api<LibrarySaveResponse>("POST", "/library/save", req);
+}
+
+export async function saveHypothesisToLibrary(
+  req: HypothesisLibrarySaveRequest,
+): Promise<LibrarySaveResponse> {
+  return api<LibrarySaveResponse>("POST", "/library/save-hypothesis", req);
+}
+
+export async function mergeLibraryStrategies(
+  req: LibraryMergeRequest,
+): Promise<LibrarySaveResponse> {
+  return api<LibrarySaveResponse>("POST", "/library/merge", req);
+}
+
+export async function exportLibraryHypothesisEa(patternId: string) {
+  return api<{
+    ok: boolean;
+    mq5_path: string;
+    set_path: string;
+    spec_path: string;
+    preferred_mq5_path?: string;
+    mt5_experts_folder?: string | null;
+    mt5_installed?: boolean;
+  }>("POST", `/library/${encodeURIComponent(patternId)}/export-hypothesis-ea`);
 }
 
 export async function listLibrary(): Promise<LibraryEntry[]> {

@@ -13,7 +13,7 @@ import {
   type JobRef,
   type PatternSummary,
 } from "../api/discovery";
-import { saveToLibrary } from "../api/library";
+import { saveHypothesisToLibrary, saveToLibrary } from "../api/library";
 import { exportHypothesisEa } from "../api/mql";
 import { openFolder } from "../api/system";
 import IndicatorsTable from "../components/IndicatorsTable";
@@ -281,20 +281,25 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportPath, setExportPath] = useState<string | null>(null);
+  const [busySaveId, setBusySaveId] = useState<string | null>(null);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const best = result.top_candidates[0] ?? null;
+
+  const strategyFromCandidate = (candidate: HypothesisCandidate): HypothesisStrategySpec => ({
+      strategy_id: candidate.strategy_id,
+      lineage: candidate.lineage,
+      hypothesis: candidate.hypothesis,
+      timeframe: normalizeHypothesisTimeframe(result.timeframe),
+      parameters: candidate.parameters,
+  });
 
   const exportCandidate = async (candidate: HypothesisCandidate) => {
     setBusyExportId(candidate.strategy_id);
     setExportNotice(null);
     setExportError(null);
     setExportPath(null);
-    const strategy: HypothesisStrategySpec = {
-      strategy_id: candidate.strategy_id,
-      lineage: candidate.lineage,
-      hypothesis: candidate.hypothesis,
-      timeframe: normalizeHypothesisTimeframe(result.timeframe),
-      parameters: candidate.parameters,
-    };
+    const strategy = strategyFromCandidate(candidate);
     try {
       const exported = await exportHypothesisEa({
         strategy,
@@ -313,6 +318,48 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
       setExportError(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusyExportId(null);
+    }
+  };
+
+  const saveCandidate = async (candidate: HypothesisCandidate) => {
+    setBusySaveId(candidate.strategy_id);
+    setSaveNotice(null);
+    setSaveError(null);
+    try {
+      const response = await saveHypothesisToLibrary({
+        strategy: strategyFromCandidate(candidate),
+        name: candidate.strategy_id,
+        metrics: {
+          trades: candidate.trades,
+          net_profit: candidate.net_profit,
+          profit_factor: candidate.profit_factor,
+          max_drawdown_pct: candidate.max_drawdown_pct,
+          challenge_score: candidate.challenge_score,
+          challenge_pass_rate: candidate.challenge_pass_rate,
+          challenge_active_pass_rate: candidate.challenge_active_pass_rate,
+          challenge_prop_fail_rate: candidate.challenge_prop_fail_rate,
+          median_days_to_target: candidate.median_days_to_target,
+          best_days_to_target: candidate.best_days_to_target,
+          risk_fraction: candidate.risk_fraction,
+          internal_daily_stop_pct: candidate.internal_daily_stop_pct,
+          max_trades_per_day: candidate.max_trades_per_day,
+        },
+        source: {
+          experiment_id: result.experiment_id,
+          dataset_id: result.dataset_id,
+          symbol: result.symbol,
+          timeframe: result.timeframe,
+          artifact_folder: result.artifact_folder,
+          summary_json: result.summary_json,
+        },
+      });
+      setSaveNotice(response.duplicate
+        ? `Updated ${response.entry.pattern_id} in Strategy Library.`
+        : `Saved ${response.entry.pattern_id} to Strategy Library.`);
+    } catch (e) {
+      setSaveError(`Save failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusySaveId(null);
     }
   };
 
@@ -442,6 +489,8 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
         </div>
       )}
       {exportError && <div className="alert alert-error" style={{ marginBottom: 16 }}>{exportError}</div>}
+      {saveNotice && <div className="alert alert-success" style={{ marginBottom: 16 }}>{saveNotice}</div>}
+      {saveError && <div className="alert alert-error" style={{ marginBottom: 16 }}>{saveError}</div>}
 
       {result.top_candidates.length > 0 && (
         <>
@@ -503,6 +552,15 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
                               title="Write a standalone MQL5 EA, .set file, and hypothesis JSON"
                             >
                               {busyExportId === candidate.strategy_id ? "Exporting..." : "Export EA"}
+                            </button>
+                            {" "}
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => saveCandidate(candidate)}
+                              disabled={busySaveId === candidate.strategy_id}
+                              title="Save this candidate to Strategy Library"
+                            >
+                              {busySaveId === candidate.strategy_id ? "Saving..." : "Save Strategy"}
                             </button>
                           </div>
                           <div className="full-row"><span className="kv-key">Fingerprint</span><span className="mono small">{candidate.strategy_fingerprint}</span></div>
