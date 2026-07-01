@@ -9,7 +9,7 @@
  *   • Funded:                 KPI + fan w/ floor + survival + breach donut + earnings hist
  *                              + earnings-vs-payouts scatter + payout count bar
  *                              + first payout hist + breach day hist + breach reasons bar
- *   • Long-term:              KPI + equity fan w/ benchmark + max DD histogram
+ *   • Overall:                KPI + equity fan w/ benchmark + max DD histogram
  *
  * All charts pull palette from CSS variables so they re-theme with the app.
  */
@@ -45,7 +45,7 @@ const PHASE_LABELS: Record<PhaseId, string> = {
   phase1:   "Phase 1 — Challenge",
   phase2:   "Phase 2 — Verification",
   funded:   "Funded Account",
-  longterm: "Long-term",
+  longterm: "Overall",
 };
 
 export default function MonteCarloDashboard() {

@@ -4,7 +4,7 @@ const PHASES = [
   ["phase1", "Phase 1 - Challenge"],
   ["phase2", "Phase 2 - Verification"],
   ["funded", "Funded Account"],
-  ["longterm", "Long-term"],
+  ["longterm", "Overall"],
 ] as const;
 
 function escapeHtml(value: unknown): string {

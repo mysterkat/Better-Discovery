@@ -202,7 +202,7 @@ export default function MonteCarloTab() {
         phase1_params: buildGroupParams("Phase 1"),
         phase2_params: buildGroupParams("Phase 2"),
         funded_params: buildGroupParams("Funded"),
-        longterm_params: buildGroupParams("Long-term"),
+        longterm_params: buildGroupParams("Overall"),
       };
       const ref = await runAllPhases(req);
       setJobId(ref.job_id);

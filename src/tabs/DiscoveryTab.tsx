@@ -189,8 +189,8 @@ export default function DiscoveryTab() {
   const [guidedParentsKept, setGuidedParentsKept] = useState("30");
   const [guidedChildrenPerParent, setGuidedChildrenPerParent] = useState("30");
   const [guidedExplorationPct, setGuidedExplorationPct] = useState("0.25");
-  const [parentMinProfitFactor, setParentMinProfitFactor] = useState("1.15");
-  const [finalMinProfitFactor, setFinalMinProfitFactor] = useState("1.25");
+  const [parentMinProfitFactor, setParentMinProfitFactor] = useState("1.20");
+  const [finalMinProfitFactor, setFinalMinProfitFactor] = useState("1.30");
   const [finalMinActivePassRate, setFinalMinActivePassRate] = useState("0.05");
   const [maxCandidateDrawdownPct, setMaxCandidateDrawdownPct] = useState("15");
   const [maxVariants, setMaxVariants] = useState("8000");
@@ -388,8 +388,8 @@ export default function DiscoveryTab() {
     if (hypothesisMode === "market_mind" && (!Number.isFinite(bias) || bias < 0 || bias > 1)) {
       return "Market Mind bias must be between 0 and 1.";
     }
-    if (["guided", "market_mind"].includes(searchMode) && guidedNums.some((value) => !Number.isFinite(value) || value < 0)) {
-      return "Evolution settings must be valid positive numbers.";
+    if (hypothesisMode === "manual" && families.includes("strategy_grammar") && guidedNums.some((value) => !Number.isFinite(value) || value < 0)) {
+      return "Guided grammar settings must be valid positive numbers.";
     }
     return null;
   };
@@ -843,14 +843,16 @@ export default function DiscoveryTab() {
       <div className="form-section">
         <div className="section-label">Search Quality</div>
         <span className="field-hint">
-          Market Mind and manual grammar mutate only profitable parents and keep a smaller exploration stream for fresh ideas.
+          Market Mind scans regime-biased grammar directly. Manual grammar can still use guided mutation; saved winners can be evolved later in Evolution Lab.
         </span>
         <div className="form-grid-2 hypothesis-grid" style={{ marginTop: 14 }}>
-          <div className="field">
-            <label className="field-label">Parent PF gate</label>
-            <input className="field-input" value={parentMinProfitFactor} onChange={(event) => setParentMinProfitFactor(event.target.value)} disabled={isRunning} inputMode="decimal" />
-            <span className="field-hint">Only profitable candidates above this PF are mutated.</span>
-          </div>
+          {hypothesisMode === "manual" && families.includes("strategy_grammar") && (
+            <div className="field">
+              <label className="field-label">Parent PF gate</label>
+              <input className="field-input" value={parentMinProfitFactor} onChange={(event) => setParentMinProfitFactor(event.target.value)} disabled={isRunning} inputMode="decimal" />
+              <span className="field-hint">Only profitable manual-grammar candidates above this PF are mutated.</span>
+            </div>
+          )}
           <div className="field">
             <label className="field-label">Final PF gate</label>
             <input className="field-input" value={finalMinProfitFactor} onChange={(event) => setFinalMinProfitFactor(event.target.value)} disabled={isRunning} inputMode="decimal" />
@@ -865,7 +867,7 @@ export default function DiscoveryTab() {
             <input className="field-input" value={maxCandidateDrawdownPct} onChange={(event) => setMaxCandidateDrawdownPct(event.target.value)} disabled={isRunning} inputMode="decimal" />
           </div>
         </div>
-        {hypothesisMode === "market_mind" || families.includes("strategy_grammar") ? (
+        {hypothesisMode === "manual" && families.includes("strategy_grammar") ? (
           <div className="form-grid-2 hypothesis-grid" style={{ marginTop: 10 }}>
             <div className="field">
               <label className="field-label">Initial scan fraction</label>

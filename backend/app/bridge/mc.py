@@ -130,14 +130,14 @@ MC_PARAM_META: dict[str, MCParamMeta] = {
                                        "Overrides Balance Reset when on. Floor ratchets up to a fresh % "
                                        "of the new equity. Default OFF."),
     "FD_MAX_SIM_DAYS":    MCParamMeta("Max Sim Days",       "Funded", "int", min=30, max=1000, step=10),
-    # ── Long-term ───────────────────────────────────────────────────────────
-    "LT_DAYS":            MCParamMeta("Sim Days",           "Long-term", "int",
+    # ── Overall ─────────────────────────────────────────────────────────────
+    "LT_DAYS":            MCParamMeta("Sim Days",           "Overall", "int",
                                        "Simulation horizon in trading days", min=30, max=2520, step=21),
-    "LT_SIMS":            MCParamMeta("Simulations",        "Long-term", "int",
-                                       "Paths for the long-term run", min=1000, max=1_000_000, step=1000),
-    "LT_RUIN_PCT":        MCParamMeta("Ruin Level",         "Long-term", "float",
+    "LT_SIMS":            MCParamMeta("Simulations",        "Overall", "int",
+                                       "Paths for the overall run", min=1000, max=1_000_000, step=1000),
+    "LT_RUIN_PCT":        MCParamMeta("Ruin Level",         "Overall", "float",
                                        "Account considered ruined below this drawdown %", min=0.05, max=0.99, step=0.01),
-    "LT_BENCHMARK_TICKER":MCParamMeta("Benchmark Ticker",  "Long-term", "str",
+    "LT_BENCHMARK_TICKER":MCParamMeta("Benchmark Ticker",  "Overall", "str",
                                        "Yahoo Finance ticker for comparison (e.g. ^GSPC). Leave blank to skip."),
 }
 

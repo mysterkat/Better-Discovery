@@ -257,8 +257,8 @@ def test_hypothesis_discovery_defaults_to_guided_search() -> None:
 
     assert request.search_mode == "market_mind"
     assert request.market_mind_bias_pct == pytest.approx(0.70)
-    assert request.parent_min_profit_factor == pytest.approx(1.15)
-    assert request.final_min_profit_factor == pytest.approx(1.25)
+    assert request.parent_min_profit_factor == pytest.approx(1.20)
+    assert request.final_min_profit_factor == pytest.approx(1.30)
     assert request.max_variants == 5_000
 
 

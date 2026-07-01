@@ -231,6 +231,9 @@ def _input_values(
         "InpMaxTradesPerDay": max_trades_per_day,
         "InpMaxSpreadPoints": max_spread_points,
         "InpSlippagePoints": 20,
+        "InpWriteStatusHeartbeat": True,
+        "InpStatusHeartbeatSeconds": 15,
+        "InpStatusFolder": "BetterDiscovery\\ea_status",
         "InpServerUtcOffsetHours": 0,
         "InpDirectionMode": direction_mode,
         "InpVolatilityFilter": volatility_filter,
@@ -991,11 +994,62 @@ double g_day_start_equity = 0.0;
 int g_day_key = -1;
 int g_trades_today = 0;
 int g_last_signal_day = -1;
+datetime g_last_status_write = 0;
 
 /*
 Embedded hypothesis spec:
 {payload}
 */
+
+string JsonEscape(string value)
+{{
+   StringReplace(value, "\\", "\\\\");
+   StringReplace(value, "\"", "\\\"");
+   StringReplace(value, "\r", " ");
+   StringReplace(value, "\n", " ");
+   return value;
+}}
+
+int OpenTradeCount()
+{{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {{
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagic)
+         count++;
+   }}
+   return count;
+}}
+
+void WriteStatusHeartbeat(const string state)
+{{
+   if(!InpWriteStatusHeartbeat) return;
+   datetime now = TimeCurrent();
+   if(state == "running" && g_last_status_write > 0 && (now - g_last_status_write) < InpStatusHeartbeatSeconds)
+      return;
+   FolderCreate(InpStatusFolder, FILE_COMMON);
+   string path = InpStatusFolder + "\\\\" + IntegerToString((int)InpMagic) + ".json";
+   int handle = FileOpen(path, FILE_WRITE | FILE_TXT | FILE_COMMON);
+   if(handle == INVALID_HANDLE) return;
+   string payload = "{{"
+      + "\\\"strategy_id\\\":\\\"" + JsonEscape(InpStrategyId) + "\\\","
+      + "\\\"lineage\\\":\\\"" + JsonEscape(InpLineage) + "\\\","
+      + "\\\"hypothesis\\\":\\\"" + JsonEscape(InpHypothesis) + "\\\","
+      + "\\\"symbol\\\":\\\"" + JsonEscape(_Symbol) + "\\\","
+      + "\\\"timeframe\\\":" + IntegerToString((int)InpSignalTimeframe) + ","
+      + "\\\"magic\\\":" + IntegerToString((int)InpMagic) + ","
+      + "\\\"state\\\":\\\"" + JsonEscape(state) + "\\\","
+      + "\\\"open_trades\\\":" + IntegerToString(OpenTradeCount()) + ","
+      + "\\\"trades_today\\\":" + IntegerToString(g_trades_today) + ","
+      + "\\\"last_signal_day\\\":" + IntegerToString(g_last_signal_day) + ","
+      + "\\\"heartbeat_time\\\":\\\"" + TimeToString(now, TIME_DATE | TIME_SECONDS) + "\\\""
+      + "}}";
+   FileWriteString(handle, payload);
+   FileClose(handle);
+   g_last_status_write = now;
+}}
 
 int OnInit()
 {{
@@ -1017,11 +1071,13 @@ int OnInit()
    hH4Ema200 = iMA(_Symbol, PERIOD_H4, 200, 0, MODE_EMA, PRICE_CLOSE);
    if(hAtr == INVALID_HANDLE || hRsi == INVALID_HANDLE || hEma20 == INVALID_HANDLE || hEma50 == INVALID_HANDLE || hEma200 == INVALID_HANDLE)
       return INIT_FAILED;
+   WriteStatusHeartbeat("initialized");
    return INIT_SUCCEEDED;
 }}
 
 void OnDeinit(const int reason)
 {{
+   WriteStatusHeartbeat("stopped");
    IndicatorRelease(hAtr); IndicatorRelease(hRsi); IndicatorRelease(hMacd);
    IndicatorRelease(hEma20); IndicatorRelease(hEma50); IndicatorRelease(hEma200);
    IndicatorRelease(hH1Ema20); IndicatorRelease(hH1Ema50); IndicatorRelease(hH1Ema200);
@@ -1583,6 +1639,7 @@ void TryOpen()
 
 void OnTick()
 {{
+   WriteStatusHeartbeat("running");
    ManagePosition();
    if(IsNewSignalBar()) TryOpen();
 }}

@@ -656,8 +656,8 @@ class HypothesisResearchService:
                     add_results([result])
                     write_checkpoint(evaluated, generation_index)
 
-            generation_label = "Market mind" if request.search_mode == "market_mind" else "Guided"
-            if request.search_mode in {"guided", "market_mind"} and specs:
+            generation_label = "Guided"
+            if request.search_mode == "guided" and specs:
                 initial_count = min(
                     len(specs),
                     max(
@@ -783,6 +783,7 @@ class HypothesisResearchService:
                     })
                     write_checkpoint(evaluated_count, generation)
             else:
+                scan_label = "Market Mind edge scan" if request.search_mode == "market_mind" else "Fixed family scan"
                 results, used = self._evaluate_specs(
                     request,
                     specs,
@@ -790,7 +791,7 @@ class HypothesisResearchService:
                     base_frame,
                     grammar_frames,
                     min_required_trades,
-                    label=f"Fixed family scan ({workers} workers)",
+                    label=f"{scan_label} ({workers} workers)",
                     completed_offset=0,
                     total_budget=len(specs),
                     current_job=current_job,
@@ -798,7 +799,7 @@ class HypothesisResearchService:
                     workers=workers,
                     generation_index=0,
                     generation_total=0,
-                    generation_phase="fixed family scan",
+                    generation_phase=scan_label.lower(),
                     checkpoint=live_checkpoint_result,
                 )
                 evaluated_count = used

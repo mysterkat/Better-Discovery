@@ -5,9 +5,11 @@ import {
   listSavedReplayExperiments,
   runLocalRobustness,
   runSavedStrategyReplay,
+  runStrategyValidation,
   type ReplayExperiment,
   type RobustnessResult,
   type SavedStrategyReplayResult,
+  type StrategyValidationResult,
 } from "../api/research";
 import { compareMc, type McCompareResult } from "../api/mc";
 import JobProgress from "../components/JobProgress";
@@ -51,11 +53,27 @@ export default function ResearchLabTab() {
   const [mt5Report, setMt5Report] = useState("");
   const [compareJobId, setCompareJobId] = useState<string | null>(null);
   const [comparison, setComparison] = useState<McCompareResult | null>(null);
+  const [validationJobId, setValidationJobId] = useState<string | null>(null);
+  const [validation, setValidation] = useState<StrategyValidationResult | null>(null);
+  const [oosFraction, setOosFraction] = useState(0.3);
+  const [walkTrainMonths, setWalkTrainMonths] = useState(24);
+  const [walkTestMonths, setWalkTestMonths] = useState(6);
+  const [walkMutationSamples, setWalkMutationSamples] = useState(12);
+  const [stabilitySamples, setStabilitySamples] = useState(24);
+  const [stabilitySeed, setStabilitySeed] = useState(42);
+  const [minProfitFactor, setMinProfitFactor] = useState(1.3);
+  const [minSharpe, setMinSharpe] = useState(1.0);
+  const [validationMaxDrawdown, setValidationMaxDrawdown] = useState(12);
+  const [minWalkPassRate, setMinWalkPassRate] = useState(0.6);
+  const [minStabilityPassRate, setMinStabilityPassRate] = useState(0.6);
+  const [validationMinTrades, setValidationMinTrades] = useState(100);
   const [error, setError] = useState<string | null>(null);
 
   const setActiveJob = useJobs((state) => state.setActive);
   const job = useJobs((state) => (jobId ? state.jobs[jobId] : undefined));
+  const validationJob = useJobs((state) => (validationJobId ? state.jobs[validationJobId] : undefined));
   const running = job?.status === "pending" || job?.status === "running";
+  const validationRunning = validationJob?.status === "pending" || validationJob?.status === "running";
   const hypothesisEntries = useMemo(
     () => library.filter((entry) => {
       const metadata = entry.metadata as Record<string, unknown>;
@@ -88,6 +106,8 @@ export default function ResearchLabTab() {
       .catch((reason: unknown) => setError(String(reason)));
     const active = useJobs.getState().activeByKind.saved_strategy_replay;
     if (active) setJobId(active);
+    const activeValidation = useJobs.getState().activeByKind.strategy_validation;
+    if (activeValidation) setValidationJobId(activeValidation);
     refreshRecent();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -165,6 +185,63 @@ export default function ResearchLabTab() {
     }
   };
 
+  const runValidation = async () => {
+    const patternId = selectedStrategy[0];
+    if (!datasetId || !patternId) {
+      setError("Select a dataset and one saved hypothesis strategy.");
+      return;
+    }
+    setError(null);
+    setValidation(null);
+    try {
+      const reference = await runStrategyValidation({
+        dataset_id: datasetId,
+        pattern_id: patternId,
+        date_from: `${dateFrom}T00:00:00Z`,
+        date_to: `${dateTo}T00:00:00Z`,
+        initial_balance: initialBalance,
+        lot_size: lotSize,
+        contract_size: contractSize,
+        commission_per_lot_round_turn: commission,
+        slippage_price_units: slippage,
+        oos_fraction: oosFraction,
+        walk_train_months: walkTrainMonths,
+        walk_test_months: walkTestMonths,
+        walk_mutation_samples: walkMutationSamples,
+        stability_samples: stabilitySamples,
+        stability_seed: stabilitySeed,
+        min_profit_factor: minProfitFactor,
+        min_sharpe: minSharpe,
+        max_drawdown_pct: validationMaxDrawdown,
+        min_walk_forward_pass_rate: minWalkPassRate,
+        min_stability_pass_rate: minStabilityPassRate,
+        min_trades: validationMinTrades,
+      });
+      setValidationJobId(reference.job_id);
+      setActiveJob("strategy_validation", reference.job_id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const useValidationOosLedger = () => {
+    const oos = validation?.is_oos.out_of_sample;
+    if (!validation || !oos?.ledger_parquet) return;
+    setResult({
+      experiment_id: validation.experiment_id,
+      pattern_id: validation.pattern_id,
+      strategy_id: validation.strategy_id,
+      library_name: `${validation.library_name} OOS`,
+      strategy_fingerprint: "",
+      dataset_id: validation.dataset_id,
+      dataset_role: "validation",
+      ledger_csv: oos.ledger_csv ?? "",
+      ledger_parquet: oos.ledger_parquet,
+      metrics: oos.metrics,
+      gate: { decision: oos.gate.decision === "pass" ? "promote" : "reject", checks: oos.gate.checks },
+    });
+  };
+
   return (
     <div className="tab-content research-lab">
       <div className="tab-header">
@@ -239,8 +316,94 @@ export default function ResearchLabTab() {
         </section>
       </div>
 
+      <section className="merger-panel validation-panel">
+        <h3>Validation Pipeline</h3>
+        <p className="field-hint">Run this after discovery on saved strategies you actually like. Monte Carlo stays separate; use the OOS ledger handoff after this passes.</p>
+        <div className="research-controls">
+          <label>OOS fraction <input className="field-input field-sm" type="number" min="0.1" max="0.6" step="0.05" value={oosFraction} onChange={(event) => setOosFraction(Number(event.target.value))} /></label>
+          <label>WF train months <input className="field-input field-sm" type="number" min="3" max="120" value={walkTrainMonths} onChange={(event) => setWalkTrainMonths(Number(event.target.value))} /></label>
+          <label>WF test months <input className="field-input field-sm" type="number" min="1" max="24" value={walkTestMonths} onChange={(event) => setWalkTestMonths(Number(event.target.value))} /></label>
+          <label>WF mutations <input className="field-input field-sm" type="number" min="0" max="100" value={walkMutationSamples} onChange={(event) => setWalkMutationSamples(Number(event.target.value))} /></label>
+          <label>Stability samples <input className="field-input field-sm" type="number" min="0" max="200" value={stabilitySamples} onChange={(event) => setStabilitySamples(Number(event.target.value))} /></label>
+          <label>Stability seed <input className="field-input field-sm" type="number" min="0" value={stabilitySeed} onChange={(event) => setStabilitySeed(Number(event.target.value))} /></label>
+          <label>Min PF <input className="field-input field-sm" type="number" min="1" max="5" step="0.05" value={minProfitFactor} onChange={(event) => setMinProfitFactor(Number(event.target.value))} /></label>
+          <label>Min Sharpe <input className="field-input field-sm" type="number" min="-5" max="10" step="0.1" value={minSharpe} onChange={(event) => setMinSharpe(Number(event.target.value))} /></label>
+          <label>Max DD % <input className="field-input field-sm" type="number" min="1" max="100" step="0.5" value={validationMaxDrawdown} onChange={(event) => setValidationMaxDrawdown(Number(event.target.value))} /></label>
+          <label>WF pass rate <input className="field-input field-sm" type="number" min="0" max="1" step="0.05" value={minWalkPassRate} onChange={(event) => setMinWalkPassRate(Number(event.target.value))} /></label>
+          <label>Stability pass <input className="field-input field-sm" type="number" min="0" max="1" step="0.05" value={minStabilityPassRate} onChange={(event) => setMinStabilityPassRate(Number(event.target.value))} /></label>
+          <label>Min trades <input className="field-input field-sm" type="number" min="1" value={validationMinTrades} onChange={(event) => setValidationMinTrades(Number(event.target.value))} /></label>
+        </div>
+        <button className="btn btn-primary" onClick={runValidation} disabled={validationRunning || !datasetId || selectedStrategy.length !== 1}>
+          {validationRunning ? "Validating..." : "Run Validation Pipeline"}
+        </button>
+      </section>
+
       {error && <div className="alert alert-error">{error}</div>}
       <JobProgress jobId={jobId} onDone={(value) => { setResult(value as SavedStrategyReplayResult); refreshRecent(); }} onError={setError} />
+      <JobProgress jobId={validationJobId} onDone={(value) => setValidation(value as StrategyValidationResult)} onError={setError} />
+
+      {validation && (
+        <div className="validation-result">
+          <div className={`comparison-verdict ${validation.overall.decision === "pass" ? "pass" : "block"}`}>
+            <span>Overall validation</span><strong>{validation.overall.decision.toUpperCase()}</strong>
+          </div>
+          <div className="replay-kpis">
+            <div><span>OOS PF</span><strong>{fmt(validation.is_oos.out_of_sample.metrics.profit_factor)}</strong></div>
+            <div><span>OOS Sharpe</span><strong>{fmt(validation.is_oos.out_of_sample.metrics.sharpe)}</strong></div>
+            <div><span>OOS Net</span><strong>{fmt(validation.is_oos.out_of_sample.metrics.net_profit)}</strong></div>
+            <div><span>OOS DD</span><strong>{fmt(validation.is_oos.out_of_sample.metrics.max_drawdown_pct)}%</strong></div>
+            <div><span>WF pass</span><strong>{fmt(validation.walk_forward.pass_rate * 100, 0)}%</strong></div>
+            <div><span>Stability</span><strong>{fmt(validation.parameter_stability.pass_rate * 100, 0)}%</strong></div>
+          </div>
+          <div className="ledger-paths">
+            <div><span>Validation folder</span><code>{validation.artifact_folder}</code></div>
+            {validation.is_oos.out_of_sample.ledger_parquet && <div><span>OOS ledger</span><code>{validation.is_oos.out_of_sample.ledger_parquet}</code></div>}
+          </div>
+          <button className="btn btn-secondary" onClick={useValidationOosLedger} disabled={!validation.is_oos.out_of_sample.ledger_parquet}>
+            Use OOS Ledger For Robustness / MT5 Compare
+          </button>
+
+          <h3>Walk Forward</h3>
+          <table className="data-table">
+            <thead><tr><th>Fold</th><th>Test</th><th>PF</th><th>Sharpe</th><th>Net</th><th>DD %</th><th>Gate</th></tr></thead>
+            <tbody>
+              {validation.walk_forward.folds.map((fold) => (
+                <tr key={fold.fold}>
+                  <td>{fold.fold}</td>
+                  <td>{fold.test_from.slice(0, 10)} to {fold.test_to.slice(0, 10)}</td>
+                  <td>{fmt(fold.test_metrics.profit_factor)}</td>
+                  <td>{fmt(fold.test_metrics.sharpe)}</td>
+                  <td>{fmt(fold.test_metrics.net_profit)}</td>
+                  <td>{fmt(fold.test_metrics.max_drawdown_pct)}</td>
+                  <td>{fold.gate.decision}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <h3>Regime Breakdown</h3>
+          <div className="merger-layout">
+            {Object.entries(validation.regime_breakdown).map(([name, rows]) => (
+              <section className="merger-panel" key={name}>
+                <h3>{name.replace("_", " ")}</h3>
+                <table className="data-table">
+                  <thead><tr><th>Bucket</th><th>Trades</th><th>PF</th><th>Net</th></tr></thead>
+                  <tbody>
+                    {rows.slice(0, 8).map((row) => (
+                      <tr key={row.bucket}>
+                        <td>{row.bucket}</td>
+                        <td>{fmt(row.metrics.trades, 0)}</td>
+                        <td>{fmt(row.metrics.profit_factor)}</td>
+                        <td>{fmt(row.metrics.net_profit)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </section>
+            ))}
+          </div>
+        </div>
+      )}
 
       {result && (
         <>

@@ -36,7 +36,7 @@ const MC_GROUPS = [
   "Phase 1",
   "Phase 2",
   "Funded",
-  "Long-term",
+  "Overall",
 ];
 
 type TopTab = "discovery" | "mc";

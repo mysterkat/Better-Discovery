@@ -13,6 +13,7 @@ from ..hypothesis.models import HypothesisBarRequest, HypothesisDiscoveryRequest
 from ..hypothesis.service import HypothesisResearchService
 from ..paths import DEFAULT_LIBRARY
 from ..research.service import RESEARCH
+from ..research.validation_pipeline import StrategyValidationPipeline, StrategyValidationRequest
 from ..local_replay.robustness import RobustnessRequest
 from ..jobs.manager import JOBS
 from ..jobs.runners import run_in_thread
@@ -20,6 +21,7 @@ from ..schemas.common import JobRef
 
 router = APIRouter(prefix="/research")
 HYPOTHESIS = HypothesisResearchService()
+VALIDATION = StrategyValidationPipeline(HYPOTHESIS)
 
 
 @router.post("/local-robustness", response_model=JobRef)
@@ -132,6 +134,51 @@ def saved_strategy_replay(req: SavedStrategyReplayRequest) -> JobRef:
         return result
 
     run_in_thread(job, run)
+    return JobRef(job_id=job.job_id, status=job.status)
+
+
+class SavedStrategyValidationRequest(BaseModel):
+    dataset_id: str
+    pattern_id: str
+    date_from: datetime
+    date_to: datetime
+    initial_balance: float = Field(default=10_000.0, gt=0)
+    lot_size: float = Field(default=0.1, gt=0)
+    contract_size: float = Field(default=100.0, gt=0)
+    commission_per_lot_round_turn: float = Field(default=7.0, ge=0)
+    slippage_price_units: float = Field(default=0.10, ge=0)
+    oos_fraction: float = Field(default=0.30, ge=0.10, le=0.60)
+    walk_train_months: int = Field(default=24, ge=3, le=120)
+    walk_test_months: int = Field(default=6, ge=1, le=24)
+    walk_mutation_samples: int = Field(default=12, ge=0, le=100)
+    stability_samples: int = Field(default=24, ge=0, le=200)
+    stability_seed: int = Field(default=42, ge=0, le=2_147_483_647)
+    min_profit_factor: float = Field(default=1.30, ge=1.0, le=5.0)
+    min_sharpe: float = Field(default=1.0, ge=-5.0, le=10.0)
+    max_drawdown_pct: float = Field(default=12.0, gt=0.0, le=100.0)
+    min_walk_forward_pass_rate: float = Field(default=0.60, ge=0.0, le=1.0)
+    min_stability_pass_rate: float = Field(default=0.60, ge=0.0, le=1.0)
+    min_trades: int = Field(default=100, ge=1)
+
+
+@router.post("/strategy-validation", response_model=JobRef)
+def strategy_validation(req: SavedStrategyValidationRequest) -> JobRef:
+    strategy, metadata = _load_saved_hypothesis(req.pattern_id)
+    validation_request = StrategyValidationRequest(
+        **req.model_dump(),
+        strategy=strategy,
+        library_name=metadata.get("name") or req.pattern_id,
+    )
+    job = JOBS.create(
+        kind="strategy_validation",
+        meta={
+            "dataset_id": req.dataset_id,
+            "pattern_id": req.pattern_id,
+            "strategy_id": strategy.strategy_id,
+            "timeframe": strategy.timeframe,
+        },
+    )
+    run_in_thread(job, lambda: VALIDATION.run(validation_request))
     return JobRef(job_id=job.job_id, status=job.status)
 
 
