@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from datetime import datetime
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ..hypothesis.models import HypothesisDiscoveryRequest
+from ..hypothesis.models import HypothesisBarRequest, HypothesisDiscoveryRequest, HypothesisSpec
 from ..hypothesis.service import HypothesisResearchService
-from ..research.models import BacktestSpec, MT5Environment, PromotionPolicy
+from ..paths import DEFAULT_LIBRARY
 from ..research.service import RESEARCH
-from ..local_replay.models import ReplayRequest
 from ..local_replay.robustness import RobustnessRequest
 from ..jobs.manager import JOBS
 from ..jobs.runners import run_in_thread
@@ -19,16 +20,6 @@ from ..schemas.common import JobRef
 
 router = APIRouter(prefix="/research")
 HYPOTHESIS = HypothesisResearchService()
-
-
-@router.post("/local-replay", response_model=JobRef)
-def local_replay(req: ReplayRequest) -> JobRef:
-    job = JOBS.create(
-        kind="local_replay",
-        meta={"dataset_id": req.dataset_id, "symbol": req.symbol, "timeframe": req.timeframe},
-    )
-    run_in_thread(job, lambda: RESEARCH.run_local_replay(req))
-    return JobRef(job_id=job.job_id, status=job.status)
 
 
 @router.post("/local-robustness", response_model=JobRef)
@@ -55,34 +46,21 @@ def hypothesis_discovery(req: HypothesisDiscoveryRequest) -> JobRef:
     return JobRef(job_id=job.job_id, status=job.status)
 
 
-class PathRequest(BaseModel):
-    path: str
-
-
 class PortableSetupRequest(BaseModel):
     destination: str | None = None
 
 
-class DiscoveryRequest(BaseModel):
-    overrides: dict[str, Any] = Field(default_factory=dict)
-
-
-class VariantRequest(BaseModel):
-    set_path: str
-    parameter_overrides: dict[str, str | int | float | bool]
-    hypothesis: str
-
-
-class ParseReportRequest(BaseModel):
-    report_path: str
-    policy: PromotionPolicy = Field(default_factory=PromotionPolicy)
-
-
-class PipelineRequest(BaseModel):
-    set_path: str
-    backtest: BacktestSpec
-    environment: MT5Environment | None = None
-    policy: PromotionPolicy = Field(default_factory=PromotionPolicy)
+class SavedStrategyReplayRequest(BaseModel):
+    dataset_id: str
+    pattern_id: str
+    date_from: datetime
+    date_to: datetime
+    dataset_role: Literal["validation", "walk_forward", "lockbox"] = "validation"
+    initial_balance: float = Field(default=10_000.0, gt=0)
+    lot_size: float = Field(default=0.1, gt=0)
+    contract_size: float = Field(default=100.0, gt=0)
+    commission_per_lot_round_turn: float = Field(default=7.0, ge=0)
+    slippage_price_units: float = Field(default=0.10, ge=0)
 
 
 def _run(call):
@@ -94,52 +72,72 @@ def _run(call):
         raise HTTPException(502, str(exc)) from exc
 
 
+def _load_saved_hypothesis(pattern_id: str) -> tuple[HypothesisSpec, dict[str, Any]]:
+    folder = (DEFAULT_LIBRARY / pattern_id).resolve()
+    try:
+        folder.relative_to(DEFAULT_LIBRARY.resolve())
+    except ValueError as exc:
+        raise HTTPException(400, "invalid library pattern id") from exc
+    metadata_path = folder / "metadata.json"
+    if not metadata_path.is_file():
+        raise HTTPException(404, f"saved strategy not found: {pattern_id}")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(500, f"saved strategy metadata unreadable: {pattern_id}") from exc
+    raw_strategy = metadata.get("hypothesis_strategy")
+    if not isinstance(raw_strategy, dict):
+        raise HTTPException(422, "saved strategy does not contain hypothesis strategy JSON")
+    try:
+        return HypothesisSpec.model_validate(raw_strategy), metadata
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.get("/status")
 def status() -> dict:
     return _run(RESEARCH.status)
 
 
+@router.post("/saved-strategy-replay", response_model=JobRef)
+def saved_strategy_replay(req: SavedStrategyReplayRequest) -> JobRef:
+    strategy, metadata = _load_saved_hypothesis(req.pattern_id)
+    request = HypothesisBarRequest(
+        dataset_id=req.dataset_id,
+        strategy=strategy,
+        date_from=req.date_from,
+        date_to=req.date_to,
+        dataset_role=req.dataset_role,
+        initial_balance=req.initial_balance,
+        lot_size=req.lot_size,
+        contract_size=req.contract_size,
+        commission_per_lot_round_turn=req.commission_per_lot_round_turn,
+        slippage_price_units=req.slippage_price_units,
+    )
+    job = JOBS.create(
+        kind="saved_strategy_replay",
+        meta={
+            "dataset_id": req.dataset_id,
+            "pattern_id": req.pattern_id,
+            "strategy_id": strategy.strategy_id,
+            "timeframe": strategy.timeframe,
+        },
+    )
+
+    def run() -> dict[str, Any]:
+        result = HYPOTHESIS.run(request)
+        result["pattern_id"] = req.pattern_id
+        result["strategy_id"] = strategy.strategy_id
+        result["library_name"] = metadata.get("name") or req.pattern_id
+        return result
+
+    run_in_thread(job, run)
+    return JobRef(job_id=job.job_id, status=job.status)
+
+
 @router.post("/mt5/setup-portable")
 def setup_portable_mt5(req: PortableSetupRequest) -> dict:
     return _run(lambda: RESEARCH.setup_portable_mt5(req.destination))
-
-
-@router.post("/discovery")
-def run_discovery(req: DiscoveryRequest) -> dict:
-    return _run(lambda: RESEARCH.run_discovery(req.overrides))
-
-
-@router.get("/candidates")
-def candidates(root: str | None = None) -> list[dict]:
-    return _run(lambda: RESEARCH.list_candidates(root))
-
-
-@router.post("/strategies/import")
-def import_strategy(req: PathRequest) -> dict:
-    return _run(lambda: RESEARCH.import_strategy(req.path))
-
-
-@router.post("/strategies/variant")
-def create_variant(req: VariantRequest) -> dict:
-    return _run(
-        lambda: RESEARCH.create_variant(
-            req.set_path, req.parameter_overrides, req.hypothesis
-        )
-    )
-
-
-@router.post("/reports/parse")
-def parse_report(req: ParseReportRequest) -> dict:
-    return _run(lambda: RESEARCH.parse_report(req.report_path, req.policy))
-
-
-@router.post("/pipeline")
-def run_pipeline(req: PipelineRequest) -> dict:
-    return _run(
-        lambda: RESEARCH.run_pipeline(
-            req.set_path, req.backtest, req.environment, req.policy
-        )
-    )
 
 
 @router.get("/experiments")

@@ -31,6 +31,7 @@ from ..schemas.library import (
     HypothesisLibrarySaveRequest,
     LibraryAttachRequest,
     LibraryEntry,
+    LibraryEvolutionRequest,
     LibraryMergeRequest,
     LibrarySaveRequest,
     LibrarySaveResponse,
@@ -302,6 +303,62 @@ def library_export_hypothesis_ea(pattern_id: str) -> dict:
         if source.is_file():
             shutil.copyfile(source, folder / target_name)
     return {"ok": True, **result}
+
+
+@router.post("/library/{pattern_id}/evolve")
+def library_evolve(pattern_id: str, req: LibraryEvolutionRequest) -> dict:
+    """Create nearby child strategies from a saved hypothesis strategy."""
+    entry = _entry_or_404(pattern_id)
+    raw_strategy = entry.metadata.get("hypothesis_strategy")
+    if not isinstance(raw_strategy, dict):
+        raise HTTPException(422, "this library entry does not contain an evolvable hypothesis strategy")
+    try:
+        from ..hypothesis.grammar import mutate_hypothesis
+        from ..hypothesis.models import HypothesisSpec
+
+        parent = HypothesisSpec.model_validate(raw_strategy)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    children: list[LibraryEntry] = []
+    for index in range(req.child_count):
+        child = mutate_hypothesis(
+            parent,
+            child_index=index,
+            generation=req.generation,
+            seed=req.seed,
+        )
+        child_id = _safe_hypothesis_id(child.strategy_id)
+        folder = _entry_dir(child_id)
+        metadata = {
+            "__kind": "hypothesis",
+            "name": child.strategy_id,
+            "notes": req.notes,
+            "source": {
+                "type": "evolution",
+                "parent_pattern_id": pattern_id,
+                "parent_strategy_id": parent.strategy_id,
+                "generation": req.generation,
+                "seed": req.seed,
+                "child_index": index,
+            },
+            "metrics": {},
+            "hypothesis_strategy": child.model_dump(mode="json"),
+        }
+        _write_metadata(folder, metadata)
+        (folder / "strategy.hypothesis.json").write_text(
+            child.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        child_entry = _read_entry(folder)
+        if child_entry is not None:
+            children.append(child_entry)
+    return {
+        "ok": True,
+        "parent_pattern_id": pattern_id,
+        "created": len(children),
+        "children": [entry.model_dump(mode="json") for entry in children],
+    }
 
 
 @router.get("/library/list", response_model=list[LibraryEntry])

@@ -6,15 +6,13 @@ export type McPhase = "phase1" | "phase2" | "funded" | "longterm";
 export interface McRunRequest {
   phase: McPhase;
   pnl?: number[];
-  pnl_csv_path?: string;
   pnl_split?: string;
   params?: Record<string, unknown>;
 }
 
 export interface McRunAllRequest {
   pnl?: number[];
-  data_source?: "tradingview" | "mt5_html" | "local_ledger";
-  pnl_csv_path?: string;       // TradingView CSV
+  data_source?: "mt5_html" | "local_ledger";
   file_path_html?: string;     // MT5 Strategy Tester HTML
   local_ledger_path?: string;  // Local replay closed-trade ledger
   pnl_split?: string;

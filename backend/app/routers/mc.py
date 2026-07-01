@@ -11,7 +11,6 @@ from __future__ import annotations
 import numpy as np
 from fastapi import APIRouter, HTTPException
 
-from ..bridge import data_import as di_bridge
 from ..bridge import mc as mc_bridge
 from ..jobs.manager import JOBS
 from ..jobs.runners import run_in_thread
@@ -33,18 +32,13 @@ def _resolve_pnl_all(req: MCRunAllRequest) -> np.ndarray:
         if not req.local_ledger_path:
             raise HTTPException(400, "local_ledger_path is required for data_source='local_ledger'")
         return mc_bridge.load_daily_pnl("local_ledger", req.local_ledger_path)
-    # tradingview (default)
-    if not req.pnl_csv_path:
-        raise HTTPException(400, "pnl_csv_path is required for data_source='tradingview'")
-    return mc_bridge.load_daily_pnl("tradingview", req.pnl_csv_path)
+    raise HTTPException(400, "data_source must be 'mt5_html' or 'local_ledger'")
 
 
 def _resolve_pnl(req: MCRunRequest) -> np.ndarray:
     if req.pnl is not None:
         return np.asarray(req.pnl, dtype=float)
-    if req.pnl_csv_path:
-        return di_bridge.load_csv_as_daily_pnl(req.pnl_csv_path, split_filter=req.pnl_split)
-    raise HTTPException(400, "either 'pnl' or 'pnl_csv_path' is required")
+    raise HTTPException(400, "'pnl' is required for single-phase Monte Carlo runs")
 
 
 @router.post("/mc/run", response_model=JobRef)
@@ -80,7 +74,7 @@ def mc_run_all(req: MCRunAllRequest) -> JobRef:
     file_for_regime = (
         req.file_path_html if req.data_source == "mt5_html"
         else req.local_ledger_path if req.data_source == "local_ledger"
-        else req.pnl_csv_path
+        else None
     )
     if file_for_regime:
         regime_data = mc_bridge.compute_regime_from_file(req.data_source, file_for_regime)

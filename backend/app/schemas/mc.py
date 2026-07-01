@@ -12,9 +12,7 @@ Phase = Literal["phase1", "phase2", "funded", "longterm"]
 
 class MCRunRequest(BaseModel):
     phase: Phase = "phase1"
-    # One of pnl (inline list) or pnl_csv_path must be provided.
     pnl: Optional[list[float]] = None
-    pnl_csv_path: Optional[str] = None
     pnl_split: str = "test"
     params: dict[str, Any] = Field(default_factory=dict)
     # wait=True blocks up to wait_timeout_s for the job to finish, then returns
@@ -26,9 +24,7 @@ class MCRunRequest(BaseModel):
 class MCRunAllRequest(BaseModel):
     """Run all four phases in one job using shared pre-drawn samples."""
     pnl: Optional[list[float]] = None
-    # data_source selects the loader: "tradingview" = CSV, "mt5_html" = MT5 HTML report
-    data_source: str = "tradingview"
-    pnl_csv_path: Optional[str] = None       # TradingView CSV path
+    data_source: Literal["mt5_html", "local_ledger"] = "mt5_html"
     file_path_html: Optional[str] = None     # MT5 Strategy Tester HTML path
     local_ledger_path: Optional[str] = None  # Local replay CSV/Parquet ledger
     pnl_split: str = "test"

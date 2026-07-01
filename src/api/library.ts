@@ -82,6 +82,18 @@ export async function exportLibraryHypothesisEa(patternId: string) {
   }>("POST", `/library/${encodeURIComponent(patternId)}/export-hypothesis-ea`);
 }
 
+export async function evolveLibraryStrategy(
+  patternId: string,
+  request: { child_count: number; seed: number; generation: number; notes?: string },
+) {
+  return api<{
+    ok: boolean;
+    parent_pattern_id: string;
+    created: number;
+    children: LibraryEntry[];
+  }>("POST", `/library/${encodeURIComponent(patternId)}/evolve`, request);
+}
+
 export async function listLibrary(): Promise<LibraryEntry[]> {
   return api<LibraryEntry[]>("GET", "/library/list");
 }

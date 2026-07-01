@@ -127,6 +127,14 @@ class HypothesisDiscoveryRequest(BaseModel):
     grammar_complexity: Literal["simple", "medium", "complex"] = "medium"
     grammar_randomness: Literal["low", "balanced", "high"] = "balanced"
     search_mode: Literal["market_mind", "manual", "broad", "guided"] = "market_mind"
+    target_regime: Literal[
+        "auto",
+        "trend",
+        "range_reversal",
+        "volatility_expansion",
+        "compression",
+        "session_liquidity",
+    ] = "auto"
     market_mind_bias_pct: float = Field(default=0.70, ge=0.0, le=1.0)
     random_seed: int = Field(default=310200, ge=0, le=2_147_483_647)
     max_variants: int = Field(default=5_000, ge=1, le=20_000)

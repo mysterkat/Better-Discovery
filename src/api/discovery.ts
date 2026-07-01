@@ -36,12 +36,6 @@ export async function getParams(): Promise<ParamDef[]> {
   return api<ParamDef[]>("GET", "/discovery/params");
 }
 
-export async function startDiscovery(
-  overrides: Record<string, unknown> = {},
-): Promise<JobRef> {
-  return api<JobRef>("POST", "/discovery/start", { overrides });
-}
-
 export type HypothesisFamily =
   | "strategy_grammar"
   | "time_series_breakout"
@@ -80,6 +74,7 @@ export interface HypothesisDiscoveryRequest {
   grammar_complexity?: "simple" | "medium" | "complex";
   grammar_randomness?: "low" | "balanced" | "high";
   search_mode?: "market_mind" | "manual" | "broad" | "guided";
+  target_regime?: "auto" | "trend" | "range_reversal" | "volatility_expansion" | "compression" | "session_liquidity";
   market_mind_bias_pct?: number;
   random_seed?: number;
   guided_initial_fraction?: number;
@@ -115,7 +110,7 @@ export interface HypothesisDiscoveryRequest {
 export async function startHypothesisDiscovery(
   request: HypothesisDiscoveryRequest,
 ): Promise<JobRef> {
-  return startDiscovery({ engine: "hypothesis", ...request });
+  return api<JobRef>("POST", "/discovery/start", { overrides: request });
 }
 
 export async function getDiscoveryResults(jobId: string): Promise<JobRef> {
@@ -180,15 +175,3 @@ export interface DiscoveryOverview {
   total_test_trades?: number;
 }
 
-export interface SetFileResponse {
-  path: string;
-  name: string;
-  content: string;
-}
-
-export async function getSetFileContent(path: string): Promise<SetFileResponse> {
-  return api<SetFileResponse>(
-    "GET",
-    `/discovery/set-file?path=${encodeURIComponent(path)}`,
-  );
-}

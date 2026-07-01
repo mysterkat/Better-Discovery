@@ -1,24 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  getParams,
-  startDiscovery,
   startHypothesisDiscovery,
   type HypothesisFamily,
-  type ParamDef,
 } from "../api/discovery";
 import {
-  getCurrentImport,
   listMarketDatasets,
-  type CurrentImport,
   type MarketDataset,
 } from "../api/data";
 import { useJobs } from "../state/jobs";
-import { useParamDefaults } from "../state/paramDefaults";
 import JobProgress from "../components/JobProgress";
 import { openResultWindow } from "../lib/windows";
 
-type DiscoveryEngine = "hypothesis" | "legacy";
 type HypothesisMode = "market_mind" | "manual";
+type TargetRegime = "auto" | "trend" | "range_reversal" | "volatility_expansion" | "compression" | "session_liquidity";
 type ExecutionTimeframe = "m1" | "m5" | "m10" | "m15";
 type QueueMode = "sequential" | "parallel";
 type GrammarBlockGroup = "liquidity" | "structure" | "imbalance" | "orderflow" | "sessions" | "volatility" | "smt";
@@ -30,16 +24,11 @@ type DiscoveryQueueItem = {
   grammarTimeframes: ExecutionTimeframe[];
   families: HypothesisFamily[];
   mode: HypothesisMode;
+  targetRegime?: TargetRegime;
   status: QueueStatus;
   jobId?: string;
   error?: string;
 };
-
-const FOLDER_KEYS = new Set(["DATA_FOLDER", "OUTPUT_FOLDER"]);
-const HIDDEN_FROM_TAB = new Set([
-  "TF1_FILE", "TF2_FILE", "TF3_FILE", "TF4_FILE", "TF5_FILE",
-  "MULTI_SEED_BASE",
-]);
 
 const HYPOTHESIS_FAMILIES: Array<{ id: HypothesisFamily; label: string }> = [
   { id: "time_series_breakout", label: "Channel breaks" },
@@ -142,30 +131,6 @@ const HYPOTHESIS_FAMILY_GROUPS: Array<{
   },
 ];
 
-function ParamTooltip({ description }: { description: string }) {
-  if (!description) return null;
-  return (
-    <span className="param-tooltip-wrap">
-      <span className="param-tooltip-icon" tabIndex={0} role="button" aria-label="Parameter description">?</span>
-      <span className="param-tooltip-popup">{description}</span>
-    </span>
-  );
-}
-
-function formatAgo(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const then = new Date(iso).getTime();
-  if (isNaN(then)) return "";
-  const diffSec = Math.max(0, (Date.now() - then) / 1000);
-  if (diffSec < 60) return "just now";
-  const m = Math.floor(diffSec / 60);
-  if (m < 60) return `${m} minute${m === 1 ? "" : "s"} ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
-  const d = Math.floor(h / 24);
-  return `${d} day${d === 1 ? "" : "s"} ago`;
-}
-
 function dateInput(daysAgo: number): string {
   const value = new Date();
   value.setUTCDate(value.getUTCDate() - daysAgo);
@@ -200,9 +165,7 @@ function formatQueueEta(seconds: number | null | undefined): string {
 }
 
 export default function DiscoveryTab() {
-  const [engine, setEngine] = useState<DiscoveryEngine>("hypothesis");
   const [hypothesisMode, setHypothesisMode] = useState<HypothesisMode>("market_mind");
-  const [params, setParams] = useState<ParamDef[]>([]);
   const [datasets, setDatasets] = useState<MarketDataset[]>([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [timeframe, setTimeframe] = useState<ExecutionTimeframe>("m5");
@@ -218,6 +181,7 @@ export default function DiscoveryTab() {
   const [grammarComplexity, setGrammarComplexity] = useState<"simple" | "medium" | "complex">("medium");
   const [grammarRandomness, setGrammarRandomness] = useState<"low" | "balanced" | "high">("balanced");
   const [searchMode, setSearchMode] = useState<"market_mind" | "manual" | "broad" | "guided">("market_mind");
+  const [targetRegime, setTargetRegime] = useState<TargetRegime>("auto");
   const [marketMindBiasPct, setMarketMindBiasPct] = useState("0.70");
   const [randomSeed, setRandomSeed] = useState("310200");
   const [guidedInitialFraction, setGuidedInitialFraction] = useState("0.35");
@@ -242,15 +206,9 @@ export default function DiscoveryTab() {
   const [maxTradesPerDay, setMaxTradesPerDay] = useState("4, 8, 12");
   const [slippagePriceUnits, setSlippagePriceUnits] = useState("0.10");
 
-  const [overrides, setOverrides] = useState<Record<string, string>>({});
-  const [overrideOnce, setOverrideOnce] = useState(false);
-  const [folderOverrides, setFolderOverrides] = useState<Record<string, string>>({});
-  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set(["Data & Files", "General"]));
-  const [showAdvanced, setShowAdvanced] = useState<Set<string>>(new Set());
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
-  const [currentImport, setCurrentImport] = useState<CurrentImport | null>(null);
   const [queueItems, setQueueItems] = useState<DiscoveryQueueItem[]>(() => {
     try {
       const raw = localStorage.getItem(DISCOVERY_QUEUE_STORAGE_KEY);
@@ -293,7 +251,6 @@ export default function DiscoveryTab() {
   });
   const queueStartLock = useRef(false);
 
-  const persistentDefaults = useParamDefaults((s) => s.defaults);
   const job = useJobs((s) => (jobId ? s.jobs[jobId] : undefined));
   const jobs = useJobs((s) => s.jobs);
   const setActiveJob = useJobs((s) => s.setActive);
@@ -302,8 +259,6 @@ export default function DiscoveryTab() {
   const isDone = !!jobId && (job?.status === "done" || job?.status === "failed" || job?.status === "cancelled");
 
   useEffect(() => {
-    getParams().then(setParams).catch(() => undefined);
-    getCurrentImport().then(setCurrentImport).catch(() => undefined);
     listMarketDatasets().then(setDatasets).catch(() => undefined);
     const stored = useJobs.getState().activeByKind.discovery;
     if (stored) {
@@ -352,12 +307,6 @@ export default function DiscoveryTab() {
     : requiredTimeframes;
   const datasetReady = !!selectedDataset && missingRequiredTimeframes.length === 0;
 
-  const tfFilesUserSet = ["TF1_FILE", "TF2_FILE", "TF3_FILE", "TF4_FILE", "TF5_FILE"].some(
-    (k) => (overrides[k]?.trim() || persistentDefaults[k]) != null,
-  );
-  const autoDetectedTfs = currentImport?.exists
-    ? currentImport.timeframes.slice(0, 5).map((tf) => tf.label).join(", ")
-    : "";
   const queueActiveCount = queueItems.filter((item) => item.status === "starting" || item.status === "running").length;
   const queuePendingCount = queueItems.filter((item) => item.status === "queued").length;
   const queueTerminalCount = queueItems.filter((item) => ["done", "failed", "cancelled"].includes(item.status)).length;
@@ -378,110 +327,6 @@ export default function DiscoveryTab() {
       /* ignore storage failures */
     }
   }, [queueItems, queueRunning, queueMode, queueParallelLimit]);
-
-  const trueDefault = (p: ParamDef): string => {
-    const pd = persistentDefaults[p.key];
-    if (pd != null) return String(pd);
-    return p.value != null ? String(p.value) : "";
-  };
-
-  const groups = useMemo(() => {
-    const map = new Map<string, ParamDef[]>();
-    for (const p of params) {
-      if (HIDDEN_FROM_TAB.has(p.key)) continue;
-      if (!map.has(p.group)) map.set(p.group, []);
-      map.get(p.group)!.push(p);
-    }
-    for (const [k, v] of [...map.entries()]) {
-      if (v.length === 0) map.delete(k);
-    }
-    return map;
-  }, [params]);
-
-  const toggleGroup = (g: string) =>
-    setOpenGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(g)) next.delete(g); else next.add(g);
-      return next;
-    });
-
-  const toggleAdvanced = (g: string) =>
-    setShowAdvanced((prev) => {
-      const next = new Set(prev);
-      if (next.has(g)) next.delete(g); else next.add(g);
-      return next;
-    });
-
-  const currentValueOf = (key: string): string | null => {
-    const ov = overrides[key]?.trim();
-    if (ov) return ov;
-    const pd = persistentDefaults[key];
-    if (pd != null) return String(pd);
-    const def = params.find((p) => p.key === key);
-    return def?.value != null ? String(def.value) : null;
-  };
-  const groupGate = (gParams: ParamDef[]) =>
-    gParams.find((p) => p.gated_by)?.gated_by ?? null;
-  const isGroupActive = (gParams: ParamDef[]): boolean => {
-    const g = groupGate(gParams);
-    if (!g) return true;
-    return currentValueOf(g.key) === g.value;
-  };
-
-  const isAdvanced = (p: ParamDef) => p.tier === "advanced";
-  const partitionGroup = (gParams: ParamDef[]) => {
-    const core: ParamDef[] = [];
-    const advanced: ParamDef[] = [];
-    for (const p of gParams) (isAdvanced(p) ? advanced : core).push(p);
-    return { core, advanced };
-  };
-  const effectiveShowAdvanced = (group: string, advanced: ParamDef[]) => {
-    if (showAdvanced.has(group)) return true;
-    return advanced.some((p) => isEdited(p.key) || persistentDefaults[p.key] != null);
-  };
-
-  const setValue = (key: string, val: string) => {
-    setOverrides((prev) => {
-      const next = { ...prev };
-      if (val === "") delete next[key];
-      else next[key] = val;
-      return next;
-    });
-  };
-
-  const resetField = (key: string) => {
-    setOverrides((prev) => {
-      const next = { ...prev };
-      delete next[key];
-      return next;
-    });
-  };
-
-  const handleResetToDefaults = () => {
-    setOverrides({});
-  };
-
-  const isEdited = (key: string): boolean => {
-    const v = overrides[key];
-    return v != null && v.trim() !== "";
-  };
-
-  const resetGroup = (groupName: string) => {
-    const groupKeys = new Set((groups.get(groupName) ?? []).map((p) => p.key));
-    setOverrides((prev) => {
-      const next: Record<string, string> = {};
-      for (const [k, v] of Object.entries(prev)) {
-        if (!groupKeys.has(k)) next[k] = v;
-      }
-      return next;
-    });
-  };
-
-  const groupHasEdits = (groupName: string): boolean =>
-    (groups.get(groupName) ?? []).some((p) => isEdited(p.key));
-
-  const setFolderVal = (key: string, val: string) =>
-    setFolderOverrides((prev) => ({ ...prev, [key]: val }));
 
   const toggleFamily = (id: HypothesisFamily) => {
     setFamilies((current) =>
@@ -558,6 +403,7 @@ export default function DiscoveryTab() {
     runFamilies: HypothesisFamily[],
     runGrammarTimeframes: ExecutionTimeframe[] = grammarTimeframes,
     runMode: HypothesisMode = hypothesisMode,
+    runTargetRegime: TargetRegime = targetRegime,
   ) => {
     if (!selectedDataset) throw new Error("Select a completed XAUUSD dataset first.");
     const grammarRun = runFamilies.length === 1 && runFamilies[0] === "strategy_grammar";
@@ -585,6 +431,7 @@ export default function DiscoveryTab() {
       grammar_complexity: grammarRun ? grammarComplexity : undefined,
       grammar_randomness: grammarRun ? grammarRandomness : undefined,
       search_mode: runMode === "market_mind" ? "market_mind" : grammarRun ? "guided" : "manual",
+      target_regime: runMode === "market_mind" ? runTargetRegime : "auto",
       market_mind_bias_pct: runMode === "market_mind" ? Number(marketMindBiasPct) : undefined,
       random_seed: Math.trunc(Number(randomSeed)),
       guided_initial_fraction: Number(guidedInitialFraction),
@@ -628,11 +475,12 @@ export default function DiscoveryTab() {
       ...current,
       {
         id: `queue_${Date.now()}_${current.length}`,
-        label: hypothesisMode === "market_mind" ? `Market Mind (${grammarComplexity}, ${effectiveGrammarTimeframes.map((tf) => tf.toUpperCase()).join("+")})` : group?.label ?? `${families.length} custom families`,
+        label: hypothesisMode === "market_mind" ? `Market Mind ${targetRegime} (${grammarComplexity}, ${effectiveGrammarTimeframes.map((tf) => tf.toUpperCase()).join("+")})` : group?.label ?? `${families.length} custom families`,
         timeframe,
         grammarTimeframes: usesGrammar ? effectiveGrammarTimeframes : [],
         families: runFamilies,
         mode: hypothesisMode,
+        targetRegime,
         status: "queued",
       },
     ]);
@@ -658,6 +506,7 @@ export default function DiscoveryTab() {
         grammarTimeframes: group.id === "autonomous_grammar" ? [group.timeframe] : [],
         families: [...group.families],
         mode: (group.id === "autonomous_grammar" ? "market_mind" : "manual") as HypothesisMode,
+        targetRegime: group.id === "autonomous_grammar" ? targetRegime : "auto",
         status: "queued" as QueueStatus,
       })),
     ]);
@@ -710,7 +559,7 @@ export default function DiscoveryTab() {
           candidate.id === item.id ? { ...candidate, status: "starting" } : candidate
         ));
         try {
-          const ref = await startHypothesisRun(item.timeframe, item.families, item.grammarTimeframes, item.mode ?? "manual");
+          const ref = await startHypothesisRun(item.timeframe, item.families, item.grammarTimeframes, item.mode ?? "manual", item.targetRegime ?? "auto");
           setQueueItems((current) => current.map((candidate) =>
             candidate.id === item.id ? { ...candidate, status: "running", jobId: ref.job_id } : candidate
           ));
@@ -727,7 +576,7 @@ export default function DiscoveryTab() {
     })().finally(() => {
       queueStartLock.current = false;
     });
-  }, [queueItems, queueRunning, queueMode, queueParallelLimit, selectedDatasetId, dateFrom, dateTo, maxVariants, minTradesPerWeek, parallelWorkers, searchMode, marketMindBiasPct, randomSeed, guidedInitialFraction, guidedGenerations, guidedParentsKept, guidedChildrenPerParent, guidedExplorationPct, parentMinProfitFactor, finalMinProfitFactor, finalMinActivePassRate, maxCandidateDrawdownPct, targetProfitPct, dailyLossPct, maxLossPct, maxAttemptDays, startFrequency, riskFractions, dailyStops, maxTradesPerDay, slippagePriceUnits]);
+  }, [queueItems, queueRunning, queueMode, queueParallelLimit, selectedDatasetId, dateFrom, dateTo, maxVariants, minTradesPerWeek, parallelWorkers, searchMode, targetRegime, marketMindBiasPct, randomSeed, guidedInitialFraction, guidedGenerations, guidedParentsKept, guidedChildrenPerParent, guidedExplorationPct, parentMinProfitFactor, finalMinProfitFactor, finalMinActivePassRate, maxCandidateDrawdownPct, targetProfitPct, dailyLossPct, maxLossPct, maxAttemptDays, startFrequency, riskFractions, dailyStops, maxTradesPerDay, slippagePriceUnits]);
 
   const useDatasetRange = () => {
     if (!selectedDataset) return;
@@ -757,203 +606,12 @@ export default function DiscoveryTab() {
     }
   };
 
-  const handleStartLegacy = async () => {
-    setStarting(true);
-    setError(null);
-    setJobId(null);
-    try {
-      const parsed: Record<string, unknown> = {};
-      for (const p of params) {
-        if (FOLDER_KEYS.has(p.key)) continue;
-        const userVal = overrides[p.key]?.trim();
-        let raw: string | undefined;
-        if (userVal) raw = userVal;
-        else {
-          const pd = persistentDefaults[p.key];
-          if (pd != null) raw = String(pd);
-        }
-        if (!raw) continue;
-        const normalized = raw.replace(",", ".");
-        if (p.type === "bool") parsed[p.key] = raw === "true" || raw === "1";
-        else if (p.type === "int") {
-          const n = parseInt(normalized, 10);
-          if (!isNaN(n)) parsed[p.key] = n;
-        } else if (p.type === "float") {
-          const n = parseFloat(normalized);
-          if (!isNaN(n)) parsed[p.key] = n;
-        } else {
-          parsed[p.key] = raw;
-        }
-      }
-      if (overrideOnce) {
-        for (const [k, v] of Object.entries(folderOverrides)) {
-          if (v.trim()) parsed[k] = v.trim();
-        }
-      }
-      const ref = await startDiscovery(parsed);
-      setJobId(ref.job_id);
-      setActiveJob("discovery", ref.job_id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setStarting(false);
-    }
-  };
-
-  const handleStart = () => {
-    if (engine === "hypothesis") return handleStartHypothesis();
-    return handleStartLegacy();
-  };
-
   const handleJobDone = async () => {
-    if (overrideOnce) {
-      setOverrideOnce(false);
-      setFolderOverrides({});
-    }
     if (!jobId) return;
     await openResultWindow(
       `discovery-results-${jobId}`,
-      engine === "hypothesis" ? "FTMO Hypothesis Results" : "Pattern Discovery Results",
+      "Strategy Discovery Results",
       { window: "discovery-results", jobId },
-    );
-  };
-
-  const renderField = (p: ParamDef) => {
-    const isFolder = p.type === "folder";
-    if (isFolder) {
-      const folderVal = folderOverrides[p.key] ?? "";
-      const defaultVal = String(p.value ?? "");
-      return (
-        <div key={p.key} className="field">
-          <label className="field-label">
-            {p.label}
-            <span className="field-hint-inline"> - {p.description}</span>
-          </label>
-          <div className="folder-display">{defaultVal || "-"}</div>
-          {overrideOnce && (
-            <input
-              className="field-input"
-              style={{ marginTop: 4 }}
-              value={folderVal}
-              onChange={(e) => setFolderVal(p.key, e.target.value)}
-              placeholder="Override path for this run"
-              disabled={isRunning}
-            />
-          )}
-        </div>
-      );
-    }
-
-    const def = trueDefault(p);
-    const edited = isEdited(p.key);
-
-    if (p.type === "bool") {
-      const userVal = overrides[p.key];
-      const checked = userVal !== undefined
-        ? userVal === "true"
-        : (def === "true" || def === "True" || Boolean(persistentDefaults[p.key] ?? p.value));
-      return (
-        <div key={p.key} className="field field-inline">
-          <label className="toggle-label">
-            <span className="toggle-wrap">
-              <input
-                type="checkbox"
-                className="toggle-input"
-                checked={checked}
-                onChange={(e) => setValue(p.key, e.target.checked ? "true" : "false")}
-                disabled={isRunning}
-              />
-              <span className="toggle-track" />
-            </span>
-            <span>
-              <span className="field-label" style={{ display: "inline" }}>{p.label}</span>
-              {p.description && <span className="field-hint"> - {p.description}</span>}
-            </span>
-            {edited && (
-              <button type="button" className="pd-reset-btn" onClick={() => resetField(p.key)} title="Reset to default" style={{ marginLeft: 8 }}>Reset</button>
-            )}
-          </label>
-        </div>
-      );
-    }
-
-    if (p.type === "str" && p.options && p.options.length > 0) {
-      return (
-        <div key={p.key} className="field">
-          <label className="field-label">
-            {p.label}
-            <span className="field-default"> (default: {def})</span>
-            {edited && (
-              <button type="button" className="pd-reset-btn" onClick={() => resetField(p.key)} title="Reset to default" style={{ marginLeft: 8 }}>Reset</button>
-            )}
-          </label>
-          <select
-            className="field-input"
-            value={overrides[p.key] ?? def}
-            onChange={(e) => setValue(p.key, e.target.value)}
-            disabled={isRunning}
-          >
-            {p.options.map((o) => <option key={o} value={o}>{o}</option>)}
-          </select>
-          {p.description && <span className="field-hint">{p.description}</span>}
-        </div>
-      );
-    }
-
-    const hint = [
-      p.min != null ? `min ${p.min}` : "",
-      p.max != null ? `max ${p.max}` : "",
-      p.step != null ? `step ${p.step}` : "",
-    ].filter(Boolean).join(", ");
-
-    const isSeed = p.key === "RANDOM_SEED";
-    const randomize = () => {
-      const s = Math.floor(Math.random() * 2_147_483_646) + 1;
-      setValue(p.key, String(s));
-    };
-
-    const num = (key: string) => parseFloat((currentValueOf(key) ?? "").replace(",", "."));
-    let edgeFloorHint: string | null = null;
-    if (p.key === "FILTER_EDGE_K") {
-      const k = num("FILTER_EDGE_K");
-      const twr = num("TARGET_WR_PCT");
-      const tpf = num("TARGET_PF");
-      if ([k, twr, tpf].every(Number.isFinite)) {
-        const wrFloor = 50 + k * (twr - 50);
-        const pfFloor = 1 + k * (tpf - 1);
-        edgeFloorHint = `implied floors: WR ${wrFloor.toFixed(1)}%, PF ${pfFloor.toFixed(2)}`;
-      }
-    }
-
-    return (
-      <div key={p.key} className="field">
-        <label className="field-label">
-          {p.label}
-          {p.description && <ParamTooltip description={p.description} />}
-          <span className="field-default"> (default: {def})</span>
-          {edited && (
-            <button type="button" className="pd-reset-btn" onClick={() => resetField(p.key)} title="Reset to default" style={{ marginLeft: 8 }}>Reset</button>
-          )}
-        </label>
-        <div className={isSeed ? "field-input-row" : undefined}>
-          <input
-            className="field-input"
-            type="text"
-            inputMode={p.type === "int" ? "numeric" : (p.type === "float" ? "decimal" : "text")}
-            value={overrides[p.key] ?? ""}
-            placeholder={def}
-            onChange={(e) => setValue(p.key, e.target.value)}
-            disabled={isRunning}
-          />
-          {isSeed && (
-            <button type="button" className="seed-random-btn" onClick={randomize} disabled={isRunning} title="Generate a random seed">
-              Random
-            </button>
-          )}
-        </div>
-        {hint && <span className="field-hint">({hint})</span>}
-        {edgeFloorHint && <span className="field-hint" style={{ fontWeight: 600 }}>{edgeFloorHint}</span>}
-      </div>
     );
   };
 
@@ -1037,6 +695,18 @@ export default function DiscoveryTab() {
         {hypothesisMode === "market_mind" ? (
           <>
             <div className="form-grid-2 hypothesis-grid" style={{ marginTop: 14 }}>
+              <div className="field">
+                <label className="field-label">Target regime</label>
+                <select className="field-input" value={targetRegime} onChange={(event) => setTargetRegime(event.target.value as TargetRegime)} disabled={isRunning}>
+                  <option value="auto">Auto detect</option>
+                  <option value="trend">Trend</option>
+                  <option value="range_reversal">Range / reversal</option>
+                  <option value="volatility_expansion">Volatility expansion</option>
+                  <option value="compression">Compression</option>
+                  <option value="session_liquidity">Session liquidity</option>
+                </select>
+                <span className="field-hint">Search one market behavior instead of one do-it-all strategy.</span>
+              </div>
               <div className="field">
                 <label className="field-label">Market bias %</label>
                 <input className="field-input" value={marketMindBiasPct} onChange={(event) => setMarketMindBiasPct(event.target.value)} disabled={isRunning} inputMode="decimal" />
@@ -1388,139 +1058,25 @@ export default function DiscoveryTab() {
     </>
   );
 
-  const renderLegacyMode = () => (
-    <>
-      {currentImport && (
-        <div className="form-section">
-          <div className="current-import-banner">
-            {currentImport.exists ? (
-              <>
-                <strong>Data source:</strong>{" "}
-                {currentImport.symbol ?? "-"}
-                {" - "}
-                {tfFilesUserSet
-                  ? <span>using your TF overrides</span>
-                  : <span>auto-detected: {autoDetectedTfs || "no timeframes found"}</span>}
-                <span className="field-hint" style={{ marginLeft: 8 }}>
-                  ({currentImport.timeframes.length} file{currentImport.timeframes.length === 1 ? "" : "s"} in hist_data
-                  {currentImport.modified_at ? ` - imported ${formatAgo(currentImport.modified_at)}` : ""})
-                </span>
-              </>
-            ) : (
-              <span style={{ color: "var(--text2)" }}>
-                <strong>No data imported.</strong>{" "}
-                Use Data Import to fetch from MT5 first.
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {params.length === 0 ? (
-        <p className="tab-loading">Loading parameters...</p>
-      ) : (
-        <>
-          <div className="form-section">
-            <label className="toggle-label">
-              <span className="toggle-wrap">
-                <input
-                  type="checkbox"
-                  className="toggle-input"
-                  checked={overrideOnce}
-                  onChange={(e) => {
-                    setOverrideOnce(e.target.checked);
-                    if (!e.target.checked) setFolderOverrides({});
-                  }}
-                  disabled={isRunning}
-                />
-                <span className="toggle-track" />
-              </span>
-              Override input/output folders for this run only
-            </label>
-          </div>
-
-          {[...groups.entries()].map(([group, gParams]) => {
-            const { core, advanced } = partitionGroup(gParams);
-            const advOpen = effectiveShowAdvanced(group, advanced);
-            const gate = groupGate(gParams);
-            const active = isGroupActive(gParams);
-            return (
-              <div key={group} className={`param-group${!active ? " param-group-inactive" : ""}`}>
-                <div className="param-group-header-row">
-                  <button className="param-group-header" onClick={() => toggleGroup(group)}>
-                    <span className="param-group-arrow">{openGroups.has(group) ? "v" : ">"}</span>
-                    {group}
-                    <span className="param-group-count">{gParams.length} settings</span>
-                    {gate && !active && (
-                      <span className="param-group-gate-badge" title={`Only active when ${gate.key} = ${gate.value}`}>
-                        inactive
-                      </span>
-                    )}
-                  </button>
-                  {groupHasEdits(group) && (
-                    <button type="button" className="param-group-reset-btn" onClick={() => resetGroup(group)} title={`Reset ${group}`} disabled={isRunning}>Reset</button>
-                  )}
-                </div>
-                {openGroups.has(group) && (
-                  <div className="param-group-body">
-                    {core.length > 0 && <div className="override-grid">{core.map((p) => renderField(p))}</div>}
-                    {advanced.length > 0 && (
-                      <>
-                        <button type="button" className="param-advanced-toggle" onClick={() => toggleAdvanced(group)}>
-                          <span className="param-group-arrow">{advOpen ? "v" : ">"}</span>
-                          {advOpen ? "Hide advanced" : "Show advanced"}
-                          <span className="param-group-count">{advanced.length}</span>
-                        </button>
-                        {advOpen && <div className="override-grid param-advanced-grid">{advanced.map((p) => renderField(p))}</div>}
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </>
-      )}
-    </>
-  );
-
   return (
     <div className="tab-content discovery-tab">
       <div className="tab-header">
-        <h2>{engine === "hypothesis" ? "FTMO Hypothesis Discovery" : "Pattern Discovery"}</h2>
+        <h2>Strategy Discovery</h2>
         <p className="tab-subtitle">
-          {engine === "hypothesis"
-            ? "Test coded XAUUSD ideas against target-first prop-firm rules."
-            : "Run the original Pattern Discovery v6 random search."}
+          Market Mind generates saved-strategy candidates from coded XAUUSD grammar and prop-firm rules.
         </p>
       </div>
 
-      <div className="form-section">
-        <div className="segmented-control" role="tablist" aria-label="Discovery engine">
-          <button type="button" className={engine === "hypothesis" ? "active" : ""} onClick={() => setEngine("hypothesis")} disabled={isRunning}>
-            FTMO Hypothesis
-          </button>
-          <button type="button" className={engine === "legacy" ? "active" : ""} onClick={() => setEngine("legacy")} disabled={isRunning}>
-            Legacy Random
-          </button>
-        </div>
-      </div>
-
-      {engine === "hypothesis" ? renderHypothesisMode() : renderLegacyMode()}
+      {renderHypothesisMode()}
 
       <div className="action-row" style={{ marginTop: 20 }}>
         <button
           className="btn btn-primary"
-          onClick={handleStart}
-          disabled={starting || isRunning || (engine === "legacy" && params.length === 0)}
+          onClick={handleStartHypothesis}
+          disabled={starting || isRunning}
         >
-          {starting ? "Starting..." : engine === "hypothesis" ? "Run FTMO Hypothesis" : "Run Legacy Discovery"}
+          {starting ? "Starting..." : "Run Discovery"}
         </button>
-        {engine === "legacy" && (
-          <button className="btn btn-secondary" onClick={handleResetToDefaults} disabled={isRunning || params.length === 0} title="Reset all fields to saved defaults">
-            Reset to defaults
-          </button>
-        )}
         {isDone && (
           <button className="btn btn-secondary" onClick={() => { setJobId(null); setError(null); }}>
             New Run

@@ -5,9 +5,8 @@ export type TabId =
   | "discovery"
   | "strategy-library"
   | "strategy-merger"
-  | "strategy-compare"
+  | "evolution-lab"
   | "research-lab"
-  | "set-to-mql"
   | "monte-carlo";
 
 export interface TabDef {
@@ -26,7 +25,7 @@ export const TABS: TabDef[] = [
   },
   {
     id: "discovery",
-    label: "Pattern Discovery",
+    label: "Strategy Discovery",
     icon: "🔍",
     Component: lazy(() => import("./tabs/DiscoveryTab")),
   },
@@ -43,22 +42,16 @@ export const TABS: TabDef[] = [
     Component: lazy(() => import("./tabs/StrategyMergerTab")),
   },
   {
+    id: "evolution-lab",
+    label: "Evolution Lab",
+    icon: "↯",
+    Component: lazy(() => import("./tabs/EvolutionLabTab")),
+  },
+  {
     id: "research-lab",
     label: "Research Lab",
     icon: "▦",
     Component: lazy(() => import("./tabs/ResearchLabTab")),
-  },
-  {
-    id: "strategy-compare",
-    label: "Strategy Compare",
-    icon: "≡",
-    Component: lazy(() => import("./tabs/StrategyCompareTab")),
-  },
-  {
-    id: "set-to-mql",
-    label: "Set → MQL",
-    icon: "⚙",
-    Component: lazy(() => import("./tabs/SetToMqlTab")),
   },
   {
     id: "monte-carlo",

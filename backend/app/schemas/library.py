@@ -71,3 +71,10 @@ class LibraryMergeRequest(BaseModel):
     mode: MergeMode = "regime_switch"
     components: list[LibraryMergeComponent]
     notes: str = ""
+
+
+class LibraryEvolutionRequest(BaseModel):
+    child_count: int = Field(default=25, ge=1, le=250)
+    seed: int = Field(default=910300, ge=0, le=2_147_483_647)
+    generation: int = Field(default=1, ge=1, le=50)
+    notes: str = ""

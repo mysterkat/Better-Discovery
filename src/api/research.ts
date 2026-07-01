@@ -1,18 +1,17 @@
 import { api } from "./client";
 import type { JobRef } from "./discovery";
 
-export interface ReplayRequest {
+export interface SavedStrategyReplayRequest {
   dataset_id: string;
-  set_path: string;
-  symbol: string;
-  timeframe: string;
+  pattern_id: string;
+  date_from: string;
+  date_to: string;
   dataset_role: "validation" | "walk_forward" | "lockbox";
   initial_balance: number;
+  lot_size: number;
   contract_size: number;
   commission_per_lot_round_turn: number;
-  slippage_points: number;
-  session_utc_offset: number;
-  chart_max_bars: number;
+  slippage_price_units: number;
 }
 
 export interface ReplayMetrics {
@@ -28,26 +27,26 @@ export interface ReplayMetrics {
   max_drawdown_pct: number;
 }
 
-export interface ReplayBar { time: string; open: number; high: number; low: number; close: number }
-export interface ReplayTrade {
-  entry_time: string; entry_price: number; exit_time: string; exit_price: number;
-  direction: "long" | "short"; net_pnl: number; exit_reason: string;
-}
-
-export interface ReplayResult {
-  replay_id: string;
+export interface SavedStrategyReplayResult {
+  experiment_id: string;
+  pattern_id?: string;
+  strategy_id?: string;
+  library_name?: string;
   strategy_fingerprint: string;
   dataset_id: string;
   dataset_role: string;
   ledger_csv: string;
   ledger_parquet: string;
-  metrics: ReplayMetrics;
-  chart: { bars: ReplayBar[]; trades: ReplayTrade[] };
-  warnings: string[];
+  metrics: ReplayMetrics & Record<string, number | null>;
+  gate: {
+    decision: "promote" | "reject";
+    checks: Record<string, boolean>;
+    policy?: Record<string, number>;
+  };
 }
 
-export function runLocalReplay(request: ReplayRequest): Promise<JobRef> {
-  return api("POST", "/research/local-replay", request);
+export function runSavedStrategyReplay(request: SavedStrategyReplayRequest): Promise<JobRef> {
+  return api("POST", "/research/saved-strategy-replay", request);
 }
 
 export interface RobustnessResult {
@@ -71,17 +70,17 @@ export function runLocalRobustness(ledgerPath: string): Promise<JobRef> {
 
 export interface ReplayExperiment {
   id: string;
-  kind: "local_replay";
+  kind: "hypothesis_bar_replay";
   status: "completed" | "failed" | "running";
   created_at: string;
-  request: ReplayRequest;
-  result: (ReplayResult & { experiment_id?: string }) | null;
+  request: SavedStrategyReplayRequest | Record<string, unknown>;
+  result: SavedStrategyReplayResult | null;
 }
 
-export async function listReplayExperiments(): Promise<ReplayExperiment[]> {
+export async function listSavedReplayExperiments(): Promise<ReplayExperiment[]> {
   const rows = await api<Array<ReplayExperiment | Record<string, unknown>>>("GET", "/research/experiments?limit=100");
   return rows.filter((row): row is ReplayExperiment =>
-    (row as ReplayExperiment).kind === "local_replay" &&
+    (row as ReplayExperiment).kind === "hypothesis_bar_replay" &&
     (row as ReplayExperiment).status === "completed" &&
     (row as ReplayExperiment).result != null
   );

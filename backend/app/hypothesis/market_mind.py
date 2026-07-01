@@ -73,6 +73,7 @@ def analyze_market_mind(
     external_context: dict[str, Any] | None = None,
     *,
     bias_pct: float = 0.70,
+    target_regime: str = "auto",
 ) -> MarketMindPlan:
     """Build a long-horizon generation plan from local market data.
 
@@ -155,40 +156,49 @@ def analyze_market_mind(
             weights["structure"] += 0.5
 
     recipes: list[dict[str, Any]] = []
-    if reversal_edge >= 0.75 or failed_break > breakout_follow:
+    forced = target_regime if target_regime != "auto" else ""
+    if forced == "range_reversal" or (not forced and (reversal_edge >= 0.75 or failed_break > breakout_follow)):
         recipes.append({
             "name": "trap_reversal",
             "weight": 0.30,
             "groups": ["liquidity", "structure", "volatility", "sessions", "imbalance"],
             "why": "failed breaks, wick rejection, or spike reversals dominate recent daily behavior",
         })
-    if continuation_edge >= 0.35 or bullish_trend or bearish_trend:
+    if forced == "trend" or (not forced and (continuation_edge >= 0.35 or bullish_trend or bearish_trend)):
         recipes.append({
             "name": "trend_continuation",
             "weight": 0.28,
             "groups": ["structure", "imbalance", "orderflow", "volatility", "sessions"],
             "why": "multi-month trend and breakout acceptance favor continuation blocks",
         })
-    if high_vol or spike_reversal > 0.12:
+    if forced == "volatility_expansion" or (not forced and (high_vol or spike_reversal > 0.12)):
         recipes.append({
             "name": "volatility_response",
             "weight": 0.20,
             "groups": ["volatility", "liquidity", "structure", "imbalance"],
             "why": "current volatility is elevated or large-range days are reversing",
         })
-    if low_vol or compression:
+    if forced == "compression" or (not forced and (low_vol or compression)):
         recipes.append({
             "name": "compression_expansion",
             "weight": 0.18,
             "groups": ["volatility", "sessions", "structure", "imbalance"],
             "why": "recent range compression suggests expansion candidates deserve budget",
         })
-    recipes.append({
+    if forced in {"", "session_liquidity"}:
+        recipes.append({
         "name": "session_liquidity",
         "weight": 0.14,
         "groups": ["sessions", "liquidity", "structure", "volatility"],
         "why": "intraday XAUUSD behavior should still test session-specific liquidity timing",
-    })
+        })
+    if not recipes:
+        recipes.append({
+            "name": "balanced_exploration",
+            "weight": 1.0,
+            "groups": ["liquidity", "structure", "imbalance", "orderflow", "sessions", "volatility"],
+            "why": f"target regime {target_regime} fell back to broad grammar coverage",
+        })
     recipes = sorted(recipes, key=lambda item: float(item["weight"]), reverse=True)[:5]
     recipe_total = sum(float(item["weight"]) for item in recipes) or 1.0
     for item in recipes:
@@ -197,7 +207,7 @@ def analyze_market_mind(
     direction = "uptrend" if bullish_trend else "downtrend" if bearish_trend else "mixed"
     vol_state = "high_vol" if high_vol else "low_vol" if low_vol else "normal_vol"
     behavior = "reversal_prone" if reversal_edge > continuation_edge else "continuation_prone"
-    regime_id = f"{direction}_{vol_state}_{behavior}"
+    regime_id = f"{direction}_{vol_state}_{behavior}" if target_regime == "auto" else f"target_{target_regime}"
     summary = {
         "history_days": int(len(daily)),
         "analysis_start": str(daily.index.min().date()),
@@ -212,5 +222,6 @@ def analyze_market_mind(
         "spike_reversal_rate": spike_reversal,
         "active_hours_utc": hour_summary,
         "external_context": external_context or {},
+        "target_regime": target_regime,
     }
     return MarketMindPlan(regime_id, summary, recipes, _normalize(weights), 1.0 - bias_pct)

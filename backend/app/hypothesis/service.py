@@ -145,6 +145,7 @@ class HypothesisResearchService:
             contexts,
             external_context=EXTERNAL_DATA.context(symbol.upper(), date_to),
             bias_pct=bias_pct,
+            target_regime="auto",
         ).model_dump()
 
     @staticmethod
@@ -539,6 +540,7 @@ class HypothesisResearchService:
                     contexts,
                     external_context=EXTERNAL_DATA.context(request.symbol, request.date_to),
                     bias_pct=request.market_mind_bias_pct,
+                    target_regime=request.target_regime,
                 ).model_dump()
                 market_mind_plan["bias_pct"] = request.market_mind_bias_pct
             specs = generate_hypotheses(request, market_mind_plan)

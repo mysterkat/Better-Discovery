@@ -6,14 +6,13 @@
 import { Fragment, useEffect, useState } from "react";
 import {
   getDiscoveryResults,
-  getSetFileContent,
   type DiscoveryOverview,
   type HypothesisFamily,
   type HypothesisStrategySpec,
   type JobRef,
   type PatternSummary,
 } from "../api/discovery";
-import { saveHypothesisToLibrary, saveToLibrary } from "../api/library";
+import { saveHypothesisToLibrary } from "../api/library";
 import { exportHypothesisEa } from "../api/mql";
 import { openFolder } from "../api/system";
 import IndicatorsTable from "../components/IndicatorsTable";
@@ -597,7 +596,6 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
   const [sortKey, setSortKey] = useState<SortKey>("rank");
   const [sortDesc, setSortDesc] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
   const sorted = [...patterns].sort((a, b) => {
@@ -609,59 +607,6 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
   const flash = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2000);
-  };
-
-  const copySetFile = async (p: PatternSummary) => {
-    if (!p.set_file) { flash("No .set file recorded for this pattern."); return; }
-    setBusyId(p.pattern_id);
-    try {
-      const r = await getSetFileContent(p.set_file);
-      await navigator.clipboard.writeText(r.content);
-      flash(`Copied ${r.name} to clipboard.`);
-    } catch (e) {
-      flash(`Copy failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const saveToLib = async (p: PatternSummary) => {
-    if (!p.set_file) { flash("No .set file recorded for this pattern."); return; }
-    setBusyId(p.pattern_id);
-    try {
-      const r = await saveToLibrary({
-        pattern_id: p.pattern_id,
-        set_file: p.set_file,
-        metadata: p,
-      });
-      flash(r.duplicate ? `Updated ${p.pattern_id} in library.` : `Saved ${p.pattern_id} to library.`);
-    } catch (e) {
-      flash(`Save failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const downloadSetFile = async (p: PatternSummary) => {
-    if (!p.set_file) { flash("No .set file recorded."); return; }
-    setBusyId(p.pattern_id);
-    try {
-      const r = await getSetFileContent(p.set_file);
-      const blob = new Blob([r.content], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = r.name;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      flash(`Downloaded ${r.name}.`);
-    } catch (e) {
-      flash(`Download failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setBusyId(null);
-    }
   };
 
   const toggleSort = (k: SortKey) => {
@@ -726,40 +671,7 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
                 <td className="num">{fmt(p.ea_test_pf)}</td>
                 <td className="num">{fmt(p.ea_test_expectancy_r, 3)}</td>
                 <td className="num">{p.ea_test_trades}</td>
-                <td>
-                  <button
-                    className="btn-mini"
-                    onClick={() => saveToLib(p)}
-                    disabled={busyId === p.pattern_id || !p.set_file}
-                    title="Save to Strategy Library for comparison later"
-                  >
-                    ⭐ Save
-                  </button>{" "}
-                  <button
-                    className="btn-mini"
-                    onClick={() => copySetFile(p)}
-                    disabled={busyId === p.pattern_id || !p.set_file}
-                    title={p.set_file ?? "No .set file"}
-                  >
-                    Copy .set
-                  </button>{" "}
-                  <button
-                    className="btn-mini"
-                    onClick={() => downloadSetFile(p)}
-                    disabled={busyId === p.pattern_id || !p.set_file}
-                    title={p.set_file ?? "No .set file"}
-                  >
-                    ⬇
-                  </button>{" "}
-                  <button
-                    className="btn-mini"
-                    onClick={() => p.set_file && openFolder(p.set_file).catch(() => {})}
-                    disabled={!p.set_file}
-                    title={p.set_file ? "Reveal in file manager" : "No .set file"}
-                  >
-                    📂
-                  </button>
-                </td>
+                <td><span className="field-hint">Legacy result</span></td>
               </tr>
               {expanded === p.pattern_id && (
                 <tr className="row-detail">
@@ -783,7 +695,6 @@ function PatternsTable({ patterns }: { patterns: PatternSummary[] }) {
                       <div><span className="kv-key">Implied R:R</span><span>{fmt(p.implied_rr)}</span></div>
                       <div><span className="kv-key">SL</span><span>{fmt(p.sl_pct * 100, 3)}%</span></div>
                       <div><span className="kv-key">TP</span><span>{fmt(p.tp_pct * 100, 3)}%</span></div>
-                      <div className="full-row"><span className="kv-key">.set file</span><span className="mono small">{p.set_file ?? "—"}</span></div>
                       {p.genetic_rule && Object.keys(p.genetic_rule).length > 0 && (
                         <div className="full-row" style={{ marginTop: 10 }}>
                           <span className="kv-key" style={{ display: "block", marginBottom: 4 }}>
