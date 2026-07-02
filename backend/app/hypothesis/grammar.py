@@ -767,9 +767,10 @@ def generate_hypotheses(
 ) -> list[HypothesisSpec]:
     """Generate a deterministic, explainable hypothesis set.
 
-    This is deliberately not a random optimizer. Each variant comes from a coded
-    market-behavior profile, then the FTMO challenge replay decides whether it
-    deserves deeper MT5 testing.
+    This is deliberately not a black-box random optimizer. Each variant comes
+    from a coded market-behavior profile or Market Mind grammar recipe, then
+    the discovery replay ranks raw strategy edge before separate validation
+    and prop-firm checks.
     """
     if request.search_mode == "market_mind" and market_mind_plan:
         return _generate_market_mind_hypotheses(request, market_mind_plan)

@@ -14,10 +14,12 @@ function metricText(entry: LibraryEntry): string {
   const metadata = entry.metadata as Record<string, unknown>;
   const metrics = (metadata.metrics ?? metadata) as Record<string, unknown>;
   const pf = metrics.profit_factor ?? metrics.test_pf ?? metrics.ea_test_pf;
+  const sharpe = metrics.trade_sharpe ?? metrics.sharpe;
   const pass = metrics.challenge_active_pass_rate;
   const trades = metrics.trades ?? metrics.test_trades ?? metrics.ea_test_trades;
   const parts: string[] = [];
   if (typeof pf === "number") parts.push(`PF ${pf.toFixed(2)}`);
+  if (typeof sharpe === "number") parts.push(`Sharpe ${sharpe.toFixed(2)}`);
   if (typeof pass === "number") parts.push(`Pass ${(pass * 100).toFixed(1)}%`);
   if (typeof trades === "number") parts.push(`${Math.round(trades)} trades`);
   return parts.join(" · ") || "No metrics";

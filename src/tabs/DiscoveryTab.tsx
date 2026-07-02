@@ -191,7 +191,7 @@ export default function DiscoveryTab() {
   const [guidedExplorationPct, setGuidedExplorationPct] = useState("0.25");
   const [parentMinProfitFactor, setParentMinProfitFactor] = useState("1.20");
   const [finalMinProfitFactor, setFinalMinProfitFactor] = useState("1.30");
-  const [finalMinActivePassRate, setFinalMinActivePassRate] = useState("0.05");
+  const [finalMinActivePassRate] = useState("0");
   const [maxCandidateDrawdownPct, setMaxCandidateDrawdownPct] = useState("15");
   const [maxVariants, setMaxVariants] = useState("8000");
   const [minTradesPerWeek, setMinTradesPerWeek] = useState("5");
@@ -843,7 +843,7 @@ export default function DiscoveryTab() {
       <div className="form-section">
         <div className="section-label">Search Quality</div>
         <span className="field-hint">
-          Market Mind scans regime-biased grammar directly. Manual grammar can still use guided mutation; saved winners can be evolved later in Evolution Lab.
+          Discovery ranks raw strategy edge only: PF, Sharpe, win rate, drawdown, expectancy, and stability. Prop-firm pass checks belong in validation and Monte Carlo.
         </span>
         <div className="form-grid-2 hypothesis-grid" style={{ marginTop: 14 }}>
           {hypothesisMode === "manual" && families.includes("strategy_grammar") && (
@@ -857,10 +857,6 @@ export default function DiscoveryTab() {
             <label className="field-label">Final PF gate</label>
             <input className="field-input" value={finalMinProfitFactor} onChange={(event) => setFinalMinProfitFactor(event.target.value)} disabled={isRunning} inputMode="decimal" />
             <span className="field-hint">Only candidates above this PF appear as finalists.</span>
-          </div>
-          <div className="field">
-            <label className="field-label">Final active pass rate</label>
-            <input className="field-input" value={finalMinActivePassRate} onChange={(event) => setFinalMinActivePassRate(event.target.value)} disabled={isRunning} inputMode="decimal" />
           </div>
           <div className="field">
             <label className="field-label">Max candidate DD %</label>

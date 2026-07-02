@@ -11,6 +11,8 @@ from .models import HypothesisBarRequest
 def summarize_ledger(ledger: pd.DataFrame, initial_balance: float) -> dict[str, Any]:
     pnl = ledger["net_pnl"].to_numpy(dtype=float) if not ledger.empty else np.array([], dtype=float)
     wins, losses = pnl[pnl > 0], pnl[pnl < 0]
+    pnl_std = float(pnl.std(ddof=1)) if len(pnl) > 1 else 0.0
+    trade_sharpe = float((pnl.mean() / pnl_std) * np.sqrt(len(pnl))) if pnl_std > 0 else None
     equity = initial_balance + np.cumsum(pnl)
     if equity.size:
         peaks = np.maximum.accumulate(np.r_[initial_balance, equity])[:-1]
@@ -23,6 +25,7 @@ def summarize_ledger(ledger: pd.DataFrame, initial_balance: float) -> dict[str, 
     gross_loss = float(abs(losses.sum()))
     exits = pd.to_datetime(ledger["exit_time"], utc=True) if not ledger.empty else pd.Series(dtype="datetime64[ns, UTC]")
     if len(exits):
+        trading_days = int(exits.dt.normalize().nunique())
         monthly_keys = exits.dt.strftime("%Y-%m")
         quarterly_keys = exits.dt.year.astype(str) + "Q" + (((exits.dt.month - 1) // 3) + 1).astype(str)
         yearly_keys = exits.dt.year.astype(str)
@@ -30,16 +33,21 @@ def summarize_ledger(ledger: pd.DataFrame, initial_balance: float) -> dict[str, 
         quarterly = ledger.assign(quarter=quarterly_keys).groupby("quarter")["net_pnl"].sum()
         yearly = ledger.assign(year=yearly_keys).groupby("year")["net_pnl"].sum()
     else:
+        trading_days = 0
         monthly = quarterly = yearly = pd.Series(dtype=float)
     return {
         "trades": int(len(pnl)),
         "wins": int(len(wins)),
         "win_rate_pct": float(100 * len(wins) / len(pnl)) if len(pnl) else None,
+        "losses": int(len(losses)),
         "net_profit": float(pnl.sum()),
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
         "profit_factor": gross_profit / gross_loss if gross_loss else None,
         "expected_payoff": float(pnl.mean()) if len(pnl) else None,
+        "trade_sharpe": trade_sharpe,
+        "trading_days": trading_days,
+        "trades_per_active_day": float(len(pnl) / trading_days) if trading_days else 0.0,
         "max_drawdown": max_dd,
         "max_drawdown_pct": max_dd_pct,
         "positive_month_fraction": float((monthly > 0).mean()) if len(monthly) else 0.0,

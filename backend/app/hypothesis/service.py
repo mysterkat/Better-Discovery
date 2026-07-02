@@ -14,7 +14,6 @@ from ..market_data.catalog import MarketDataCatalog
 from ..paths import DEFAULT_RESEARCH
 from ..research.store import ExperimentStore
 from .bar_engine import run_bar_replay, run_bar_replay_fast_metrics
-from .challenge import evaluate_challenge_grid
 from .grammar import generate_hypotheses, mutate_hypothesis
 from .market_mind import analyze_market_mind
 from .models import (
@@ -262,16 +261,29 @@ class HypothesisResearchService:
         )
 
     @staticmethod
+    def _quant_score(metrics: dict[str, Any]) -> float:
+        profit_factor = float(metrics.get("profit_factor") or 0.0)
+        sharpe = float(metrics.get("trade_sharpe") or 0.0)
+        win_rate = float(metrics.get("win_rate_pct") or 0.0) / 100.0
+        expected_payoff = float(metrics.get("expected_payoff") or 0.0)
+        trades = float(metrics.get("trades") or 0.0)
+        drawdown = float(metrics.get("max_drawdown_pct") or 0.0)
+        stability = float(metrics.get("positive_month_fraction") or 0.0)
+        return (
+            40.0 * max(0.0, profit_factor - 1.0)
+            + 12.0 * sharpe
+            + 20.0 * max(0.0, win_rate - 0.45)
+            + 0.04 * expected_payoff
+            + 4.0 * min(1.0, trades / 250.0)
+            + 10.0 * stability
+            - 1.2 * drawdown
+        )
+
+    @staticmethod
     def _candidate_row(
         strategy: HypothesisSpec,
         metrics: dict[str, Any],
-        challenge: dict[str, Any],
     ) -> dict[str, Any]:
-        best = challenge["best"]["summary"]
-        compact_challenge = {
-            "best": best,
-            "grid_summaries": [item["summary"] for item in challenge["grid"]],
-        }
         return {
             "strategy_id": strategy.strategy_id,
             "strategy_fingerprint": strategy.fingerprint,
@@ -279,25 +291,20 @@ class HypothesisResearchService:
             "hypothesis": strategy.hypothesis,
             "parameters": strategy.parameters,
             "trades": metrics["trades"],
+            "wins": metrics.get("wins"),
+            "losses": metrics.get("losses"),
+            "win_rate_pct": metrics.get("win_rate_pct"),
             "net_profit": metrics["net_profit"],
             "profit_factor": metrics["profit_factor"],
             "expected_payoff": metrics["expected_payoff"],
+            "trade_sharpe": metrics.get("trade_sharpe"),
             "max_drawdown_pct": metrics["max_drawdown_pct"],
-            "challenge_score": best["score"],
-            "challenge_start_windows": best["start_windows"],
-            "challenge_active_starts": best["active_starts"],
-            "challenge_pass_count": best["pass_count"],
-            "challenge_pass_rate": best["pass_rate"],
-            "challenge_active_pass_rate": best["active_pass_rate"],
-            "challenge_prop_fail_count": best["prop_fail_count"],
-            "challenge_prop_fail_rate": best["prop_fail_rate"],
-            "median_days_to_target": best["median_days_to_target"],
-            "best_days_to_target": best["best_days_to_target"],
-            "median_trades_to_target": best["median_trades_to_target"],
-            "risk_fraction": best["risk_fraction"],
-            "internal_daily_stop_pct": best["internal_daily_stop_pct"],
-            "max_trades_per_day": best["max_trades_per_day"],
-            "challenge": compact_challenge,
+            "positive_month_fraction": metrics.get("positive_month_fraction"),
+            "positive_quarter_fraction": metrics.get("positive_quarter_fraction"),
+            "positive_year_fraction": metrics.get("positive_year_fraction"),
+            "trading_days": metrics.get("trading_days"),
+            "trades_per_active_day": metrics.get("trades_per_active_day"),
+            "quant_score": HypothesisResearchService._quant_score(metrics),
         }
 
     @staticmethod
@@ -314,25 +321,71 @@ class HypothesisResearchService:
             return False
         if float(row.get("max_drawdown_pct") or 0.0) > request.max_candidate_drawdown_pct:
             return False
-        if stage == "final" and float(row.get("challenge_active_pass_rate") or 0.0) < request.final_min_active_pass_rate:
-            return False
         return True
 
     @staticmethod
-    def _parent_rank(row: dict[str, Any]) -> tuple[float, float, float, float]:
+    def _parent_rank(row: dict[str, Any]) -> tuple[float, float, float, float, float]:
         return (
+            float(row.get("quant_score") or 0.0),
             float(row.get("profit_factor") or 0.0),
-            float(row.get("challenge_active_pass_rate") or 0.0),
+            float(row.get("trade_sharpe") or 0.0),
             float(row.get("net_profit") or 0.0),
             -float(row.get("max_drawdown_pct") or 0.0),
         )
 
     @staticmethod
-    def _minimum_required_trades(request: HypothesisDiscoveryRequest, bars: pd.DataFrame) -> int:
+    def _trade_density_multiplier(strategy: HypothesisSpec | None) -> float:
+        if strategy is None:
+            return 1.0
+        if strategy.lineage == "strategy_grammar":
+            blocks = [
+                str(block.get("name", ""))
+                for block in list(strategy.parameters.get("rule_blocks") or [])
+                if isinstance(block, dict)
+            ]
+            block_count = max(1, len(blocks))
+            sparse_blocks = {
+                "liquidity_sweep",
+                "smt_divergence",
+                "order_block_rejection",
+                "breaker_block",
+                "balanced_price_range",
+                "fvg_mitigation_rejection",
+            }
+            sparse_hits = sum(1 for block in blocks if block in sparse_blocks)
+            if sparse_hits:
+                return max(0.20, 0.55 - 0.08 * sparse_hits - 0.05 * max(0, block_count - 3))
+            return max(0.35, 0.80 - 0.06 * max(0, block_count - 3))
+        sparse_lineages = {
+            "liquidity_sweep_reclaim": 0.45,
+            "failed_breakout_reversal": 0.55,
+            "volatility_spike_reversal": 0.45,
+            "opening_range_continuation_reversal": 0.50,
+            "prior_day_level_continuation": 0.55,
+            "inside_bar_expansion": 0.60,
+            "session_range_breakout": 0.55,
+            "trend_day_pullback": 0.65,
+            "trend_pullback": 0.65,
+            "regime_mean_reversion": 0.60,
+            "volatility_expansion": 0.70,
+            "time_series_breakout": 0.80,
+            "day_time_regime_filter": 0.85,
+        }
+        return sparse_lineages.get(strategy.lineage, 1.0)
+
+    @classmethod
+    def _minimum_required_trades(
+        cls,
+        request: HypothesisDiscoveryRequest,
+        bars: pd.DataFrame,
+        strategy: HypothesisSpec | None = None,
+    ) -> int:
         if request.min_trades_per_week > 0 and not bars.empty:
             times = pd.to_datetime(bars["time"], utc=True)
             trading_days = max(1, int(times.dt.normalize().nunique()))
-            return max(1, int(round((trading_days / 5.0) * request.min_trades_per_week)))
+            raw_target = (trading_days / 5.0) * request.min_trades_per_week
+            normalized_target = raw_target * cls._trade_density_multiplier(strategy)
+            return max(1, int(round(normalized_target)))
         return request.min_closed_trades
 
     def _evaluate_candidate(
@@ -344,7 +397,9 @@ class HypothesisResearchService:
         grammar_frames: dict[str, pd.DataFrame] | None,
         min_required_trades: int,
     ) -> tuple[dict[str, Any], pd.DataFrame] | None:
-        replay_request = self._replay_request(request, strategy, min_required_trades)
+        strategy_min_required_trades = self._minimum_required_trades(request, bars, strategy)
+        effective_min_required_trades = min(min_required_trades, strategy_min_required_trades)
+        replay_request = self._replay_request(request, strategy, effective_min_required_trades)
         strategy_grammar_frames = None
         if strategy.lineage == "strategy_grammar" and grammar_frames:
             strategy_grammar_frames = {
@@ -362,11 +417,11 @@ class HypothesisResearchService:
             & (signals.index < pd.Timestamp(request.date_to))
         ]
         signal_count = int((signals["signal_direction"] != 0).sum())
-        if signal_count < min_required_trades:
+        if signal_count < effective_min_required_trades:
             return None
 
         fast_metrics = run_bar_replay_fast_metrics(bars, signals, replay_request)
-        if fast_metrics["trades"] < min_required_trades:
+        if fast_metrics["trades"] < effective_min_required_trades:
             return None
         profit_factor = fast_metrics["profit_factor"]
         expected_payoff = fast_metrics["expected_payoff"]
@@ -375,12 +430,14 @@ class HypothesisResearchService:
             return None
 
         ledger, metrics = run_bar_replay(bars, signals, replay_request)
-        if metrics["trades"] < min_required_trades:
+        if metrics["trades"] < effective_min_required_trades:
             return None
         if metrics["profit_factor"] is None or metrics["profit_factor"] < fast_min_pf or metrics["expected_payoff"] is None or metrics["expected_payoff"] <= 0:
             return None
-        challenge = evaluate_challenge_grid(ledger, request.challenge)
-        return self._candidate_row(strategy, metrics, challenge), ledger
+        row = self._candidate_row(strategy, metrics)
+        row["min_required_trades"] = effective_min_required_trades
+        row["trade_density_multiplier"] = self._trade_density_multiplier(strategy)
+        return row, ledger
 
     def _evaluate_specs(
         self,
@@ -587,12 +644,12 @@ class HypothesisResearchService:
                 "generations": [],
                 "parent_min_profit_factor": request.parent_min_profit_factor,
                 "final_min_profit_factor": request.final_min_profit_factor,
-                "final_min_active_pass_rate": request.final_min_active_pass_rate,
+                "ranking": "pure_quant",
                 "market_mind_plan": market_mind_plan,
             }
 
             def compact_row(row: dict[str, Any]) -> dict[str, Any]:
-                return {key: value for key, value in row.items() if key != "challenge"}
+                return dict(row)
 
             def write_checkpoint(evaluated: int, generation_index: int | None = None) -> None:
                 compact_rows = [compact_row(row) for row in rows]
@@ -638,10 +695,10 @@ class HypothesisResearchService:
                     top_ledgers[row["strategy_id"]] = ledger
                 rows.sort(
                     key=lambda item: (
-                        item["challenge_score"],
-                        item["challenge_pass_count"],
-                        -(item["median_days_to_target"] or 999.0),
+                        item["quant_score"],
+                        item["trade_sharpe"] or 0.0,
                         item["profit_factor"] or 0.0,
+                        -item["max_drawdown_pct"],
                     ),
                     reverse=True,
                 )
@@ -814,18 +871,15 @@ class HypothesisResearchService:
 
             rows.sort(
                 key=lambda item: (
-                    item["challenge_score"],
-                    item["challenge_pass_count"],
-                    -(item["median_days_to_target"] or 999.0),
+                    item["quant_score"],
+                    item["trade_sharpe"] or 0.0,
                     item["profit_factor"] or 0.0,
+                    -item["max_drawdown_pct"],
                 ),
                 reverse=True,
             )
 
-            compact_rows = [
-                {key: value for key, value in row.items() if key != "challenge"}
-                for row in rows
-            ]
+            compact_rows = [dict(row) for row in rows]
             pd.DataFrame(compact_rows).to_csv(summary_csv, index=False)
             top_candidates = rows[: request.top_n]
             top_folder = folder / "top_ledgers"

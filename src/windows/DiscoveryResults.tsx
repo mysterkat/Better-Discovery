@@ -28,20 +28,24 @@ interface HypothesisCandidate {
   hypothesis: string;
   parameters: Record<string, unknown>;
   trades: number;
+  wins?: number;
+  losses?: number;
+  win_rate_pct?: number | null;
   net_profit: number;
   profit_factor: number | null;
+  expected_payoff?: number | null;
+  trade_sharpe?: number | null;
   max_drawdown_pct: number;
-  challenge_score: number;
-  challenge_pass_count: number;
-  challenge_pass_rate: number;
-  challenge_active_pass_rate: number;
-  challenge_prop_fail_count: number;
-  challenge_prop_fail_rate: number;
-  median_days_to_target: number | null;
-  best_days_to_target: number | null;
-  risk_fraction: number;
-  internal_daily_stop_pct: number;
-  max_trades_per_day: number;
+  positive_month_fraction?: number | null;
+  positive_quarter_fraction?: number | null;
+  positive_year_fraction?: number | null;
+  trades_per_active_day?: number | null;
+  min_required_trades?: number;
+  trade_density_multiplier?: number;
+  quant_score: number;
+  risk_fraction?: number;
+  internal_daily_stop_pct?: number;
+  max_trades_per_day?: number;
 }
 
 interface HypothesisDiscoveryResult {
@@ -57,7 +61,7 @@ interface HypothesisDiscoveryResult {
     generations?: Array<Record<string, unknown>>;
     parent_min_profit_factor?: number;
     final_min_profit_factor?: number;
-    final_min_active_pass_rate?: number;
+    ranking?: string;
     market_mind_plan?: {
       regime_id?: string;
       summary?: Record<string, unknown>;
@@ -152,7 +156,7 @@ export default function DiscoveryResults() {
   return (
     <div className="results-window">
       <div className="results-header">
-        <h1>{hypothesisResult ? "FTMO Hypothesis Results" : "Pattern Discovery Results"}</h1>
+        <h1>{hypothesisResult ? "Strategy Edge Results" : "Pattern Discovery Results"}</h1>
         {jobId && <span className="job-id-badge">{jobId.slice(0, 8)}</span>}
       </div>
 
@@ -303,10 +307,10 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
       const exported = await exportHypothesisEa({
         strategy,
         output_name: candidate.strategy_id,
-        risk_fraction: candidate.risk_fraction,
-        daily_loss_pct: candidate.internal_daily_stop_pct,
+        risk_fraction: candidate.risk_fraction ?? 0.005,
+        daily_loss_pct: candidate.internal_daily_stop_pct ?? 3.0,
         max_loss_pct: 8.0,
-        max_trades_per_day: candidate.max_trades_per_day,
+        max_trades_per_day: candidate.max_trades_per_day ?? 8,
       });
       const preferredPath = exported.preferred_mq5_path ?? exported.mq5_path;
       const folderPath = exported.mt5_experts_folder ?? preferredPath;
@@ -332,16 +336,15 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
           trades: candidate.trades,
           net_profit: candidate.net_profit,
           profit_factor: candidate.profit_factor,
+          expected_payoff: candidate.expected_payoff,
+          trade_sharpe: candidate.trade_sharpe,
+          win_rate_pct: candidate.win_rate_pct,
           max_drawdown_pct: candidate.max_drawdown_pct,
-          challenge_score: candidate.challenge_score,
-          challenge_pass_rate: candidate.challenge_pass_rate,
-          challenge_active_pass_rate: candidate.challenge_active_pass_rate,
-          challenge_prop_fail_rate: candidate.challenge_prop_fail_rate,
-          median_days_to_target: candidate.median_days_to_target,
-          best_days_to_target: candidate.best_days_to_target,
-          risk_fraction: candidate.risk_fraction,
-          internal_daily_stop_pct: candidate.internal_daily_stop_pct,
-          max_trades_per_day: candidate.max_trades_per_day,
+          quant_score: candidate.quant_score,
+          positive_month_fraction: candidate.positive_month_fraction,
+          trades_per_active_day: candidate.trades_per_active_day,
+          min_required_trades: candidate.min_required_trades,
+          trade_density_multiplier: candidate.trade_density_multiplier,
         },
         source: {
           experiment_id: result.experiment_id,
@@ -366,16 +369,15 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
     <>
       {!result.top_candidates.length && (
         <div className="alert alert-warn">
-          <strong>No hypothesis variant survived the minimum trade filter.</strong>{" "}
-          Use a longer dataset, lower the minimum trades, or add more variants.
+          <strong>No hypothesis variant survived the quant filters.</strong>{" "}
+          Use a longer dataset, lower the trade-density floor, or add more Market Mind grammar variants.
         </div>
       )}
 
       {best && (
         <div className="alert alert-success" style={{ marginBottom: 16 }}>
           <strong>Top candidate:</strong>{" "}
-          {best.strategy_id} - active pass rate {formatPct(best.challenge_active_pass_rate)}
-          {best.median_days_to_target != null && <> - median {formatNumber(best.median_days_to_target, 1)} days</>}
+          {best.strategy_id} - PF {formatNumber(best.profit_factor)} - Sharpe {formatNumber(best.trade_sharpe)}
         </div>
       )}
 
@@ -393,8 +395,9 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
         <div className="result-card"><span className="result-key">Symbol</span><span className="result-val">{result.symbol} {result.timeframe.toUpperCase()}</span></div>
         {best && (
           <>
-            <div className="result-card"><span className="result-key">Best Pass Rate</span><span className="result-val">{formatPct(best.challenge_active_pass_rate)}</span></div>
-            <div className="result-card"><span className="result-key">Prop Fail Rate</span><span className="result-val">{formatPct(best.challenge_prop_fail_rate)}</span></div>
+            <div className="result-card"><span className="result-key">Best PF</span><span className="result-val">{formatNumber(best.profit_factor)}</span></div>
+            <div className="result-card"><span className="result-key">Best Sharpe</span><span className="result-val">{formatNumber(best.trade_sharpe)}</span></div>
+            <div className="result-card"><span className="result-key">Best DD</span><span className="result-val">{formatNumber(best.max_drawdown_pct)}%</span></div>
           </>
         )}
       </div>
@@ -500,13 +503,13 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
                 <th>#</th>
                 <th>Strategy</th>
                 <th>Family</th>
-                <th className="num">Score</th>
-                <th className="num">Pass</th>
-                <th className="num">Fails</th>
-                <th className="num">Median Days</th>
-                <th className="num">Risk</th>
+                <th className="num">Quant</th>
+                <th className="num">Sharpe</th>
+                <th className="num">WR</th>
+                <th className="num">DD</th>
                 <th className="num">Trades</th>
                 <th className="num">PF</th>
+                <th className="num">Net</th>
               </tr>
             </thead>
             <tbody>
@@ -523,24 +526,25 @@ function HypothesisResults({ result }: { result: HypothesisDiscoveryResult }) {
                       </button>
                     </td>
                     <td>{titleCase(candidate.lineage)}</td>
-                    <td className="num">{formatNumber(candidate.challenge_score, 1)}</td>
-                    <td className="num">{formatPct(candidate.challenge_active_pass_rate)}</td>
-                    <td className="num">{formatPct(candidate.challenge_prop_fail_rate)}</td>
-                    <td className="num">{formatNumber(candidate.median_days_to_target, 1)}</td>
-                    <td className="num">{formatPct(candidate.risk_fraction, 2)}</td>
+                    <td className="num">{formatNumber(candidate.quant_score, 1)}</td>
+                    <td className="num">{formatNumber(candidate.trade_sharpe)}</td>
+                    <td className="num">{formatNumber(candidate.win_rate_pct, 1)}%</td>
+                    <td className="num">{formatNumber(candidate.max_drawdown_pct, 1)}%</td>
                     <td className="num">{candidate.trades}</td>
                     <td className="num">{formatNumber(candidate.profit_factor)}</td>
+                    <td className="num">{formatNumber(candidate.net_profit, 0)}</td>
                   </tr>
                   {expanded === candidate.strategy_id && (
                     <tr className="row-detail">
                       <td colSpan={10}>
                         <div className="pattern-detail-grid">
                           <div><span className="kv-key">Hypothesis</span><span>{candidate.hypothesis}</span></div>
-                          <div><span className="kv-key">Pass count</span><span>{candidate.challenge_pass_count}</span></div>
-                          <div><span className="kv-key">Prop fail count</span><span>{candidate.challenge_prop_fail_count}</span></div>
-                          <div><span className="kv-key">Best days</span><span>{formatNumber(candidate.best_days_to_target, 1)}</span></div>
-                          <div><span className="kv-key">Internal daily stop</span><span>{formatNumber(candidate.internal_daily_stop_pct, 1)}%</span></div>
-                          <div><span className="kv-key">Max trades/day</span><span>{candidate.max_trades_per_day}</span></div>
+                          <div><span className="kv-key">Wins / losses</span><span>{candidate.wins ?? "-"} / {candidate.losses ?? "-"}</span></div>
+                          <div><span className="kv-key">Expected payoff</span><span>{formatNumber(candidate.expected_payoff, 2)}</span></div>
+                          <div><span className="kv-key">Positive months</span><span>{formatPct(candidate.positive_month_fraction)}</span></div>
+                          <div><span className="kv-key">Positive quarters</span><span>{formatPct(candidate.positive_quarter_fraction)}</span></div>
+                          <div><span className="kv-key">Trades / active day</span><span>{formatNumber(candidate.trades_per_active_day, 2)}</span></div>
+                          <div><span className="kv-key">Trade floor</span><span>{candidate.min_required_trades ?? "-"} ({formatNumber(candidate.trade_density_multiplier, 2)}x)</span></div>
                           <div><span className="kv-key">Net profit</span><span>{formatNumber(candidate.net_profit, 2)}</span></div>
                           <div><span className="kv-key">Max DD</span><span>{formatNumber(candidate.max_drawdown_pct, 2)}%</span></div>
                           <div className="full-row">
